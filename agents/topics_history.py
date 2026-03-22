@@ -1,0 +1,258 @@
+"""
+Topics History — persistent journal of generated video topics.
+
+Stores used topics in  output/topics_history.json  so the Trends Analyzer
+can skip topics that have already been covered.
+
+Format:
+{
+  "topics": [
+    {
+      "topic":        "Нейтронные звёзды",
+      "video_angle":  "Топ-5 фактов о нейтронных звёздах",
+      "session_id":   "1774000000000",
+      "video_path":   "output/videos/1774.../video_1774....mp4",
+      "generated_at": "2026-03-19T17:45:00"
+    },
+    ...
+  ]
+}
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from datetime import datetime
+from pathlib import Path
+
+from loguru import logger
+
+from config import settings
+
+_HISTORY_FILE = settings.output_dir / "topics_history.json"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Internal helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _load() -> dict:
+    if _HISTORY_FILE.exists():
+        try:
+            return json.loads(_HISTORY_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"topics": []}
+
+
+def _save(data: dict) -> None:
+    _HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _HISTORY_FILE.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _normalize(text: str) -> str:
+    """Lowercase + collapse whitespace + remove punctuation for fuzzy matching."""
+    text = text.lower().strip()
+    text = re.sub(r"[^\w\s]", "", text)
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def _similarity(a: str, b: str) -> float:
+    """
+    Jaccard similarity on character trigrams between two NORMALIZED strings.
+    Returns 0.0–1.0.
+    """
+    ng_a = _ngrams(a, 3)
+    ng_b = _ngrams(b, 3)
+    if not ng_a or not ng_b:
+        return 0.0
+    return len(ng_a & ng_b) / len(ng_a | ng_b)
+
+
+def _is_duplicate(new_topic: str, existing: list[dict], threshold: float = 0.45) -> bool:
+    """
+    Return True if `new_topic` is too similar to any existing topic.
+
+    Strategy (checked in order):
+      1. Exact normalized match  → always duplicate
+      2. One string is a substring of the other  → duplicate
+      3. Trigram Jaccard ≥ threshold comparing new against
+         old *topic* and old *video_angle* independently → duplicate
+    """
+    norm_new = _normalize(new_topic)
+    words_new = set(norm_new.split())
+
+    for entry in existing:
+        norm_topic = _normalize(entry.get("topic", ""))
+        norm_angle = _normalize(entry.get("video_angle", ""))
+
+        # 1. Exact match
+        if norm_new == norm_topic or norm_new == norm_angle:
+            logger.debug(f"[TopicsHistory] Exact duplicate: {new_topic!r}")
+            return True
+
+        # 2. Substring containment (handles "О нейтронных звёздах" ⊂ topic)
+        if norm_new in norm_topic or norm_topic in norm_new:
+            logger.debug(f"[TopicsHistory] Substring duplicate: {new_topic!r} ~ {entry['topic']!r}")
+            return True
+
+        # 3. Key word overlap: if >60% of words in new are in old topic, it's a duplicate
+        if words_new and norm_topic:
+            words_old = set(norm_topic.split())
+            if len(words_new & words_old) / max(len(words_new), 1) >= 0.6:
+                logger.debug(
+                    f"[TopicsHistory] Word-overlap duplicate: "
+                    f"{new_topic!r} ~ {entry['topic']!r}"
+                )
+                return True
+
+        # 4. Trigram similarity against topic
+        sim_topic = _similarity(norm_new, norm_topic)
+        if sim_topic >= threshold:
+            logger.debug(
+                f"[TopicsHistory] Trigram duplicate "
+                f"(sim={sim_topic:.0%}): {new_topic!r} ≈ {entry['topic']!r}"
+            )
+            return True
+
+        # 5. Trigram similarity against video_angle
+        if norm_angle:
+            sim_angle = _similarity(norm_new, norm_angle)
+            if sim_angle >= threshold:
+                logger.debug(
+                    f"[TopicsHistory] Angle-duplicate "
+                    f"(sim={sim_angle:.0%}): {new_topic!r} ≈ {entry['video_angle']!r}"
+                )
+                return True
+
+    return False
+
+
+def _ngrams(text: str, n: int) -> set[str]:
+    return {text[i: i + n] for i in range(len(text) - n + 1)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public API
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_used_topics() -> list[dict]:
+    """Return the full list of previously generated topic entries."""
+    return _load().get("topics", [])
+
+
+def is_topic_used(topic: str, video_angle: str = "") -> bool:
+    """Return True if this topic (or a close variant) was already generated."""
+    existing = get_used_topics()
+    combined = f"{topic} {video_angle}".strip()
+    return _is_duplicate(combined, existing)
+
+
+def mark_topic_used(
+    topic: str,
+    session_id: str,
+    video_path: str = "",
+    video_angle: str = "",
+) -> None:
+    """
+    Record a topic as used after a successful video generation.
+
+    Args:
+        topic:       The topic string (may be the AI-written title).
+        session_id:  Pipeline session identifier.
+        video_path:  Path to the generated mp4.
+        video_angle: Optional more specific angle (from TrendsAgent).
+    """
+    data = _load()
+    entry = {
+        "topic":        topic,
+        "video_angle":  video_angle,
+        "session_id":   session_id,
+        "video_path":   video_path,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    data["topics"].append(entry)
+    _save(data)
+    logger.info(f"[TopicsHistory] Recorded: {topic!r}  (total: {len(data['topics'])})")
+
+
+def filter_unused_topics(
+    candidates: list[dict],
+    topic_key: str = "topic",
+    angle_key: str = "video_angle",
+) -> list[dict]:
+    """
+    Filter a list of topic dicts, removing those already used.
+
+    Args:
+        candidates:  List of dicts (e.g. TrendingTopic from TrendsAgent).
+        topic_key:   Dict key for the topic string.
+        angle_key:   Dict key for the video angle string.
+
+    Returns:
+        Subset of `candidates` that have NOT been generated yet.
+    """
+    existing = get_used_topics()
+    if not existing:
+        return candidates   # nothing used yet
+
+    fresh = []
+    for c in candidates:
+        combined = f"{c.get(topic_key, '')} {c.get(angle_key, '')}".strip()
+        if not _is_duplicate(combined, existing):
+            fresh.append(c)
+        else:
+            logger.info(f"[TopicsHistory] Skipping already-used topic: {c.get(topic_key)!r}")
+
+    if not fresh:
+        logger.warning(
+            "[TopicsHistory] All candidate topics already used! "
+            "Returning all candidates to avoid empty list."
+        )
+        return candidates  # safety fallback
+
+    logger.info(
+        f"[TopicsHistory] {len(fresh)}/{len(candidates)} topics are fresh "
+        f"(skipped {len(candidates) - len(fresh)} duplicates)"
+    )
+    return fresh
+
+
+def remove_topic(session_id: str) -> bool:
+    """
+    Remove a specific topic entry by session_id.
+
+    Returns True if the entry was found and removed, False otherwise.
+    """
+    data = _load()
+    before = len(data["topics"])
+    data["topics"] = [t for t in data["topics"] if t.get("session_id") != session_id]
+    after = len(data["topics"])
+    if after < before:
+        _save(data)
+        logger.info(f"[TopicsHistory] Removed session {session_id} ({before - after} entries)")
+        return True
+    logger.warning(f"[TopicsHistory] session_id {session_id!r} not found in history")
+    return False
+
+
+def print_history() -> None:
+    """Pretty-print the full topic history to the console."""
+    topics = get_used_topics()
+    if not topics:
+        print("No topics generated yet.")
+        return
+    print(f"\n{'─'*60}")
+    print(f"  Topics History ({len(topics)} entries)")
+    print(f"{'─'*60}")
+    for i, t in enumerate(topics, 1):
+        print(f"  {i:>3}. [{t.get('generated_at', '?')[:10]}] {t['topic']}")
+        if t.get("video_angle") and t["video_angle"] != t["topic"]:
+            print(f"       angle: {t['video_angle']}")
+        print(f"       session: {t.get('session_id', '?')}")
+    print(f"{'─'*60}\n")
