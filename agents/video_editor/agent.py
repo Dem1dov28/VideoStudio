@@ -88,7 +88,7 @@ async def run_video_editor_agent(
         tts_texts.append(outro_narration)
 
     logger.info(f"[VideoAgent] Synthesizing {len(tts_texts)} voiceover clips …")
-    audio_paths, _ = await synthesize_all(tts_texts, audio_dir)
+    audio_paths, _, _ = await synthesize_all(tts_texts, audio_dir)
 
     title_audio_path = (
         str(audio_paths[title_audio_idx]) if title_audio_idx is not None and title_audio_idx < len(audio_paths) else None

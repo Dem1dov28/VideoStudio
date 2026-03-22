@@ -3,6 +3,12 @@ Chain MP4 segments with FFmpeg ``xfade`` (video) + ``acrossfade`` (audio).
 
 Used when ``VIDEO_TRANSITION_ENGINE=xfade`` for Shorts-style transitions
 (slide, zoom, smooth, …). Requires ``ffmpeg`` on PATH.
+
+Enhanced with video-processing-editing skill best practices:
+- Color space normalization (BT.709)
+- Optimized encoding settings for social media
+- Proper audio crossfade with triangular curves
+- Faststart for web streaming
 """
 
 from __future__ import annotations
@@ -107,6 +113,7 @@ def merge_segments_xfade(
     cmd = ["ffmpeg", "-y"]
     for p in segment_paths:
         cmd.extend(["-i", str(p.resolve())])
+    # Platform-optimized export settings from video-processing-editing skill
     cmd.extend(
         [
             "-filter_complex",
@@ -115,16 +122,30 @@ def merge_segments_xfade(
             "[vout]",
             "-map",
             "[aout]",
+            # Video encoding: H.264 with balanced quality/speed
             "-c:v",
             "libx264",
             "-preset",
-            "fast",
+            "medium",  # Balance between speed and quality (was "fast")
             "-crf",
-            "20",
+            "18",  # High quality (was 20)
+            # Color space: BT.709 for broad compatibility
+            "-pix_fmt",
+            "yuv420p",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
+            # Audio: AAC with good quality for voice+music
             "-c:a",
             "aac",
             "-b:a",
             "192k",
+            "-ar",
+            "48000",  # Standard sample rate
+            # Faststart for web streaming
             "-movflags",
             "+faststart",
             str(output_path.resolve()),

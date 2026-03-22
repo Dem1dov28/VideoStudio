@@ -189,12 +189,14 @@ async def run_image_generator_agent(
     logger.success(f"[ImageAgent] Done - {len(enriched)} scenes ready")
 
     # ── Outro background generation (likes + subscribe) ──────────────────
+    # Structured using Image Generation Expert formula: Subject + Style + Lighting + Composition + Quality + Format
     outro_prompt = (
-        "Modern cinematic social media marketing scene: large glowing thumbs-up icon "
-        "and notification bell with a subscribe call-to-action (UI icons only, no readable text), "
-        "violet neon accents, soft bokeh lights, ultra-photorealistic, shallow depth of field, "
-        "cinematic color grading, hyper-detailed textures, vertical 9:16 portrait format, "
-        "subject centered, no words, no letters"
+        "Large glowing 3D thumbs-up icon and notification bell floating in space, "
+        "modern UI/UX design style with glassmorphism effects, "
+        "dramatic violet neon rim lighting with soft bokeh background lights, "
+        "centered composition with shallow depth of field, "
+        "ultra detailed 8K UHD, cinematic color grading, hyper-detailed textures, "
+        "vertical 9:16 portrait format, subject centered, no text, no letters, no watermark"
     )
 
     outro_bg_path: Path | None = None

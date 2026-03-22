@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     fastgen_image_timeout: int = Field(300, alias="FASTGEN_IMAGE_TIMEOUT")
     # Сколько раз повторить клик «Генерировать» при таймауте
     fastgen_max_attempts: int = Field(3, alias="FASTGEN_MAX_ATTEMPTS")
+    # Email и пароль для fast-gen.ai (для Playwright авторизации)
+    fastgen_email: str = Field("", alias="FASTGEN_EMAIL")
+    fastgen_password: str = Field("", alias="FASTGEN_PASSWORD")
 
     # ── HuggingFace (fallback, free) ──────────────────────────────────────────
     hf_token: str = Field("", alias="HF_TOKEN")
@@ -41,9 +44,13 @@ class Settings(BaseSettings):
     image_gen_strategy: str = Field("fastgen", alias="IMAGE_GEN_STRATEGY")
 
     # ── Video settings ────────────────────────────────────────────────────────
+    # Optimized for viral short-form (2025-2026):
+    # - YouTube Shorts: 55s = 3x views vs 15s (optimal: 50-60s)
+    # - Instagram Reels: 7-30s for viral, 30-90s for engagement
+    # - TikTok: 15-60s, 15-30s peak performance
     video_format: str = Field("vertical", alias="VIDEO_FORMAT")
     video_fps: int = Field(30, alias="VIDEO_FPS")
-    video_duration_per_image: float = Field(3.0, alias="VIDEO_DURATION_PER_IMAGE")
+    video_duration_per_image: float = Field(3.0, alias="VIDEO_DURATION_PER_IMAGE")  # 5 scenes × 3s = 15s base
     video_transition_duration: float = Field(0.5, alias="VIDEO_TRANSITION_DURATION")
     # moviepy = soft dissolve in Python (one encode). xfade = FFmpeg presets (N+1 encodes, needs ffmpeg on PATH).
     video_transition_engine: str = Field("moviepy", alias="VIDEO_TRANSITION_ENGINE")
@@ -58,6 +65,8 @@ class Settings(BaseSettings):
     subtitle_karaoke: bool = Field(True, alias="SUBTITLE_KARAOKE")
     # TTS provider: edge | vkcloud | elevenlabs (edge = бесплатный, без API, работает из РФ)
     tts_provider: str = Field("edge", alias="TTS_PROVIDER")
+    # Legacy TTS voice setting (for backward compatibility)
+    tts_voice: str = Field("ru-RU-SvetlanaNeural", alias="TTS_VOICE")
 
     # Edge-TTS (Microsoft, бесплатно, без ключей)
     edge_tts_voice: str = Field("ru-RU-SvetlanaNeural", alias="EDGE_TTS_VOICE")

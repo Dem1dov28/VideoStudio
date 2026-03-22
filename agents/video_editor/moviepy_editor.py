@@ -76,9 +76,18 @@ class SceneData(NamedTuple):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _color_grade(img: Image.Image) -> Image.Image:
-    img = ImageEnhance.Contrast(img).enhance(1.12)
-    img = ImageEnhance.Color(img).enhance(1.20)
-    img = ImageEnhance.Brightness(img).enhance(1.03)
+    """
+    Apply cinematic color grading optimized for social media.
+    Based on video-processing-editing best practices.
+    """
+    # Subtle contrast boost for depth (1.12 → 1.08 for more natural look)
+    img = ImageEnhance.Contrast(img).enhance(1.08)
+    # Vibrance boost without oversaturation (1.20 → 1.15)
+    img = ImageEnhance.Color(img).enhance(1.15)
+    # Slight brightness lift for mobile screens (1.03 → 1.05)
+    img = ImageEnhance.Brightness(img).enhance(1.05)
+    # Sharpness enhancement for crisp text and details
+    img = ImageEnhance.Sharpness(img).enhance(1.10)
     return img
 
 
@@ -1393,17 +1402,38 @@ def assemble_video(
         final = final.with_audio(composite_audio)
 
     # ── Export ────────────────────────────────────────────────────────────────
+    # Platform-optimized export settings from video-processing-editing skill
     output_path.parent.mkdir(parents=True, exist_ok=True)
     logger.info(f"[VideoEditor] Rendering → {output_path}")
+
+    # Determine platform-optimized settings
+    # Default: high quality for general use, optimized for social media
+    export_settings = {
+        "fps": fps,
+        "codec": "libx264",
+        "audio_codec": "aac",
+        "threads": 4,
+        "preset": "medium",  # Balance between speed and quality
+        "logger": None,
+        # Video quality settings (CRF 18 = visually lossless, 23 = good quality)
+        "bitrate": "8000k",  # 8 Mbps for 1080p social media
+        # Audio settings optimized for voice + music
+        "audio_bitrate": "192k",
+        "audio_fps": 48000,
+        # Color space for broad compatibility (BT.709 standard)
+        "ffmpeg_params": [
+            "-pix_fmt", "yuv420p",
+            "-color_primaries", "bt709",
+            "-color_trc", "bt709",
+            "-colorspace", "bt709",
+            "-movflags", "+faststart",  # Enable progressive download
+        ],
+    }
+
     try:
         final.write_videofile(
             str(output_path),
-            fps=fps,
-            codec="libx264",
-            audio_codec="aac",
-            threads=4,
-            preset="fast",
-            logger=None,
+            **export_settings
         )
     finally:
         try:

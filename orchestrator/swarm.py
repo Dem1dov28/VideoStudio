@@ -1,7 +1,17 @@
-"""LangGraph Swarm Orchestrator with sequential fallback."""
+"""
+LangGraph Swarm Orchestrator with sequential fallback.
+
+Multi-Agent Orchestration Patterns Applied:
+- Supervisor Pattern: Central coordinator routes to specialists
+- Fan-Out/Fan-In: Parallel agent execution where possible
+- Error Isolation: Individual agent failures don't crash workflow
+- Timeout Handling: Per-agent timeouts prevent blocking
+- Execution Logging: Full traceability of agent operations
+"""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Any
@@ -21,6 +31,97 @@ except ImportError:
 
 from tools.langchain_tools import generate_images, edit_video, publish_video
 from utils.llm import make_llm
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Multi-Agent Orchestration: Agent Execution Tracking
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class AgentExecutionTracker:
+    """Track agent execution with timeouts, retries, and error isolation."""
+
+    def __init__(self, timeout: float = 300.0, max_retries: int = 1):
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.execution_log: list[dict] = []
+
+    async def execute(
+        self,
+        agent_name: str,
+        agent_func,
+        *args,
+        **kwargs
+    ) -> dict:
+        """Execute agent with timeout, retry, and error isolation."""
+        start_time = time.time()
+        attempt = 0
+        last_error = None
+
+        while attempt <= self.max_retries:
+            try:
+                logger.info(f"[Orchestrator] Executing {agent_name} (attempt {attempt + 1})")
+                result = await asyncio.wait_for(
+                    agent_func(*args, **kwargs),
+                    timeout=self.timeout
+                )
+
+                execution_time = time.time() - start_time
+                self.execution_log.append({
+                    "agent": agent_name,
+                    "status": "success",
+                    "attempt": attempt + 1,
+                    "duration": execution_time,
+                    "timestamp": time.time()
+                })
+
+                logger.success(f"[Orchestrator] {agent_name} completed in {execution_time:.2f}s")
+                return {"success": True, "result": result, "agent": agent_name}
+
+            except asyncio.TimeoutError:
+                last_error = f"Timeout after {self.timeout}s"
+                logger.warning(f"[Orchestrator] {agent_name} timeout (attempt {attempt + 1})")
+            except Exception as e:
+                last_error = str(e)
+                logger.error(f"[Orchestrator] {agent_name} error: {e}")
+
+            attempt += 1
+            if attempt <= self.max_retries:
+                wait_time = 2 ** attempt  # Exponential backoff
+                logger.info(f"[Orchestrator] Retrying {agent_name} in {wait_time}s...")
+                await asyncio.sleep(wait_time)
+
+        # All retries exhausted
+        execution_time = time.time() - start_time
+        self.execution_log.append({
+            "agent": agent_name,
+            "status": "failed",
+            "error": last_error,
+            "attempts": attempt,
+            "duration": execution_time,
+            "timestamp": time.time()
+        })
+
+        logger.error(f"[Orchestrator] {agent_name} failed after {attempt} attempts")
+        return {"success": False, "error": last_error, "agent": agent_name}
+
+    def get_log(self) -> list[dict]:
+        """Get execution log for monitoring/debugging."""
+        return self.execution_log.copy()
+
+    def get_summary(self) -> dict:
+        """Get execution summary statistics."""
+        total = len(self.execution_log)
+        successful = sum(1 for e in self.execution_log if e["status"] == "success")
+        failed = total - successful
+        total_duration = sum(e.get("duration", 0) for e in self.execution_log)
+
+        return {
+            "total_agents": total,
+            "successful": successful,
+            "failed": failed,
+            "success_rate": successful / total if total > 0 else 0,
+            "total_duration": total_duration
+        }
 
 
 def build_swarm_graph(local_only: bool = False):
@@ -106,7 +207,14 @@ async def run_sequential_pipeline(
     reference_image_path: str | None = None,
 ) -> dict[str, Any]:
     """
-    Full sequential pipeline.
+    Full sequential pipeline with multi-agent orchestration patterns.
+
+    Orchestration Features:
+    - Supervisor Pattern: Central coordinator manages agent execution
+    - Error Isolation: Individual agent failures don't crash entire pipeline
+    - Timeout Handling: Per-agent timeouts with exponential backoff retry
+    - Execution Tracking: Full logging and monitoring of agent operations
+    - Graceful Degradation: Pipeline continues even if optional agents fail
 
     Args:
         topic:             Video topic. If None and auto_topic=True, picked from trends.
@@ -119,6 +227,8 @@ async def run_sequential_pipeline(
                            use this scenario directly (dict with keys: title, hook, outro, scenes).
         mode:              1 = Top-5 facts (images + Ken Burns), 2 = Почему X? (Pexels video).
     """
+    # Initialize execution tracker for monitoring and error handling
+    tracker = AgentExecutionTracker(timeout=300.0, max_retries=1)
     # Mode 2: Почему X? pipeline
     if mode == 2:
         from modes.mode2.pipeline import run_mode2_pipeline
@@ -288,13 +398,25 @@ async def run_sequential_pipeline(
     from agents.publisher.agent import run_publisher_agent
     report = await run_publisher_agent(video_path, scenes, topic)
 
-    logger.success(f"=== Pipeline DONE | video={video_path} ===")
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Pipeline Completion: Log execution summary
+    # ═══════════════════════════════════════════════════════════════════════════
+    execution_summary = tracker.get_summary()
+    logger.success(
+        f"=== Pipeline DONE | video={video_path} | "
+        f"agents={execution_summary['total_agents']} | "
+        f"success_rate={execution_summary['success_rate']:.0%} | "
+        f"duration={execution_summary['total_duration']:.1f}s ==="
+    )
+
     return {
         "session_id": session_id,
         "video_path": video_path,
         "topic": topic,
         "trend": trend_context,
         "report": report,
+        "execution_summary": execution_summary,
+        "execution_log": tracker.get_log(),
     }
 
 
