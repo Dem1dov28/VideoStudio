@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     openrouter_model: str = Field("openai/gpt-4o-mini", alias="OPENROUTER_MODEL")
     # Отдельная модель для сценариев «Почему X?» — для достоверности фактов лучше gpt-4o
     openrouter_scenario_model: str | None = Field(None, alias="OPENROUTER_SCENARIO_MODEL")
+    # Vision-модель для Mode 3 (анализ фото дома) — gpt-4o-mini / gpt-4o
+    openrouter_vision_model: str = Field("openai/gpt-4o-mini", alias="OPENROUTER_VISION_MODEL")
 
     # ── fast-gen.ai ───────────────────────────────────────────────────────────
     # API ключ с сайта fast-gen.ai (вход через /generator → поле "Введите API ключ")
@@ -25,11 +27,15 @@ class Settings(BaseSettings):
     fastgen_headless: bool = Field(False, alias="FASTGEN_HEADLESS")
     # Сколько секунд ждать появления нового превью на fast-gen.ai (иногда >2 мин)
     fastgen_image_timeout: int = Field(300, alias="FASTGEN_IMAGE_TIMEOUT")
-    # Сколько раз повторить клик «Генерировать» при таймауте
-    fastgen_max_attempts: int = Field(3, alias="FASTGEN_MAX_ATTEMPTS")
+    # Сколько раз повторить при таймауте/ошибке (изображения и видео)
+    fastgen_max_attempts: int = Field(5, alias="FASTGEN_MAX_ATTEMPTS")
     # Email и пароль для fast-gen.ai (для Playwright авторизации)
     fastgen_email: str = Field("", alias="FASTGEN_EMAIL")
     fastgen_password: str = Field("", alias="FASTGEN_PASSWORD")
+    # Сколько видео генерировать параллельно (каждое в своём окне браузера). 10 = все сразу.
+    fastgen_video_parallel_workers: int = Field(10, alias="FASTGEN_VIDEO_PARALLEL_WORKERS")
+    # Сколько изображений генерировать параллельно (Mode 1 и др.). 5 = до 5 одновременно.
+    fastgen_image_parallel_workers: int = Field(5, alias="FASTGEN_IMAGE_PARALLEL_WORKERS")
 
     # ── HuggingFace (fallback, free) ──────────────────────────────────────────
     hf_token: str = Field("", alias="HF_TOKEN")
@@ -73,6 +79,8 @@ class Settings(BaseSettings):
     edge_tts_voice_en: str = Field("en-US-JennyNeural", alias="EDGE_TTS_VOICE_EN")
     edge_tts_rate: str = Field("+10%", alias="EDGE_TTS_RATE")
     edge_tts_rate_en: str = Field("-10%", alias="EDGE_TTS_RATE_EN")  # медленнее для английского
+    # Mode 5 (история для сна): голос значительно медленнее для расслабления
+    mode5_tts_rate: str = Field("-35%", alias="MODE5_TTS_RATE")
     edge_tts_pitch: str = Field("+0Hz", alias="EDGE_TTS_PITCH")
     # Fade-in (s) в начале TTS — сглаживает «рваное» начало, особенно для EN
     tts_audio_fade_in: float = Field(0.12, alias="TTS_AUDIO_FADE_IN")
@@ -199,7 +207,8 @@ class Settings(BaseSettings):
 
     @property
     def videos_dir(self) -> Path:
-        return self.output_dir / "videos"
+        """Папка для готовых видео в корне проекта."""
+        return self.project_root / "MyVideo"
 
     @property
     def uploads_dir(self) -> Path:
@@ -210,9 +219,20 @@ class Settings(BaseSettings):
     # "1080" = 1080×1920 (full HD, slow Python rendering)
     video_quality: str = Field("720", alias="VIDEO_QUALITY")
 
+    # Mode 5: горизонтальное видео (история для сна)
+    mode5_video_format: str = Field("horizontal", alias="MODE5_VIDEO_FORMAT")
+
     @property
     def video_resolution(self) -> tuple[int, int]:
         if self.video_format == "vertical":
+            return (720, 1280) if self.video_quality == "720" else (1080, 1920)
+        return (1280, 720) if self.video_quality == "720" else (1920, 1080)
+
+    @property
+    def mode5_video_resolution(self) -> tuple[int, int]:
+        """Resolution for Mode 5 (horizontal by default)."""
+        fmt = getattr(self, "mode5_video_format", "horizontal").strip().lower()
+        if fmt == "vertical":
             return (720, 1280) if self.video_quality == "720" else (1080, 1920)
         return (1280, 720) if self.video_quality == "720" else (1920, 1080)
 

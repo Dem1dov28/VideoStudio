@@ -135,6 +135,31 @@ return {
 === Pipeline DONE | video=/path/to/video.mp4 | agents=5 | success_rate=100% | duration=234.5s ===
 ```
 
+### 2. Mode 5 Multi-Agent Scenario (`modes/mode5/multi_agent_scenario.py`)
+
+#### LangGraph StateGraph Workflow
+
+**Agents:**
+1. **StructureAgent** — создаёт структуру: 8–15 глав, каждая с 2–6 подглавами, JSON-схема
+2. **ContentAgent** — пишет текст по каждой подглаве отдельным LLM-запросом с контекстом:
+   - полная структура outline
+   - текст предыдущих подглав (до 20 сегментов)
+   - плавные переходы, историческая точность
+3. **CoherenceAgent** — проверяет связь между главами, выявляет противоречия и разрывы
+
+**LangChain/LangGraph:**
+- `StateGraph(TypedDict)` — состояние: topic, outline, segments, subchapter_index, flat_subchapters
+- `add_node` / `add_edge` / `add_conditional_edges` — граф: structure → content → (loop) → coherence → END
+- `ChatPromptTemplate` + `StrOutputParser` — LCEL-цепочки для каждого агента
+- Маршрутизация: после content — если подглав ещё есть → content, иначе → coherence
+
+**Pipeline Control:**
+- Checkpoint после каждой подглавы — pause/cancel во время долгой генерации
+
+**Fallback:** при ошибке мультиагента — переход на однократный LLM-запрос (legacy режим)
+
+---
+
 ### Future Enhancements
 - [ ] Fan-out/fan-in for parallel agent execution
 - [ ] Agent Teams for complex cross-cutting features
@@ -146,7 +171,17 @@ return {
 
 ## Files Modified
 
-- `orchestrator/swarm.py` — Added AgentExecutionTracker, enhanced error handling, execution logging
+- `orchestrator/swarm.py` — Re-export layer (delegates to dispatcher, tracker, swarm_graph)
+- `orchestrator/tracker.py` — Extracted AgentExecutionTracker
+- `orchestrator/swarm_graph.py` — Extracted LangGraph Swarm
+- `orchestrator/dispatcher.py` — Mode routing (run_pipeline)
+- `orchestrator/pipelines/mode1.py` — Mode 1 sequential pipeline
+- `orchestrator/multi_agent/base.py` — Shared checkpoint helper
+- `modes/mode5/multi_agent_scenario.py` — LangGraph (Structure → Content → Coherence)
+- `modes/mode5/scenario_writer.py` — Integrated multi-agent
+- `agents/scenario_writer/` — types.py, multi_agent/ (OutlineAgent → SceneAgent)
+- `agents/fact_miner/` — Split: types, prompts, propose, fetch, extract, agent
+- `agents/content_generator/types.py` — EnrichedScene
 
 ---
 

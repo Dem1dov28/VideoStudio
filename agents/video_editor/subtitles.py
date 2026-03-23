@@ -107,6 +107,50 @@ def _word_style_plain(word: str) -> tuple[tuple[int, int, int, int], int]:
     return dt.SUB_WHITE, 5
 
 
+def align_script_to_whisper(
+    script_words: list[str],
+    word_timestamps: list[tuple[float, float]],
+) -> list[tuple[float, float]] | None:
+    """
+    Сопоставляет слова скрипта с таймкодами Whisper (разная длина).
+    Возвращает (start, end) для каждого слова скрипта.
+    """
+    if not word_timestamps or not script_words:
+        return None
+    K, N = len(word_timestamps), len(script_words)
+    if K == N:
+        return list(word_timestamps)
+    t0, t1 = word_timestamps[0][0], word_timestamps[-1][1]
+    total = t1 - t0
+    if total <= 0:
+        return None
+    result: list[tuple[float, float]] = []
+    if N <= K:
+        # Скрипт короче — объединяем интервалы Whisper
+        ratio = K / N
+        for i in range(N):
+            j0 = min(int(i * ratio), K - 1)
+            j1 = min(int((i + 1) * ratio), K)
+            start = word_timestamps[j0][0]
+            end = word_timestamps[j1 - 1][1] if j1 > j0 else word_timestamps[j0][1]
+            result.append((start, end))
+    else:
+        # Скрипт длиннее — распределяем по интервалам
+        ratio = N / K
+        for i in range(N):
+            k = min(int(i / ratio), K - 1)
+            seg_s, seg_e = word_timestamps[k]
+            seg_len = seg_e - seg_s
+            sub_count = max(1, int((k + 1) * ratio) - int(k * ratio))
+            sub_i = i - int(k * ratio)
+            sub_i = min(sub_i, sub_count - 1)
+            step = seg_len / sub_count
+            start = seg_s + sub_i * step
+            end = seg_s + (sub_i + 1) * step
+            result.append((start, end))
+    return result
+
+
 def _active_word_index(
     t: float,
     duration: float,
@@ -219,17 +263,25 @@ def render_subtitle_overlay(
     font_size = max(56, min(92, width // 9))
     font = load_ui_font(font_size, bold=True)
 
-    if tts_words and word_timestamps and len(tts_words) == len(word_timestamps):
-        words = [w.strip() or " " for w in tts_words]  # 1:1 с word_timestamps
-    else:
-        raw = text.strip().split()
-        words = _merge_dashes_with_words(raw)
-        words = _merge_short_with_adjacent(words)
+    raw = text.strip().split()
+    words = _merge_dashes_with_words(raw)
+    words = _merge_short_with_adjacent(words)
+    # Синхронизация: таймкоды Whisper (озвучка FastGen) → слова скрипта
+    ts_for_display: list[tuple[float, float]] | None = None
+    if word_timestamps and tts_words and len(tts_words) == len(word_timestamps):
+        if len(words) == len(word_timestamps):
+            ts_for_display = word_timestamps
+        else:
+            ts_for_display = align_script_to_whisper(words, word_timestamps)
 
     if not words:
         return np.array(img)
 
-    active_index = _active_word_index(t, duration, words, word_timestamps)
+    # Не показывать субтитры до начала первой фразы (озвучка FastGen может начинаться с паузы)
+    if ts_for_display and len(ts_for_display) > 0 and t < ts_for_display[0][0]:
+        return np.array(img)
+
+    active_index = _active_word_index(t, duration, words, ts_for_display)
 
     max_text_w = int(width * dt.SUBTITLE_MAX_WIDTH_FRAC) - 2 * dt.SUBTITLE_PAD_X
 

@@ -50,3 +50,6 @@ pytrends>=4.9.0
 transformers>=4.40.0
 torch>=2.0.0
 scipy>=1.11.0
+
+# ─── Mode 4: sync subtitles with FastGen voice ───────────────────────────────────
+faster-whisper>=1.0.0

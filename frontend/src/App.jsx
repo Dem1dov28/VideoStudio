@@ -3,11 +3,11 @@ import { lazy, Suspense } from 'react';
 import { LanguageProvider } from './context/LanguageContext';
 import { ModeProvider } from './context/ModeContext';
 import Layout from './components/Layout';
+import History from './pages/History';
+import Topics from './pages/Topics';
 
 const Generate = lazy(() => import('./pages/Generate'));
 const Progress = lazy(() => import('./pages/Progress'));
-const History  = lazy(() => import('./pages/History'));
-const Topics   = lazy(() => import('./pages/Topics'));
 
 function Spinner() {
   return (

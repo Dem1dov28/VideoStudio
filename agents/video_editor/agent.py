@@ -41,6 +41,7 @@ async def run_video_editor_agent(
     audio_dir = settings.audio_dir / session_id
     video_dir = settings.videos_dir / session_id
     video_dir.mkdir(parents=True, exist_ok=True)
+    settings.videos_dir.mkdir(parents=True, exist_ok=True)
 
     narration_texts = [
         s.get("narration_text") or s["subtitle_text"]
@@ -110,7 +111,7 @@ async def run_video_editor_agent(
         for i, scene in enumerate(scenes)
     ]
 
-    output_path = video_dir / f"video_{session_id}.mp4"
+    output_path = settings.videos_dir / f"video_{session_id}.mp4"
     loop = asyncio.get_event_loop()
 
     import functools

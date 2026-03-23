@@ -1,19 +1,65 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useReducer } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { RiVideoLine, RiLoader4Line, RiCloseLine } from 'react-icons/ri';
 import { api } from '../services/api';
 import VideoCard from '../components/VideoCard';
 
+const initialState = { videos: [], loading: true, error: false };
+
+function historyReducer(state, action) {
+  switch (action.type) {
+    case 'loading':
+      return { ...initialState, loading: true };
+    case 'success':
+      return { videos: action.videos || [], loading: false, error: false };
+    case 'error':
+      return { ...state, loading: false, error: action.isNetwork };
+    default:
+      return state;
+  }
+}
+
 export default function History() {
-  const [videos, setVideos]   = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [state, dispatch] = useReducer(historyReducer, initialState);
   const [selected, setSelected] = useState(null);
+  const { videos, loading, networkError } = {
+    videos: state.videos,
+    loading: state.loading,
+    networkError: state.error,
+  };
+
+  const load = () => {
+    dispatch({ type: 'loading' });
+    fetch('/api/videos')
+      .then(r => {
+        if (!r.ok) throw new Error(`${r.status}`);
+        return r.json();
+      })
+      .then(r => {
+        const list = Array.isArray(r?.videos) ? r.videos : [];
+        dispatch({ type: 'success', videos: list });
+      })
+      .catch(e => {
+        dispatch({ type: 'error', isNetwork: /failed to fetch|connection/i.test(e?.message || '') });
+      });
+  };
 
   useEffect(() => {
-    api.listVideos()
-      .then(r => setVideos(r.videos || []))
-      .catch(console.error)
-      .finally(() => setLoading(false));
+    let cancelled = false;
+    dispatch({ type: 'loading' });
+    fetch('/api/videos')
+      .then(r => {
+        if (!r.ok) throw new Error(`${r.status}`);
+        return r.json();
+      })
+      .then(r => {
+        const list = Array.isArray(r?.videos) ? r.videos : [];
+        if (!cancelled) dispatch({ type: 'success', videos: list });
+      })
+      .catch(e => {
+        if (!cancelled) dispatch({ type: 'error', isNetwork: /failed to fetch|connection/i.test(e?.message || '') });
+      });
+    return () => { cancelled = true; };
   }, []);
 
   return (
@@ -30,10 +76,16 @@ export default function History() {
         </p>
       </motion.div>
 
-      {loading ? (
+      {loading && !networkError ? (
         <div className="flex items-center justify-center py-24 text-[#71717a] gap-2">
           <RiLoader4Line className="animate-spin text-xl" />
           <span className="text-sm">Загружаем...</span>
+        </div>
+      ) : networkError ? (
+        <div className="text-center py-24 px-4">
+          <p className="text-amber-400 text-sm mb-2">Сервер недоступен</p>
+          <p className="text-[#52525b] text-xs mb-4">Запустите: python server.py</p>
+          <button onClick={load} className="btn-secondary text-sm">Повторить</button>
         </div>
       ) : videos.length === 0 ? (
         <motion.div
@@ -46,22 +98,13 @@ export default function History() {
           <p className="text-[#52525b] text-xs mt-1">Создайте первое на главной странице.</p>
         </motion.div>
       ) : (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4"
-        >
-          {videos.map((v, i) => (
-            <motion.div
-              key={v.session_id}
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: i * 0.04 }}
-            >
-              <VideoCard video={v} onClick={setSelected} />
-            </motion.div>
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+          {videos.filter(v => v?.session_id).map((v, i) => (
+            <div key={`${v.session_id}-${v.filename || i}`}>
+              <VideoCard video={v} onClick={setSelected} onDelete={(sid) => dispatch({ type: 'success', videos: videos.filter(x => x.session_id !== sid) })} />
+            </div>
           ))}
-        </motion.div>
+        </div>
       )}
 
       {/* Video modal */}
@@ -82,8 +125,8 @@ export default function History() {
               onClick={e => e.stopPropagation()}
             >
               <div className="flex items-center justify-between p-4 border-b border-[#27272f]">
-                <span className="text-sm font-semibold text-white">
-                  #{selected.session_id.slice(-8)}
+                <span className="text-sm font-semibold text-white truncate pr-4">
+                  {selected?.title || `#${(selected?.session_id || '').slice(-8)}`}
                 </span>
                 <button
                   onClick={() => setSelected(null)}
@@ -99,12 +142,12 @@ export default function History() {
                   className="rounded-lg max-h-[70vh]"
                   style={{ maxWidth: '280px' }}
                 >
-                  <source src={selected.url} type="video/mp4" />
+                  <source src={api.videoUrl(selected?.session_id, selected?.filename)} type="video/mp4" />
                 </video>
               </div>
               <div className="p-4 flex gap-2">
                 <a
-                  href={selected.url}
+                  href={api.videoUrl(selected?.session_id, selected?.filename)}
                   download
                   className="btn-primary flex items-center gap-2 text-sm flex-1 justify-center"
                 >

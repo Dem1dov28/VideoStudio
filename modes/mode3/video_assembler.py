@@ -1,0 +1,167 @@
+"""
+Mode 3 Video Assembler — сборка 3 видео без субтитров и озвучки.
+
+Таймлапс заложен в контент каждого фрагмента (промпты). Расслабляющая музыка, crossfade.
+Кроп снизу (как в mode2/mode4) — скрывает watermark Veo.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+from loguru import logger
+from moviepy import AudioFileClip, VideoClip, VideoFileClip
+from moviepy import afx, concatenate_audioclips, concatenate_videoclips
+from PIL import Image
+
+from config import settings
+
+
+def _resize_fill(img: Image.Image, w: int, h: int, bottom_crop: float = 0.0) -> Image.Image:
+    """Scale to fill target; optionally crop bottom fraction first (to hide Veo watermark)."""
+    if bottom_crop > 0 and bottom_crop < 1:
+        keep_h = int(img.height * (1.0 - bottom_crop))
+        if keep_h > 0:
+            img = img.crop((0, 0, img.width, keep_h))
+    ratio = max(w / img.width, h / img.height)
+    nw, nh = int(img.width * ratio), int(img.height * ratio)
+    img = img.resize((nw, nh), Image.LANCZOS)
+    left, top = (nw - w) // 2, (nh - h) // 2
+    return img.crop((left, top, left + w, top + h))
+
+
+def _clip_with_bottom_crop(vc: VideoFileClip, target_w: int, target_h: int, fps: int, bottom_crop: float) -> VideoClip:
+    """Wrap VideoFileClip with bottom crop + resize to fill (hide Veo watermark)."""
+    vid_dur = float(vc.duration)
+
+    def make_frame(t: float) -> np.ndarray:
+        t_vid = min(t, vid_dur - 0.001) if vid_dur > 0 else 0
+        frame = vc.get_frame(t_vid)
+        if frame is None or frame.size == 0:
+            return np.zeros((target_h, target_w, 3), dtype=np.uint8)
+        img = Image.fromarray(frame)
+        img = _resize_fill(img, target_w, target_h, bottom_crop=bottom_crop)
+        return np.array(img)
+
+    return VideoClip(make_frame, duration=vid_dur).with_fps(fps)
+
+
+
+def _make_crossfade(clip_a, clip_b, duration: float, fps: int):
+    """Плавный переход между клипами."""
+    dur_a = float(clip_a.duration)
+    dur_b = float(clip_b.duration)
+    half = duration / 2.0
+
+    def smoothstep(x):
+        x = max(0.0, min(1.0, x))
+        return x * x * (3.0 - 2.0 * x)
+
+    def make_frame(t):
+        raw = t / duration if duration > 0 else 1.0
+        alpha = smoothstep(raw)
+        half_a = min(half, dur_a)
+        half_b = min(half, dur_b)
+        ta = max(0.0, dur_a - half_a) + raw * half_a
+        tb = raw * half_b
+        fa = clip_a.get_frame(ta).astype("float32")
+        fb = clip_b.get_frame(tb).astype("float32")
+        return ((1.0 - alpha) * fa + alpha * fb).astype("uint8")
+
+    return VideoClip(make_frame, duration=duration).with_fps(fps)
+
+
+def _assemble_with_crossfades(clips: list, T: float, fps: int):
+    if len(clips) == 1 or T <= 0:
+        return concatenate_videoclips(clips, method="compose")
+    half = T / 2.0
+    parts = []
+    for i, clip in enumerate(clips):
+        is_first, is_last = i == 0, i == len(clips) - 1
+        t_start = 0.0 if is_first else half
+        t_end = clip.duration if is_last else max(clip.duration - half, half + 0.1)
+        t_end = min(t_end, clip.duration - 0.01)
+        trimmed = clip.subclipped(t_start, t_end)
+        parts.append(trimmed)
+        if not is_last:
+            parts.append(_make_crossfade(trimmed, clips[i + 1], T, fps))
+    return concatenate_videoclips(parts, method="compose")
+
+
+def assemble_mode3_video(
+    video_paths: list[Path | str],
+    output_path: Path,
+) -> Path:
+    """
+    Собирает финальное видео из 5 клипов + расслабляющая музыка.
+    Без субтитров, без озвучки.
+    """
+    target_w, target_h = settings.video_resolution
+    fps = settings.video_fps
+    T = max(0.0, settings.video_transition_duration)
+    bottom_crop = max(0, min(0.2, getattr(settings, "video_bottom_crop", 0.05)))
+
+    clips = []
+    for p in video_paths:
+        path = Path(p)
+        if not path.exists():
+            logger.warning(f"[Mode3 Assembler] Skip missing: {path}")
+            continue
+        vc = VideoFileClip(str(path))
+        vc = vc.without_audio()
+        # Crop bottom (hide Veo watermark) + resize to fill — как в mode2/mode4
+        clip = _clip_with_bottom_crop(vc, target_w, target_h, fps, bottom_crop)
+        clips.append(clip)
+
+    if not clips:
+        raise ValueError("No valid video clips to assemble")
+
+    logger.info(f"[Mode3 Assembler] Assembling {len(clips)} clips (T={T}s)")
+    final = _assemble_with_crossfades(clips, T, fps)
+
+    # Расслабляющая музыка
+    from agents.video_editor.moviepy_editor import _pick_background_music
+    music_path = _pick_background_music(topic="relaxing ambient calm", duration=final.duration)
+    if music_path:
+        try:
+            bg = AudioFileClip(str(music_path))
+            if bg.duration < final.duration:
+                loops = int(final.duration / bg.duration) + 1
+                bg = concatenate_audioclips([bg] * loops)
+            bg = bg.subclipped(0, min(final.duration, bg.duration) - 0.01)
+            music_vol = 0.35  # громче, т.к. нет голоса
+            fade_dur = min(3.0, final.duration * 0.12)
+            bg = bg.with_effects([
+                afx.MultiplyVolume(music_vol),
+                afx.AudioFadeIn(fade_dur),
+                afx.AudioFadeOut(fade_dur),
+            ])
+            composite = bg.subclipped(0, min(final.duration, bg.duration) - 0.05)
+            final = final.with_audio(composite)
+            logger.info(f"[Mode3 Assembler] Added music: {music_path.name}")
+        except Exception as e:
+            logger.warning(f"[Mode3 Assembler] Music failed: {e}")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    logger.info(f"[Mode3 Assembler] Rendering → {output_path}")
+    try:
+        final.write_videofile(
+            str(output_path),
+            fps=fps,
+            codec="libx264",
+            audio_codec="aac",
+            threads=4,
+            preset="fast",
+            logger=None,
+        )
+    finally:
+        final.close()
+        for c in clips:
+            try:
+                c.close()
+            except Exception:
+                pass
+
+    logger.success(f"[Mode3 Assembler] Done → {output_path}")
+    return output_path

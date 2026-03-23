@@ -14,8 +14,8 @@ from typing import Any
 
 from loguru import logger
 
-from agents.video_editor.tts import synthesize_all
 from config import settings
+from agents.video_editor.tts import synthesize_all
 from modes.mode2.scenario_writer import write_mode2_scenario
 from modes.mode2.video_assembler import Mode2SceneData, assemble_mode2_video
 from modes.mode2.video_generator import download_videos_for_scenes
@@ -32,6 +32,7 @@ async def run_mode2_pipeline(
     custom_title_bg_path: str | None = None,
     custom_outro_bg_path: str | None = None,
     reference_image_path: str | None = None,
+    control: dict | None = None,
 ) -> dict[str, Any]:
     """
     Run the «Почему X?» video pipeline.
@@ -61,8 +62,11 @@ async def run_mode2_pipeline(
     videos_dir.mkdir(parents=True, exist_ok=True)
     clips_dir.mkdir(parents=True, exist_ok=True)
 
+    from pipeline_control import checkpoint
+
     logger.info(f"=== Mode 2 Pipeline | topic={topic!r} | session={session_id} ===")
 
+    await checkpoint(control)
     # ── Step 1: Scenario (prebuilt or generate) ──────────────────────────────
     if prebuilt_scenario:
         scenario = prebuilt_scenario
@@ -76,6 +80,7 @@ async def run_mode2_pipeline(
     title = scenario.get("title") or topic
     hook = scenario.get("hook", "")
 
+    await checkpoint(control)
     # ── Step 2: Video Generator (fast-gen.ai or Pexels) ───────────────────────
     logger.info("Step 2/4 - Mode2 Video Generator")
     scenes_with_video = await download_videos_for_scenes(
@@ -101,6 +106,7 @@ async def run_mode2_pipeline(
         tts_texts, audio_dir, language=language, with_word_timestamps=True
     )
 
+    await checkpoint(control)
     # ── Step 4: Video Assembler ──────────────────────────────────────────────
     logger.info("Step 4/4 - Mode2 Video Assembler")
     scene_data = [
@@ -122,7 +128,7 @@ async def run_mode2_pipeline(
         for i, s in enumerate(scenes_with_video)
     ]
 
-    output_path = videos_dir / f"video_{session_id}.mp4"
+    output_path = settings.videos_dir / f"video_{session_id}.mp4"
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(
         None,

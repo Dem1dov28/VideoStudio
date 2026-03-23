@@ -1,41 +1,24 @@
 """
-Scenario Writer Agent.
+Scenario Writer Agent — Mode 1 (Top-5 facts).
 
 Takes a topic (+ optional TrendingTopic context) and writes a high-quality
-video script optimized for short-form vertical video (TikTok/Reels/Shorts).
+video script. Supports single-LLM and multi-agent (OutlineAgent → SceneAgent) flows.
 
-Output per scene:
-  - narration_text  : full spoken sentence(s) for TTS voiceover
-  - subtitle_text   : ultra-short on-screen caption (3-5 words)
-  - image_prompt    : detailed English prompt for image generation (portrait 9:16)
+Output per scene: narration_text, subtitle_text, image_prompt.
 """
 
 from __future__ import annotations
 
 import json
-from typing import TypedDict
+import re
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from agents.scenario_writer.types import Scenario, ScenarioScene
 from agents.video_editor.tts import sanitize_voiceover_text
 from loguru import logger
 
 from utils.llm import make_llm
-
-
-class ScenarioScene(TypedDict):
-    index: int
-    narration_text: str   # Spoken aloud by TTS — full, engaging sentences
-    subtitle_text: str    # Shown on screen — 3-5 words max
-    image_prompt: str     # Detailed English prompt for image generation (image-gen-expert formula)
-    video_prompt: str     # Video motion description for future image-to-video (optional)
-
-
-class Scenario(TypedDict):
-    title: str
-    hook: str             # Opening line — first thing the viewer hears
-    scenes: list[ScenarioScene]
-    outro: str            # Closing CTA — subscribe, like, follow
 
 
 # ── System prompt ─────────────────────────────────────────────────────────────
@@ -331,18 +314,33 @@ async def run_scenario_writer_agent(
     num_scenes: int = 5,
     trend_context: dict | None = None,
     fact_context: dict | None = None,
+    use_multi_agent: bool = True,
 ) -> Scenario:
     """
     Main entry point for the Scenario Writer Agent.
 
     Args:
-        topic:          Video topic.
-        num_scenes:     Number of scenes.
-        trend_context:  Optional TrendingTopic dict from TrendsAgent.
+        topic:           Video topic.
+        num_scenes:      Number of scenes.
+        trend_context:   Optional TrendingTopic dict from TrendsAgent.
+        fact_context:   Optional per-scene evidence from FactMiner.
+        use_multi_agent: If True, use OutlineAgent → SceneAgent workflow.
 
     Returns:
         Full Scenario with hook, scenes, outro.
     """
+    if use_multi_agent:
+        try:
+            from agents.scenario_writer.multi_agent import run_multi_agent_scenario
+            return await run_multi_agent_scenario(
+                topic=topic,
+                num_scenes=num_scenes,
+                trend_context=trend_context,
+                fact_context=fact_context,
+            )
+        except Exception as e:
+            logger.warning(f"[ScenarioWriter] Multi-agent fallback to single LLM: {e}")
+
     kwargs: dict = {}
     if trend_context:
         kwargs["video_angle"] = trend_context.get("video_angle")

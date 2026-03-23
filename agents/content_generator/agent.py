@@ -6,7 +6,6 @@ import asyncio
 import base64
 import time
 from pathlib import Path
-from typing import TypedDict
 
 import httpx
 from loguru import logger
@@ -14,17 +13,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config import settings
 from agents.content_generator.prompt_builder import Scene, build_scenes
-
-
-class EnrichedScene(TypedDict):
-    index: int
-    image_prompt: str
-    subtitle_text: str    # Short on-screen caption (3-5 words)
-    narration_text: str   # Full spoken text for TTS (can be empty = falls back to subtitle)
-    image_path: str
-    # Optional extra background for the final outro card.
-    # We attach it to the first scene element to keep return type unchanged.
-    outro_bg_image_path: str | None
+from agents.content_generator.types import EnrichedScene
 
 
 # ── fast-gen.ai ────────────────────────────────────────────────────────────────

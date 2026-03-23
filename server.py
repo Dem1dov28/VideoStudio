@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pydantic import BaseModel
@@ -22,6 +22,8 @@ from config import settings
 
 # ── Session store ─────────────────────────────────────────────────────────────
 _sessions: dict[str, dict] = {}
+
+# Statuses: running | paused | done | error | cancelled
 
 
 # ── Log capture per session ───────────────────────────────────────────────────
@@ -50,6 +52,7 @@ async def _run_pipeline_task(
     session_id: str,
     req: "StartRequest",
     queue: asyncio.Queue,
+    control: dict,
 ) -> None:
     session = _sessions[session_id]
     sink_id: int | None = None
@@ -77,17 +80,31 @@ async def _run_pipeline_task(
             custom_title_bg_path=req.custom_title_bg_path,
             custom_outro_bg_path=req.custom_outro_bg_path,
             reference_image_path=req.reference_image_path,
+            mode3_start_image_path=req.mode3_start_image_path,
+            mode3_end_image_path=req.mode3_end_image_path,
+            mode3_topic=req.mode3_topic,
+            mode4_quote=getattr(req, "mode4_quote", None),
+            mode4_person_name=getattr(req, "mode4_person_name", None),
+            mode4_photo_path=getattr(req, "mode4_photo_path", None),
+            control=control,
         )
 
+        if control.get("cancelled"):
+            return
         session["status"] = "done"
         session["result"] = {
             "video_path": result.get("video_path"),
+            "video_paths": result.get("video_paths"),
             "topic": result.get("topic"),
             "trend": result.get("trend"),
             "session_id": session_id,
         }
         await queue.put({"type": "done", **session["result"]})
 
+    except asyncio.CancelledError:
+        session["status"] = "cancelled"
+        control["cancelled"] = True
+        await queue.put({"type": "error", "error": "Генерация отменена"})
     except Exception as exc:
         import traceback
         tb = traceback.format_exc()
@@ -104,9 +121,40 @@ async def _run_pipeline_task(
 
 app = FastAPI(title="Content Factory API", version="1.0")
 
+
+@app.middleware("http")
+async def _log_requests(request, call_next):
+    """Логирование API: каждый запрос + ошибки."""
+    t0 = time.perf_counter()
+    path = request.url.path
+    method = request.method
+    origin = request.headers.get("origin", "none")
+    try:
+        response = await call_next(request)
+        elapsed = (time.perf_counter() - t0) * 1000
+        status = response.status_code
+        if path.startswith("/api/"):
+            if status >= 400:
+                logger.warning(f"[API] {method} {path} → {status} ({elapsed:.0f}ms)")
+            else:
+                logger.info(f"[API] {method} {path} → {status} ({elapsed:.0f}ms)")
+        return response
+    except Exception as e:
+        elapsed = (time.perf_counter() - t0) * 1000
+        logger.error(f"[API] {method} {path} FAILED {elapsed:.0f}ms: {e}")
+        raise
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:8000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -137,6 +185,14 @@ class StartRequest(BaseModel):
     custom_title_bg_path: str | None = None
     custom_outro_bg_path: str | None = None
     reference_image_path: str | None = None  # image-to-video: passed to fast-gen for scene generation
+    # Mode 3: восстановление старых домов
+    mode3_start_image_path: str | None = None  # дом ДО реставрации (если загружает пользователь)
+    mode3_end_image_path: str | None = None   # дом ПОСЛЕ (целевой вид)
+    mode3_topic: str | None = None            # или текстовое описание — AI сгенерирует оба изображения
+    # Mode 4: цитата + фото личности
+    mode4_quote: str | None = None
+    mode4_person_name: str | None = None
+    mode4_photo_path: str | None = None
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -165,11 +221,31 @@ async def upload_image(file: UploadFile = File(...)):
 
 @app.post("/api/pipeline/start")
 async def start_pipeline(req: StartRequest):
-    if not req.topic and not req.auto_topic:
+    if req.mode == 3:
+        has_images = bool(req.mode3_start_image_path and req.mode3_end_image_path)
+        has_topic = bool(req.mode3_topic and str(req.mode3_topic).strip())
+        if not has_images and not has_topic:
+            raise HTTPException(
+                400,
+                "Mode 3: загрузите 2 фото (дом ДО и ПОСЛЕ) или опишите дом текстом для автогенерации"
+            )
+    elif req.mode == 4:
+        if not getattr(req, "mode4_quote", "") or not getattr(req, "mode4_person_name", "") or not getattr(req, "mode4_photo_path", ""):
+            raise HTTPException(
+                400,
+                "Mode 4: введите имя личности, цитату и загрузите фото"
+            )
+    elif req.mode == 5:
+        if not req.topic or not req.topic.strip():
+            raise HTTPException(400, "Mode 5: введите тему для длинного видео")
+    elif not req.topic and not req.auto_topic:
         raise HTTPException(400, "Provide 'topic' or set 'auto_topic: true'")
 
     session_id = str(int(time.time() * 1000))
     queue: asyncio.Queue = asyncio.Queue()
+    pause_event = asyncio.Event()
+    pause_event.set()  # running by default
+    control = {"pause_event": pause_event, "cancelled": False}
 
     _sessions[session_id] = {
         "status": "running",
@@ -177,9 +253,14 @@ async def start_pipeline(req: StartRequest):
         "result": None,
         "error": None,
         "started_at": time.time(),
+        "control": control,
+        "topic": req.topic or getattr(req, "mode3_topic", "") or getattr(req, "mode4_quote", "")[:80] or "",
+        "mode": req.mode,
+        "request": req.model_dump(),  # для перезапуска с теми же параметрами
     }
 
-    asyncio.create_task(_run_pipeline_task(session_id, req, queue))
+    task = asyncio.create_task(_run_pipeline_task(session_id, req, queue, control))
+    _sessions[session_id]["task"] = task
     return {"session_id": session_id}
 
 
@@ -218,33 +299,279 @@ async def get_status(session_id: str):
         "status": session["status"],
         "result": session.get("result"),
         "error": session.get("error"),
+        "topic": session.get("topic", ""),
+        "mode": session.get("mode", 1),
     }
+
+
+@app.get("/api/pipeline/sessions")
+async def list_pipeline_sessions():
+    """Список активных сессий (running, paused) — для показа в UI."""
+    active = [
+        {
+            "session_id": sid,
+            "status": s["status"],
+            "topic": s.get("topic", "") or f"#{sid[-8:]}",
+            "mode": s.get("mode", 1),
+            "started_at": s.get("started_at"),
+        }
+        for sid, s in _sessions.items()
+        if s["status"] in ("running", "paused")
+    ]
+    logger.info(f"[API /pipeline/sessions] returning {len(active)} active")
+    return {"sessions": sorted(active, key=lambda x: x.get("started_at") or 0, reverse=True)}
+
+
+@app.post("/api/pipeline/{session_id}/pause")
+async def pause_pipeline(session_id: str):
+    session = _sessions.get(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    if session["status"] != "running":
+        raise HTTPException(400, f"Cannot pause: status is {session['status']}")
+    control = session.get("control", {})
+    pause_event = control.get("pause_event")
+    if pause_event:
+        pause_event.clear()
+    session["status"] = "paused"
+    return {"status": "paused", "session_id": session_id}
+
+
+@app.post("/api/pipeline/{session_id}/resume")
+async def resume_pipeline(session_id: str):
+    session = _sessions.get(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    if session["status"] != "paused":
+        raise HTTPException(400, f"Cannot resume: status is {session['status']}")
+    control = session.get("control", {})
+    pause_event = control.get("pause_event")
+    if pause_event:
+        pause_event.set()
+    session["status"] = "running"
+    return {"status": "running", "session_id": session_id}
+
+
+@app.post("/api/pipeline/{session_id}/cancel")
+async def cancel_pipeline(session_id: str):
+    session = _sessions.get(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    if session["status"] in ("done", "error", "cancelled"):
+        raise HTTPException(400, f"Pipeline already finished: {session['status']}")
+    control = session.get("control", {})
+    control["cancelled"] = True
+    task = session.get("task")
+    if task and not task.done():
+        task.cancel()
+    session["status"] = "cancelled"
+    return {"status": "cancelled", "session_id": session_id}
+
+
+@app.post("/api/pipeline/{session_id}/restart")
+async def restart_pipeline(session_id: str):
+    """Перезапуск генерации с теми же параметрами. Создаёт новую сессию и сбрасывает результат предыдущей."""
+    session = _sessions.get(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    req_data = session.get("request")
+    if not req_data:
+        raise HTTPException(400, "Перезапуск недоступен: параметры этой сессии не сохранены (старая версия)")
+
+    import shutil
+
+    # Сбросить выходные файлы предыдущей сессии
+    videos_dir = settings.videos_dir
+    flat_path = videos_dir / f"video_{session_id}.mp4"
+    if flat_path.exists():
+        flat_path.unlink()
+        logger.info(f"[Restart] Removed {flat_path}")
+    session_dir = videos_dir / session_id
+    if session_dir.exists():
+        shutil.rmtree(session_dir)
+        logger.info(f"[Restart] Removed session dir {session_dir}")
+
+    # Новая сессия с теми же параметрами
+    req = StartRequest(**req_data)
+    new_sid = str(int(time.time() * 1000))
+    queue: asyncio.Queue = asyncio.Queue()
+    pause_event = asyncio.Event()
+    pause_event.set()
+    control = {"pause_event": pause_event, "cancelled": False}
+
+    _sessions[new_sid] = {
+        "status": "running",
+        "queue": queue,
+        "result": None,
+        "error": None,
+        "started_at": time.time(),
+        "control": control,
+        "topic": req.topic or getattr(req, "mode3_topic", "") or getattr(req, "mode4_quote", "")[:80] or "",
+        "mode": req.mode,
+        "request": req_data,
+    }
+
+    task = asyncio.create_task(_run_pipeline_task(new_sid, req, queue, control))
+    _sessions[new_sid]["task"] = task
+
+    logger.info(f"[Restart] Restarted session {session_id} → {new_sid}")
+    return {"session_id": new_sid, "previous_session_id": session_id}
+
+
+def _get_video_metadata() -> list[dict]:
+    """Список видео: плоская папка video_*.mp4 и legacy session/*.mp4."""
+    videos_dir = settings.videos_dir
+    topics_by_session: dict[str, str] = {}
+    try:
+        from agents.topics_history import get_used_topics
+        for t in get_used_topics():
+            sid = t.get("session_id")
+            if sid:
+                topics_by_session[sid] = t.get("topic") or t.get("video_angle") or f"Видео #{sid[-8:]}"
+    except Exception:
+        pass
+
+    videos = []
+    seen = set()
+
+    # 1) Плоская папка: video_{session_id}.mp4
+    if videos_dir.exists():
+        for mp4 in sorted(videos_dir.glob("video_*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True):
+            try:
+                sid = mp4.stem.replace("video_", "")
+                if sid in seen:
+                    continue
+                seen.add(sid)
+                stat = mp4.stat()
+                videos.append({
+                    "session_id": sid,
+                    "filename": mp4.name,
+                    "title": topics_by_session.get(sid) or f"Видео #{sid[-8:]}",
+                    "size_mb": round(stat.st_size / 1024 / 1024, 1),
+                    "created_at": stat.st_mtime,
+                    "url": f"/api/video/{sid}/{mp4.name}",
+                    "thumbnail_url": f"/api/video/{sid}/thumbnail",
+                })
+            except Exception:
+                pass
+
+        # 2) Legacy: session_id/video_*.mp4 (или video_ru.mp4, video_en.mp4 — Mode 4 bilingual)
+        for session_dir in videos_dir.iterdir():
+            if not session_dir.is_dir() or session_dir.name.startswith("_"):
+                continue
+            for mp4 in session_dir.glob("*.mp4"):
+                sid = session_dir.name
+                key = (sid, mp4.name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                # Для video_ru.mp4 / video_en.mp4 — уточнённый title
+                stem = mp4.stem
+                base = topics_by_session.get(sid) or f"Цитата #{sid[-8:]}"
+                if stem == "video_ru":
+                    title = f"{base} (RU)"
+                elif stem == "video_en":
+                    title = f"{base} (EN)"
+                else:
+                    title = topics_by_session.get(sid) or f"Видео #{sid[-8:]}"
+                stat = mp4.stat()
+                videos.append({
+                    "session_id": sid,
+                    "filename": mp4.name,
+                    "title": title,
+                    "size_mb": round(stat.st_size / 1024 / 1024, 1),
+                    "created_at": stat.st_mtime,
+                    "url": f"/api/video/{sid}/{mp4.name}",
+                    "thumbnail_url": f"/api/video/{sid}/thumbnail",
+                })
+
+    videos.sort(key=lambda v: v["created_at"], reverse=True)
+    return videos
 
 
 @app.get("/api/videos")
 async def list_videos():
+    data = _get_video_metadata()
+    logger.info(f"[API /videos] returning {len(data)} videos")
+    return {"videos": data}
+
+
+@app.delete("/api/videos/{session_id}")
+async def delete_video(session_id: str):
+    """Удалить видео с диска и из истории."""
+    import shutil
+
+    removed = False
     videos_dir = settings.videos_dir
-    videos = []
-    if videos_dir.exists():
-        for session_dir in sorted(
-            videos_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True
-        ):
-            for mp4 in session_dir.glob("*.mp4"):
-                stat = mp4.stat()
-                videos.append({
-                    "session_id": session_dir.name,
-                    "filename": mp4.name,
-                    "size_mb": round(stat.st_size / 1024 / 1024, 1),
-                    "created_at": stat.st_mtime,
-                    "url": f"/api/video/{session_dir.name}/{mp4.name}",
-                })
-    return {"videos": videos}
+
+    # Удалить плоский файл
+    flat_path = videos_dir / f"video_{session_id}.mp4"
+    if flat_path.exists():
+        flat_path.unlink()
+        removed = True
+
+    # Удалить legacy папку session_id (видео + клипы)
+    session_dir = videos_dir / session_id
+    if session_dir.exists():
+        shutil.rmtree(session_dir)
+        removed = True
+
+    if not removed:
+        raise HTTPException(404, "Video not found")
+
+    from agents.topics_history import remove_topic
+    remove_topic(session_id)
+    return {"deleted": True}
+
+
+def _resolve_video_path(session_id: str, filename: str) -> Path | None:
+    """Resolve path: flat video_{sid}.mp4 или legacy session_id/filename."""
+    videos_dir = settings.videos_dir
+    flat_path = videos_dir / f"video_{session_id}.mp4"
+    if flat_path.exists():
+        return flat_path
+    legacy_path = videos_dir / session_id / filename
+    if legacy_path.exists():
+        return legacy_path
+    return None
+
+
+@app.get("/api/video/{session_id}/thumbnail")
+async def serve_video_thumbnail(session_id: str):
+    """Первый кадр видео как JPEG (аватарка)."""
+    videos_dir = settings.videos_dir
+    flat_path = videos_dir / f"video_{session_id}.mp4"
+    legacy = videos_dir / session_id
+    path = None
+    if flat_path.exists():
+        path = flat_path
+    elif legacy.is_dir():
+        for mp4 in legacy.glob("*.mp4"):
+            path = mp4
+            break
+    if not path or not path.exists():
+        raise HTTPException(404, "Video not found")
+    try:
+        from moviepy import VideoFileClip
+        vc = VideoFileClip(str(path))
+        frame = vc.get_frame(0)
+        vc.close()
+        import io
+        from PIL import Image
+        img = Image.fromarray(frame)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        buf.seek(0)
+        return Response(content=buf.getvalue(), media_type="image/jpeg")
+    except Exception as e:
+        logger.warning(f"Thumbnail failed: {e}")
+        raise HTTPException(500, "Could not generate thumbnail")
 
 
 @app.get("/api/video/{session_id}/{filename}")
 async def serve_video(session_id: str, filename: str):
-    path = settings.videos_dir / session_id / filename
-    if not path.exists():
+    path = _resolve_video_path(session_id, filename)
+    if not path:
         raise HTTPException(404, "Video not found")
     return FileResponse(str(path), media_type="video/mp4")
 
@@ -302,9 +629,41 @@ async def generate_scenario(req: ScenarioRequest):
 
 @app.get("/api/topics/history")
 async def topics_history():
-    """Return list of already-generated topics."""
+    """
+    Список всех видео из всех режимов с названиями.
+    Объединяет: реальные видео из MyVideo + данные из topics_history.
+    """
+    from datetime import datetime
     from agents.topics_history import get_used_topics
-    return {"topics": get_used_topics()}
+    topics_by_sid: dict[str, dict] = {}
+    for t in get_used_topics():
+        sid = t.get("session_id")
+        if sid:
+            topics_by_sid[sid] = dict(t)
+
+    result = []
+    videos = _get_video_metadata()
+    logger.info(f"[API /topics/history] building from {len(videos)} videos")
+    for v in videos:
+        sid = v["session_id"]
+        title = v["title"]
+        created = v.get("created_at")
+        gen_at = None
+        if created:
+            try:
+                gen_at = datetime.fromtimestamp(created).isoformat(timespec="seconds")
+            except Exception:
+                pass
+
+        entry = topics_by_sid.get(sid) or {}
+        result.append({
+            "session_id": sid,
+            "topic": entry.get("topic") or title,
+            "video_angle": entry.get("video_angle") or "",
+            "generated_at": entry.get("generated_at") or gen_at or "",
+        })
+    logger.info(f"[API /topics/history] returning {len(result)} topics")
+    return {"topics": result}
 
 
 @app.delete("/api/topics/history")
@@ -318,11 +677,18 @@ async def clear_topics_history():
 
 @app.delete("/api/topics/history/{session_id}")
 async def remove_topic_from_history(session_id: str):
-    """Remove a single topic entry by session_id."""
+    """Удалить запись из журнала тем и видеофайл с диска."""
+    import shutil
     from agents.topics_history import remove_topic
-    found = remove_topic(session_id)
-    if not found:
-        raise HTTPException(404, f"Session {session_id!r} not found in history")
+    remove_topic(session_id)
+    # Удаляем и видеофайл, чтобы элемент исчез из списка
+    videos_dir = settings.videos_dir
+    flat_path = videos_dir / f"video_{session_id}.mp4"
+    if flat_path.exists():
+        flat_path.unlink()
+    session_dir = videos_dir / session_id
+    if session_dir.exists():
+        shutil.rmtree(session_dir)
     return {"removed": True, "session_id": session_id}
 
 
@@ -377,19 +743,54 @@ async def health():
     return {"status": "ok", "version": "1.0"}
 
 
+@app.get("/api/debug/diag")
+async def debug_diag():
+    """Диагностика: что возвращают API, порядок маршрутов."""
+    videos = _get_video_metadata()
+    try:
+        from agents.topics_history import get_used_topics
+        topics = list(get_used_topics())
+    except Exception:
+        topics = []
+    return {
+        "api_ok": True,
+        "content_type": "application/json",
+        "videos_count": len(videos),
+        "videos_sample": videos[:2] if videos else [],
+        "topics_count": len(topics),
+        "videos_dir": str(settings.videos_dir),
+        "videos_dir_exists": settings.videos_dir.exists(),
+    }
+
+
+@app.post("/api/log/client-error")
+async def log_client_error(data: dict):
+    """Фронтенд шлёт сюда ошибки (Failed to fetch и т.д.) — видно в логах сервера."""
+    msg = data.get("message", str(data))
+    url = data.get("url", "")
+    logger.warning(f"[CLIENT ERROR] {msg} | url={url}")
+    return {}
+
+
 # ── Serve built React frontend ─────────────────────────────────────────────────
 
 _dist = Path(__file__).parent / "frontend" / "dist"
 
 if _dist.exists():
     app.mount("/assets", StaticFiles(directory=str(_dist / "assets")), name="assets")
+    logger.info(f"[Server] Frontend: {_dist} (SPA + /api/*)")
 
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
+        if full_path.startswith("api/") or full_path == "api":
+            logger.error(f"[ROUTING BUG] /api/ запрос попал в SPA! path={full_path!r}")
+            raise HTTPException(status_code=404, detail="API route not found - routing misconfigured")
         return FileResponse(str(_dist / "index.html"))
 
 
 if __name__ == "__main__":
-    import uvicorn
-    # reload=False prevents file-change restarts from killing running pipelines
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=False)
+    import multiprocessing as _mp
+    # На Windows spawn дочерний Process (mode4 assembler) перезапускает этот скрипт — не запускать uvicorn во вторичном процессе
+    if _mp.current_process().name == "MainProcess":
+        import uvicorn
+        uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=False)

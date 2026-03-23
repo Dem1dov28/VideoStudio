@@ -9,7 +9,9 @@ import { api } from '../services/api';
 
 function formatDate(iso) {
   if (!iso) return '—';
-  return new Date(iso).toLocaleDateString('ru-RU', {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleDateString('ru-RU', {
     day: 'numeric', month: 'short', year: 'numeric',
     hour: '2-digit', minute: '2-digit',
   });
@@ -91,7 +93,7 @@ function TopicRow({ topic, index, total, onRemoved, onRegenerate }) {
       {/* Content */}
       <div className="flex-1 min-w-0">
         <div className="text-sm font-semibold text-white leading-snug">
-          {topic.topic}
+          {topic?.topic ?? '—'}
         </div>
         {topic.video_angle && topic.video_angle !== topic.topic && (
           <div className="text-xs text-[#71717a] mt-0.5 truncate">
@@ -173,15 +175,44 @@ export default function Topics() {
   const [cleared, setCleared]   = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
 
+  const [networkError, setNetworkError] = useState(false);
+
   const load = () => {
     setLoading(true);
-    api.getTopicsHistory()
-      .then(r => setTopics((r.topics || []).slice().reverse()))
-      .catch(console.error)
-      .finally(() => setLoading(false));
+    setNetworkError(false);
+    fetch('/api/topics/history')
+      .then(r => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); })
+      .then(r => {
+        const list = Array.isArray(r?.topics) ? r.topics : [];
+        setTopics(list.slice().reverse());
+        setLoading(false);
+      })
+      .catch(e => {
+        console.error('[Topics]', e);
+        setLoading(false);
+        setNetworkError(/failed to fetch|connection/i.test(e?.message || ''));
+      });
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/topics/history')
+      .then(r => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); })
+      .then(r => {
+        if (!cancelled && Array.isArray(r?.topics)) {
+          setTopics(r.topics.slice().reverse());
+        }
+        if (!cancelled) setLoading(false);
+      })
+      .catch(e => {
+        if (!cancelled) {
+          console.error('[Topics]', e);
+          setLoading(false);
+          setNetworkError(/failed to fetch|connection/i.test(e?.message || ''));
+        }
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   function handleRemoved(sid) {
     setTopics(prev => prev.filter(t => t.session_id !== sid));
@@ -263,10 +294,16 @@ export default function Topics() {
       </motion.div>
 
       {/* Content */}
-      {loading ? (
+      {loading && !networkError ? (
         <div className="flex items-center justify-center py-24 text-[#71717a] gap-2">
           <RiLoader4Line className="animate-spin text-xl" />
           <span className="text-sm">Загружаем...</span>
+        </div>
+      ) : networkError ? (
+        <div className="text-center py-24 px-4">
+          <p className="text-amber-400 text-sm mb-2">Сервер недоступен</p>
+          <p className="text-[#52525b] text-xs mb-4">Запустите: python server.py</p>
+          <button onClick={load} className="btn-secondary text-sm">Повторить</button>
         </div>
       ) : topics.length === 0 ? (
         <motion.div

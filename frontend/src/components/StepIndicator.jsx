@@ -17,11 +17,12 @@ function detectStep(logs) {
   const joined = logs.map(l => l.text).join('\n');
 
   // Done
-  if (joined.includes('LOCAL ONLY mode') || joined.includes('Pipeline DONE')) return STEPS.length - 1;
-  // Video assembly
+  if (joined.includes('LOCAL ONLY mode') || joined.includes('Pipeline DONE') || joined.includes('Mode 3 Pipeline DONE') || joined.includes('Mode 5 Pipeline DONE')) return STEPS.length - 1;
+  // Video assembly (Mode 2 + Mode 3)
   if (
     joined.includes('Video Editor Agent') ||
     joined.includes('Assembling') ||
+    joined.includes('Mode3 Assembler') ||
     joined.includes('Rendering →') ||
     joined.includes('assemble_video')
   ) return 5;
@@ -49,8 +50,11 @@ function detectStep(logs) {
   if (
     joined.includes('ScenarioWriter') ||
     joined.includes('Scenario Writer Agent') ||
-    joined.includes('Scenario ready')
+    joined.includes('Scenario ready') ||
+    joined.includes('Mode5 Scenario Writer')
   ) return 1;
+  // Mode 3: prompt agent
+  if (joined.includes('Mode3 Prompt') || joined.includes('Mode 3 Pipeline')) return 1;
   // Fact miner
   if (
     joined.includes('Fact Miner Agent') ||

@@ -412,10 +412,12 @@ async def synthesize_all(
     language: str = "ru",
     *,
     with_word_timestamps: bool = False,
+    rate: str | None = None,
 ) -> tuple[list[Path], list[list[tuple[float, float]] | None], list[list[str]]]:
     """
     Synthesize all texts in parallel.
     Returns (paths, timestamps, tts_words_list). tts_words_list[i] — слова из TTS для синхронизации.
+    rate: override TTS speed (e.g. "-35%" for sleep stories).
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     voice = _voice_for_language(language)
@@ -424,6 +426,7 @@ async def synthesize_all(
             text,
             output_dir / f"voice_{i:03d}.mp3",
             voice=voice,
+            rate=rate,
             with_word_timestamps=with_word_timestamps,
             language=language,
         )

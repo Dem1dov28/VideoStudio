@@ -1,8 +1,8 @@
-import { NavLink, useLocation } from 'react-router-dom';
-import { RiVideoAddLine, RiHistoryLine, RiSparklingLine, RiBookmarkLine } from 'react-icons/ri';
+import { useEffect, useState } from 'react';
+import { NavLink, useLocation, useNavigate } from 'react-router-dom';
+import { RiVideoAddLine, RiHistoryLine, RiSparklingLine, RiBookmarkLine, RiLoader4Line } from 'react-icons/ri';
 import { motion } from 'framer-motion';
-import { useLanguage } from '../context/LanguageContext';
-import { useMode } from '../context/ModeContext';
+import { api } from '../services/api';
 
 const NAV = [
   { to: '/',        icon: RiVideoAddLine,  label: 'Создать' },
@@ -10,10 +10,25 @@ const NAV = [
   { to: '/topics',  icon: RiBookmarkLine,  label: 'Темы' },
 ];
 
+const MODE_LABELS = { 1: '5 фактов', 2: 'Почему X?', 3: 'Реставрация', 4: 'Цитата' };
+
 export default function Layout({ children }) {
-  const { mode, setMode } = useMode();
-  const { lang, setLang } = useLanguage();
   const { pathname } = useLocation();
+  const navigate = useNavigate();
+  const [activeSessions, setActiveSessions] = useState([]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const fetchActive = () => {
+      api.listPipelineSessions()
+        .then(r => { if (mounted) setActiveSessions(r.sessions || []); })
+        .catch(() => {}); // Failed to fetch — сервер перезапущен/недоступен
+    };
+    fetchActive();
+    const id = setInterval(fetchActive, 8000);  // 8 сек — меньше нагрузка
+    return () => { mounted = false; clearInterval(id); };
+  }, []);
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -30,67 +45,31 @@ export default function Layout({ children }) {
           </div>
         </div>
 
-        {/* Mode switcher — между логотипом и навигацией */}
-        <div className="px-4 py-3 border-b border-[#27272f]">
-          <div className="text-[10px] font-semibold text-[#52525b] uppercase tracking-wider mb-2">
-            Режим
+        {/* Active sessions */}
+        {activeSessions.length > 0 && (
+          <div className="px-4 py-3 border-b border-[#27272f]">
+            <div className="text-[10px] font-semibold text-[#52525b] uppercase tracking-wider mb-2">
+              В работе ({activeSessions.length})
+            </div>
+            <div className="space-y-1">
+              {activeSessions.map(s => (
+                <button
+                  key={s.session_id}
+                  onClick={() => navigate(`/run/${s.session_id}`)}
+                  className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left text-xs bg-brand-600/10 border border-brand-600/20 hover:border-brand-600/40 transition-colors"
+                >
+                  <RiLoader4Line className="flex-shrink-0 animate-spin text-brand-400 text-sm" />
+                  <span className="truncate flex-1 text-[#e4e4f0]">
+                    {s.topic || `#${s.session_id?.slice(-8)}`}
+                  </span>
+                  <span className="text-[10px] text-[#71717a] flex-shrink-0">
+                    {MODE_LABELS[s.mode] || s.mode}
+                  </span>
+                </button>
+              ))}
+            </div>
           </div>
-          <div className="flex gap-2">
-            <button
-              onClick={() => setMode(1)}
-              title="Топ-5 фактов — AI генерирует картинки"
-              className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-all ${
-                mode === 1
-                  ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
-                  : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
-              }`}
-            >
-              5 фактов
-            </button>
-            <button
-              onClick={() => setMode(2)}
-              title="Почему X? — AI генерирует видео"
-              className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-all ${
-                mode === 2
-                  ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
-                  : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
-              }`}
-            >
-              Почему X?
-            </button>
-          </div>
-        </div>
-
-        {/* Language */}
-        <div className="px-4 py-3 border-b border-[#27272f]">
-          <div className="text-[10px] font-semibold text-[#52525b] uppercase tracking-wider mb-2">
-            Язык
-          </div>
-          <div className="flex gap-2">
-            <button
-              onClick={() => setLang('ru')}
-              title="Русский"
-              className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-all ${
-                lang === 'ru'
-                  ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
-                  : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
-              }`}
-            >
-              RU
-            </button>
-            <button
-              onClick={() => setLang('en')}
-              title="English"
-              className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-all ${
-                lang === 'en'
-                  ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
-                  : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
-              }`}
-            >
-              EN
-            </button>
-          </div>
-        </div>
+        )}
 
         {/* Nav */}
         <nav className="flex-1 px-3 py-4 space-y-1">
@@ -125,11 +104,10 @@ export default function Layout({ children }) {
       {/* Main */}
       <main className="flex-1 overflow-y-auto bg-[#09090b]">
         <motion.div
-          key={pathname}
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.2 }}
-          className="h-full"
+          className="h-full min-h-0"
         >
           {children}
         </motion.div>

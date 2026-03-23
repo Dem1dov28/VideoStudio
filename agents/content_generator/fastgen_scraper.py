@@ -50,11 +50,15 @@ _GENERATE_SELECTORS = [
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 async def _screenshot(page: Page, name: str) -> None:
+    """Save debug screenshot. Silently skips if page/browser is closed."""
     if not settings.fastgen_headless:
-        SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
-        path = SCREENSHOT_DIR / f"{name}_{int(time.time())}.png"
-        await page.screenshot(path=str(path), full_page=False)
-        logger.debug(f"Screenshot: {path}")
+        try:
+            SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+            path = SCREENSHOT_DIR / f"{name}_{int(time.time())}.png"
+            await page.screenshot(path=str(path), full_page=False)
+            logger.debug(f"Screenshot: {path}")
+        except Exception as e:
+            logger.debug(f"Screenshot skipped ({name}): {e}")
 
 
 async def _find_first(page: Page, selectors: list[str], timeout: int = 5000):
@@ -142,11 +146,29 @@ async def _collect_video_srcs(page: Page) -> set[str]:
 
 
 # Тексты на странице, указывающие на ошибку генерации видео (перегенерируем сразу)
+# Важно: не использовать "error"/"ошибка" — они слишком общие и дают ложные срабатывания
 _VIDEO_ERROR_KEYWORDS = [
-    "audio filtered", "content policy", "blocked", "rejected",
-    "content filtered", "политика контента", "заблокирован", "отклонен",
-    "error", "ошибка", "failed", "не удалось", "невозможно",
-    "try again", "попробуйте снова", "попробуйте другой",
+    "audio filtered",
+    "content policy",
+    "content filtered",
+    "blocked",
+    "rejected",
+    "политика контента",
+    "заблокирован",
+    "отклонен",
+    "generation failed",
+    "video failed",
+    "не удалось сгенерировать",
+    "невозможно создать",
+    "try again",
+    "попробуйте снова",
+    "попробуйте другой",
+    "error generating",
+    "ошибка генерации",
+    "something went wrong",
+    "что-то пошло не так",
+    "failed to generate",
+    "unable to generate",
 ]
 
 
@@ -176,7 +198,7 @@ async def _wait_for_new_video(
     last_log = time.monotonic()
     last_error_check = time.monotonic()
     elapsed = 0
-    ERROR_CHECK_INTERVAL = 20  # проверка на ошибки раз в 20 секунд
+    ERROR_CHECK_INTERVAL = 10  # проверка на ошибки раз в 10 секунд
     while time.monotonic() < deadline:
         current = await _collect_video_srcs(page)
         new = current - before
@@ -184,7 +206,7 @@ async def _wait_for_new_video(
             logger.success(f"[FastGen] Video ready after ~{int(elapsed)}s")
             return list(new)
 
-        # Раз в 20 секунд — проверка на сообщения об ошибке (раньше перегенерируем)
+        # Раз в 10 секунд — проверка на сообщения об ошибке (раньше перегенерируем)
         if time.monotonic() - last_error_check >= ERROR_CHECK_INTERVAL:
             err = await _check_video_page_errors(page)
             if err:
@@ -257,6 +279,25 @@ async def _upload_reference_image(page: Page, image_path: Path) -> bool:
         except Exception:
             continue
     logger.warning("[FastGen] Could not find image upload UI — proceeding without reference image")
+    return False
+
+
+async def _clear_reference_image(page: Page) -> bool:
+    """Try to remove uploaded reference image (for switching from img2img to text2img)."""
+    for sel in [
+        "button[aria-label*='remove' i]", "button[aria-label*='удалить' i]",
+        "[data-testid*='remove']", "button:has-text('×')", "button:has-text('Remove')",
+        "button:has-text('Удалить')", "img[alt*='ref'] + button",
+    ]:
+        try:
+            btn = page.locator(sel).first
+            await btn.wait_for(state="visible", timeout=800)
+            await btn.click()
+            await asyncio.sleep(0.5)
+            logger.debug("[FastGen] Cleared reference image")
+            return True
+        except Exception:
+            continue
     return False
 
 
@@ -463,17 +504,32 @@ class FastGenScraper:
 
         logger.warning("[FastGen Video] Could not set 9:16 — using default aspect ratio")
 
-    async def generate(self, prompt: str, output_dir: Path) -> list[Path]:
+    async def generate(
+        self,
+        prompt: str,
+        output_dir: Path,
+        index: int | None = None,
+        reference_image_path: Path | None = None,
+    ) -> list[Path]:
+        """Generate image. If reference_image_path provided, uses img2img (reference + prompt)."""
         page = self._page
         assert page is not None, "Call start() first"
 
-        logger.info(f"[FastGen] Generating image for prompt: {prompt[:80]}...")
+        mode = "img2img" if reference_image_path and reference_image_path.exists() else "text2img"
+        logger.info(f"[FastGen] Generating image ({mode}) for prompt: {prompt[:80]}...")
         if not self._authenticated:
             await self._authenticate()
 
         await self._activate_image_tab()
         await self._select_model()
         await self._select_aspect_ratio()
+
+        if reference_image_path and reference_image_path.exists():
+            await _upload_reference_image(page, Path(reference_image_path))
+            await asyncio.sleep(1)
+        else:
+            await _clear_reference_image(page)
+
         await _screenshot(page, "03_ready")
 
         # Find prompt input (use cached selector if available)
@@ -558,8 +614,9 @@ class FastGenScraper:
         # Download images — handle both blob: and http: URLs
         output_dir.mkdir(parents=True, exist_ok=True)
         saved: list[Path] = []
+        base_suffix = str(index) if index is not None else "0"
         for src in new_srcs[:1]:
-            dest = output_dir / f"frame_{int(time.time())}_{len(saved)}.jpg"
+            dest = output_dir / f"frame_{int(time.time())}_{base_suffix}.jpg"
             try:
                 if src.startswith("blob:"):
                     # Extract blob content via JS
@@ -672,10 +729,12 @@ class FastGenScraper:
             except (TimeoutError, VideoGenerationError) as e:
                 err_type = "error" if isinstance(e, VideoGenerationError) else "timeout"
                 await _screenshot(page, f"{err_type}_video{'_retry' + str(attempt) if attempt > 0 else ''}")
-                logger.warning(f"[FastGen] Video attempt failed: {e}")
+                logger.warning(f"[FastGen] Video attempt {attempt + 1}/{max_attempts} failed: {e}")
                 if attempt + 1 >= max_attempts:
+                    logger.error(f"[FastGen] All {max_attempts} attempts exhausted, giving up")
                     return None
-                await asyncio.sleep(2)
+                logger.info(f"[FastGen] Retrying generation ({attempt + 2}/{max_attempts}) ...")
+                await asyncio.sleep(3)  # пауза перед повтором
                 continue
 
             if not new_srcs:
@@ -720,9 +779,30 @@ class FastGenScraper:
 
 # ── Sync entry point (runs in a separate thread) ───────────────────────────────
 
+def _run_single_image_sync(index: int, prompt: str, output_dir: Path) -> Path | None:
+    """Генерация одного изображения в отдельном браузере. Для параллельного запуска."""
+    import asyncio as _asyncio
+
+    async def _inner() -> Path | None:
+        scraper = FastGenScraper()
+        await scraper.start()
+        try:
+            paths = await scraper.generate(prompt, output_dir, index=index)
+            return paths[0] if paths else None
+        finally:
+            await scraper.stop()
+
+    loop = _asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(_inner())
+    finally:
+        loop.close()
+
+
 def _run_fastgen_sync(prompts: list[str], output_dir: Path) -> list[Path]:
     """
     Synchronous wrapper that runs Playwright in its own event loop.
+    Sequential generation — используется для одиночных промптов (outro и т.п.).
 
     Must be called via asyncio.to_thread() to avoid conflicts with uvicorn's
     event loop (Playwright's subprocess management can deadlock when sharing
@@ -752,29 +832,32 @@ def _run_fastgen_sync(prompts: list[str], output_dir: Path) -> list[Path]:
         loop.close()
 
 
-def _run_fastgen_video_sync(
-    prompts: list[str],
+def _run_img2img_chain_sync(
+    steps: list[tuple[str, int | None]],
     output_dir: Path,
-    reference_image_path: str | Path | None = None,
-) -> list[Path | None]:
-    """Sync wrapper for video generation via fast-gen.ai."""
+) -> list[Path]:
+    """
+    Sequential chain. Each step: (prompt, ref_step_index).
+    ref_step_index=None → text2img. ref_step_index=i → img2img using result[i] as ref.
+    Returns list of generated image paths.
+    """
     import asyncio as _asyncio
 
-    async def _inner() -> list[Path | None]:
+    async def _inner() -> list[Path]:
         output_dir.mkdir(parents=True, exist_ok=True)
         scraper = FastGenScraper()
         await scraper.start()
+        result: list[Path] = []
         try:
-            result: list[Path | None] = []
-            for i, prompt in enumerate(prompts):
-                # Референс загружаем только перед первым клипом
-                upload_ref = i == 0 if reference_image_path else False
-                path = await scraper.generate_video(
-                    prompt, output_dir, index=i,
-                    reference_image_path=reference_image_path,
-                    upload_reference=upload_ref,
+            for i, (prompt, ref_idx) in enumerate(steps):
+                ref_path = Path(result[ref_idx]) if ref_idx is not None else None
+                paths = await scraper.generate(
+                    prompt, output_dir, index=i, reference_image_path=ref_path
                 )
-                result.append(path)
+                if paths:
+                    result.append(Path(paths[0]))
+                else:
+                    raise RuntimeError(f"[FastGen] Step {i + 1} failed: no image")
                 await _asyncio.sleep(1)
             return result
         finally:
@@ -785,6 +868,105 @@ def _run_fastgen_video_sync(
         return loop.run_until_complete(_inner())
     finally:
         loop.close()
+
+
+def _run_fastgen_images_parallel_sync(prompts: list[str], output_dir: Path) -> list[Path]:
+    """Параллельная генерация изображений — каждое в своём окне браузера (Mode 1 и др.)."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    workers = min(
+        len(prompts),
+        max(1, getattr(settings, "fastgen_image_parallel_workers", 5)),
+    )
+    logger.info(f"[FastGen] Generating {len(prompts)} images in parallel ({workers} workers) ...")
+
+    result: list[Path | None] = [None] * len(prompts)
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(_run_single_image_sync, i, prompts[i], output_dir): i
+            for i in range(len(prompts))
+        }
+        for future in as_completed(futures):
+            idx = futures[future]
+            try:
+                result[idx] = future.result()
+            except Exception as e:
+                logger.error(f"[FastGen] Image {idx} failed: {e}")
+                result[idx] = None
+
+    out = [result[i] for i in range(len(result))]
+    if None in out:
+        raise RuntimeError("[FastGen] Some images failed to generate")
+    return out
+
+
+def _run_single_video_sync(
+    index: int,
+    prompt: str,
+    output_dir: Path,
+    reference_image_path: Path | None,
+) -> Path | None:
+    """Генерация одного видео в отдельном браузере. Для параллельного запуска."""
+    import asyncio as _asyncio
+
+    async def _inner() -> Path | None:
+        scraper = FastGenScraper()
+        await scraper.start()
+        try:
+            # Всегда загружаем reference, если он есть (Mode 3: последний кадр предыдущего клипа)
+            upload_ref = bool(reference_image_path)
+            return await scraper.generate_video(
+                prompt, output_dir, index=index,
+                reference_image_path=reference_image_path,
+                upload_reference=upload_ref,
+            )
+        finally:
+            await scraper.stop()
+
+    loop = _asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(_inner())
+    finally:
+        loop.close()
+
+
+def _run_fastgen_video_sync(
+    prompts: list[str],
+    output_dir: Path,
+    reference_image_path: str | Path | None = None,
+) -> list[Path | None]:
+    """Генерация видео параллельно — каждое в своём окне браузера."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ref = Path(reference_image_path) if reference_image_path else None
+    workers = min(
+        len(prompts),
+        max(1, getattr(settings, "fastgen_video_parallel_workers", 10)),
+    )
+    logger.info(f"[FastGen] Generating {len(prompts)} videos in parallel ({workers} workers) ...")
+
+    result: list[Path | None] = [None] * len(prompts)  # preserve order
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(
+                _run_single_video_sync,
+                i, prompts[i], output_dir, ref,
+            ): i
+            for i in range(len(prompts))
+        }
+        for future in as_completed(futures):
+            idx = futures[future]
+            try:
+                result[idx] = future.result()
+            except Exception as e:
+                logger.error(f"[FastGen] Video {idx} failed: {e}")
+                result[idx] = None
+
+    return result
 
 
 async def generate_videos_fastgen(
@@ -799,14 +981,43 @@ async def generate_videos_fastgen(
     )
 
 
+async def generate_single_video_fastgen(
+    prompt: str,
+    output_dir: Path,
+    index: int,
+    reference_image_path: str | Path | None,
+) -> Path | None:
+    """Сгенерировать одно видео с заданным reference. Для цепочки."""
+    return await asyncio.to_thread(
+        _run_single_video_sync,
+        index, prompt, output_dir, Path(reference_image_path) if reference_image_path else None,
+    )
+
+
 # ── Async entry point ──────────────────────────────────────────────────────────
 
+async def generate_images_chain_fastgen(
+    steps: list[tuple[str, int | None]],
+    output_dir: Path,
+) -> list[Path]:
+    """Run img2img chain: steps = [(prompt, ref_step_index), ...]. ref_step_index=None = text2img."""
+    return await asyncio.to_thread(_run_img2img_chain_sync, steps, output_dir)
+
+
 async def generate_images_fastgen(
-    prompts: list[str], output_dir: Path
+    prompts: list[str], output_dir: Path, parallel: bool = True
 ) -> list[Path]:
     """
-    Run the Playwright scraper in a separate thread with its own event loop
-    so it doesn't interfere with uvicorn's asyncio event loop.
+    Generate images via fast-gen.ai.
+    - parallel=True и len(prompts)>1: параллельная генерация (несколько браузеров).
+    - parallel=False или 1 промпт: последовательная генерация (один браузер).
+
+    Mode 3 (цепочка) вызывает с parallel=False. Mode 1 и др. — с parallel=True.
     """
-    logger.info("[FastGen] Starting Playwright in isolated thread ...")
+    if parallel and len(prompts) > 1:
+        logger.info("[FastGen] Starting parallel image generation ...")
+        return await asyncio.to_thread(
+            _run_fastgen_images_parallel_sync, prompts, output_dir
+        )
+    logger.info("[FastGen] Starting sequential image generation ...")
     return await asyncio.to_thread(_run_fastgen_sync, prompts, output_dir)
