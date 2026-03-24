@@ -6,6 +6,7 @@ Mode 2: Почему X?
 Mode 3: Восстановление домов
 Mode 4: Цитата + фото
 Mode 5: Длинные видео (~1 час)
+Mode 6: Viral Cartoon Drama
 """
 
 from __future__ import annotations
@@ -42,10 +43,24 @@ async def run_pipeline(
     mode4_quote: str | None = None,
     mode4_person_name: str | None = None,
     mode4_photo_path: str | None = None,
+    mode6_num_characters: int = 3,
     control: dict | None = None,
 ) -> dict[str, Any]:
     """Route to the appropriate pipeline by mode."""
     from pipeline_control import checkpoint
+
+    # Mode 6: Viral Cartoon Drama
+    if mode == 6:
+        await checkpoint(control)
+        from modes.mode6.pipeline import run_mode6_pipeline
+        return await run_mode6_pipeline(
+            session_id=session_id,
+            local_only=local_only,
+            num_scenes=num_scenes,
+            num_characters=mode6_num_characters,
+            language=language or "ru",
+            control=control,
+        )
 
     # Mode 5: Длинные видео
     if mode == 5 and topic and str(topic).strip():

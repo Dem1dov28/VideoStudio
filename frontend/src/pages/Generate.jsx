@@ -61,6 +61,7 @@ const MODES = [
   { id: 3, label: 'Реставрация домов', desc: 'Маленький дом, одна комната-студия → 8 фрагментов', icon: '🏠' },
   { id: 4, label: 'Цитата + фото', desc: 'Цитата известной личности и фото → кинематографичный видеофрагмент', icon: '💬' },
   { id: 5, label: 'Длинные видео', desc: '~1 час: большой сценарий, озвучка, картинки при смене сюжета', icon: '📹' },
+  { id: 6, label: 'Cartoon Drama', desc: 'Абсурдные вирусные истории с овощными персонажами', icon: '🥦' },
 ];
 
 export default function Generate() {
@@ -89,6 +90,8 @@ export default function Generate() {
   // Mode 5: длинные видео
   const [mode5Topic, setMode5Topic] = useState('');
   const [mode5Lang, setMode5Lang] = useState('ru'); // ru | en
+  // Mode 6: cartoon drama
+  const [mode6NumCharacters, setMode6NumCharacters] = useState(3);
 
   /* scenario editing state */
   const [step, setStep]             = useState('select_mode');   // 'select_mode' | 'form' | 'generating_scenario' | 'editing' | 'launching'
@@ -167,6 +170,33 @@ export default function Generate() {
         scenario: null,
         mode: 5,
         language: mode5Lang,
+      };
+      const res = await api.startPipeline(payload);
+      setStep('form');
+      setStartedSession(res.session_id);
+    } catch (e) {
+      setError(e.message);
+      setStep('form');
+    }
+  }
+
+  /* Mode 6: cartoon drama — прямой запуск */
+  async function handleMode6Launch() {
+    setError('');
+    setStep('launching');
+    try {
+      const payload = {
+        topic: null,
+        auto_topic: false,
+        num_scenes: scenes,
+        use_scenario: false,
+        local_only: localOnly,
+        show_subtitles: showSubtitles,
+        show_watermark: false,
+        scenario: null,
+        mode: 6,
+        language: lang,
+        mode6_num_characters: mode6NumCharacters,
       };
       const res = await api.startPipeline(payload);
       setStep('form');
@@ -352,7 +382,7 @@ export default function Generate() {
             {/* Header */}
             <div className="mb-6">
               <h1 className="text-2xl font-bold text-white mb-1">
-                {mode === 3 ? 'Реставрация дома' : mode === 4 ? 'Цитата + фото' : mode === 5 ? 'Длинные видео' : 'Создать видео'}
+                {mode === 3 ? 'Реставрация дома' : mode === 4 ? 'Цитата + фото' : mode === 5 ? 'Длинные видео' : mode === 6 ? 'Cartoon Drama' : 'Создать видео'}
               </h1>
               <p className="text-[#71717a] text-sm">
                 {mode === 3
@@ -361,7 +391,9 @@ export default function Generate() {
                     ? 'Цитата известной личности + фото. Агент пишет кинематографичный промпт, генерируется 1 или 2 видеофрагмента. Без озвучки и музыки, только субтитры (в настройках).'
                     : mode === 5
                       ? '~1 час видео: AI пишет большой сценарий, генерирует картинки при смене сюжета, озвучивает. Без субтитров. RU или EN.'
-                      : 'AI-агенты напишут сценарий, сгенерируют изображения и смонтируют видео.'}
+                      : mode === 6
+                        ? 'AI генерирует абсурдные вирусные истории с овощными персонажами. Драма, конфликт, шокирующие повороты. Идеально для TikTok/Reels/Shorts.'
+                        : 'AI-агенты напишут сценарий, сгенерируют изображения и смонтируют видео.'}
               </p>
             </div>
 
@@ -381,6 +413,44 @@ export default function Generate() {
                   <p className="text-xs text-[#52525b] mt-2">
                     AI напишет сценарий ~1 час, сгенерирует изображения при смене сюжета, озвучит. Язык — в настройках.
                   </p>
+                </div>
+              </div>
+            ) : mode === 6 ? (
+              <div className="space-y-4">
+                <div className="card p-5">
+                  <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
+                    Количество персонажей
+                  </label>
+                  <div className="flex gap-2">
+                    {[2, 3, 4].map(n => (
+                      <button
+                        key={n}
+                        type="button"
+                        onClick={() => setMode6NumCharacters(n)}
+                        className={`flex-1 py-3 rounded-lg text-sm font-medium transition-all ${
+                          mode6NumCharacters === n
+                            ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                            : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                        }`}
+                      >
+                        {n} {n === 2 ? 'персонажа' : 'персонажей'}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-[#52525b] mt-3">
+                    AI выберет персонажей из базы (Брокколи, Баклажан, Помидор, Картошка и др.) и создаст абсурдную драму.
+                  </p>
+                </div>
+                <div className="card p-5 bg-gradient-to-br from-purple-900/20 to-pink-900/20 border-purple-700/30">
+                  <div className="text-sm font-semibold text-purple-300 mb-2">🎭 Примеры персонажей</div>
+                  <div className="grid grid-cols-2 gap-2 text-xs text-[#a1a1aa]">
+                    <div>🥦 <span className="text-purple-400">Брокколи</span> — альфа-лидер, доминант</div>
+                    <div>🍆 <span className="text-purple-400">Баклажан</span> — соблазнитель</div>
+                    <div>🍅 <span className="text-purple-400">Помидор</span> — главная героиня</div>
+                    <div>🥔 <span className="text-purple-400">Картошка</span> — лузер, жертва</div>
+                    <div>🥑 <span className="text-purple-400">Авокадо</span> — инфлюенсер</div>
+                    <div>🧄 <span className="text-purple-400">Чеснок</span> — трикстер, хаос</div>
+                  </div>
                 </div>
               </div>
             ) : mode === 4 ? (
@@ -624,7 +694,7 @@ export default function Generate() {
                     className="overflow-hidden"
                   >
                     <div className="px-5 pb-5 border-t border-[#27272f] pt-4 space-y-4">
-                      {mode !== 3 && mode !== 4 && (
+                      {mode !== 3 && mode !== 4 && mode !== 6 && (
                       <div>
                         <div className="flex justify-between mb-2">
                           <label className="text-xs font-medium text-[#a1a1aa]">Количество сцен</label>
@@ -763,7 +833,16 @@ export default function Generate() {
 
             {/* Actions */}
             <div className="flex gap-3">
-              {mode === 5 ? (
+              {mode === 6 ? (
+                <button
+                  onClick={handleMode6Launch}
+                  disabled={isLoading}
+                  className="btn-primary flex-1 flex items-center justify-center gap-2 text-base py-4"
+                >
+                  <RiSparklingLine className="text-lg" />
+                  Сгенерировать драму
+                </button>
+              ) : mode === 5 ? (
                 <button
                   onClick={handleMode5Launch}
                   disabled={isLoading || !mode5Topic.trim()}
@@ -815,7 +894,7 @@ export default function Generate() {
               )}
             </div>
 
-            {mode !== 3 && mode !== 4 && (
+            {mode !== 3 && mode !== 4 && mode !== 6 && (
             <p className="text-center text-xs text-[#52525b]">
               «Написать сценарий» — посмотреть и отредактировать перед генерацией
             </p>

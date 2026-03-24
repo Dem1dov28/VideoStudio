@@ -282,6 +282,58 @@ async def _upload_reference_image(page: Page, image_path: Path) -> bool:
     return False
 
 
+async def _upload_multiple_reference_images(page: Page, image_paths: list[Path]) -> int:
+    """
+    Upload multiple images into fast-gen.ai «Референсные изображения» dropzone.
+    Returns number of successfully uploaded images.
+    FastGen limit: 3 reference images max.
+    """
+    if not image_paths:
+        return 0
+    
+    # FastGen limit is 3 reference images
+    MAX_REFS = 3
+    images_to_upload = image_paths[:MAX_REFS]
+    
+    uploaded = 0
+    for i, img_path in enumerate(images_to_upload):
+        if not img_path.exists():
+            logger.warning(f"[FastGen] Image not found: {img_path}")
+            continue
+        
+        # Click the "+" dropzone to add another image slot
+        # The button is: <div class="aspect-square flex flex-col items-center justify-center rounded-lg border-2 border-dashed transition-colors cursor-pointer border-border hover:border-muted-foreground">
+        if i > 0:  # Skip for first image (slot already open)
+            try:
+                # Exact selector matching the HTML structure provided by user
+                add_btn = page.locator('div.aspect-square.flex.flex-col.items-center.justify-center.rounded-lg.border-2.border-dashed.cursor-pointer').first
+                if await add_btn.is_visible(timeout=2000):
+                    await add_btn.click()
+                    await asyncio.sleep(0.5)
+                    logger.debug(f"[FastGen] Clicked add button for image {i+1}")
+                else:
+                    # Fallback: try with has-text("+") if exact class not found
+                    add_btn_fallback = page.locator('div[class*="aspect-square"][class*="border-dashed"]:has-text("+")').first
+                    if await add_btn_fallback.is_visible(timeout=1500):
+                        await add_btn_fallback.click()
+                        await asyncio.sleep(0.5)
+                        logger.debug(f"[FastGen] Clicked fallback add button for image {i+1}")
+                    else:
+                        logger.warning(f"[FastGen] Could not find add button for image {i+1}, trying upload anyway")
+            except Exception as e:
+                logger.debug(f"[FastGen] Add button click failed: {e}")
+        
+        # Upload the image
+        if await _upload_reference_image(page, img_path):
+            uploaded += 1
+            logger.info(f"[FastGen] Uploaded {uploaded}/{len(images_to_upload)}: {img_path.name}")
+        else:
+            logger.warning(f"[FastGen] Failed to upload: {img_path.name}")
+    
+    logger.info(f"[FastGen] Total reference images uploaded: {uploaded}/{len(images_to_upload)} (max {MAX_REFS})")
+    return uploaded
+
+
 async def _clear_reference_image(page: Page) -> bool:
     """Try to remove uploaded reference image (for switching from img2img to text2img)."""
     for sel in [
@@ -641,6 +693,133 @@ class FastGenScraper:
 
         return saved
 
+    async def generate_video_with_references(
+        self,
+        prompt: str,
+        output_dir: Path,
+        index: int = 0,
+        reference_image_paths: list[Path] | None = None,
+    ) -> Path | None:
+        """
+        Generate video via fast-gen.ai Video tab with MULTIPLE reference images.
+        Uploads all character images as references for consistent character appearance.
+        Returns path to saved .mp4 or None on failure.
+        """
+        page = self._page
+        assert page is not None, "Call start() first"
+
+        logger.info(f"[FastGen] Generating video with {len(reference_image_paths) if reference_image_paths else 0} references: {prompt[:80]}...")
+        if not self._authenticated:
+            await self._authenticate()
+
+        await self._activate_video_tab()
+        await self._select_video_settings()
+        await _screenshot(page, "03_video_ready")
+
+        # Upload ALL reference images
+        if reference_image_paths:
+            valid_paths = [p for p in reference_image_paths if p.exists()]
+            if valid_paths:
+                await _upload_multiple_reference_images(page, valid_paths)
+                await _screenshot(page, "03b_video_after_multi_upload")
+
+        if self._prompt_selector:
+            sel = self._prompt_selector
+        else:
+            _, sel = await _find_first(page, _PROMPT_SELECTORS, timeout=10000)
+            if not sel:
+                raise RuntimeError("Prompt input not found.")
+            self._prompt_selector = sel
+
+        await _react_fill(page, sel, prompt)
+        await asyncio.sleep(0.5)
+        await _screenshot(page, "04_video_prompt_typed")
+
+        gen_el, gen_sel = await _find_first(page, _GENERATE_SELECTORS, timeout=5000)
+        if not gen_el:
+            raise RuntimeError("Generate button not found.")
+
+        timeout_s = max(120, settings.fastgen_image_timeout * 2)
+        max_attempts = max(1, settings.fastgen_max_attempts)
+        new_srcs: list[str] = []
+
+        for attempt in range(max_attempts):
+            if attempt > 0:
+                gen_el, gen_sel = await _find_first(page, _GENERATE_SELECTORS, timeout=5000)
+                if not gen_el:
+                    raise RuntimeError("Generate button not found on retry.")
+                try:
+                    await page.fill(sel, "")
+                    await asyncio.sleep(0.5)
+                except Exception:
+                    pass
+                await _react_fill(page, sel, prompt)
+                await asyncio.sleep(0.5)
+                logger.warning(
+                    f"[FastGen] Retry {attempt + 1}/{max_attempts} for video "
+                    "(previous attempt failed: timeout or content filtered) ..."
+                )
+
+            videos_before = await _collect_video_srcs(page)
+
+            for _ in range(10):
+                disabled = await gen_el.get_attribute("disabled")
+                if disabled is None:
+                    break
+                await asyncio.sleep(0.5)
+
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.3)
+
+            await gen_el.click()
+            await asyncio.sleep(2)
+            await _screenshot(page, f"05_video_generating{'_retry' + str(attempt) if attempt > 0 else ''}")
+
+            try:
+                new_srcs = await _wait_for_new_video(page, videos_before, timeout_s=timeout_s)
+            except (TimeoutError, VideoGenerationError) as e:
+                err_type = "error" if isinstance(e, VideoGenerationError) else "timeout"
+                await _screenshot(page, f"{err_type}_video{'_retry' + str(attempt) if attempt > 0 else ''}")
+                logger.warning(f"[FastGen] Video attempt {attempt + 1}/{max_attempts} failed: {e}")
+                if attempt + 1 >= max_attempts:
+                    logger.error(f"[FastGen] All {max_attempts} attempts exhausted, giving up")
+                    return None
+                logger.info(f"[FastGen] Retrying generation ({attempt + 2}/{max_attempts}) ...")
+                await asyncio.sleep(3)
+                continue
+
+            if not new_srcs:
+                if attempt + 1 >= max_attempts:
+                    return None
+                await asyncio.sleep(2)
+                continue
+
+            break
+
+        if not new_srcs:
+            return None
+
+        # Download the first new video
+        video_url = new_srcs[0]
+        ext = ".mp4"
+        out_path = output_dir / f"video_{index:03d}{ext}"
+        
+        try:
+            if video_url.startswith("blob:"):
+                data = await _download_blob(page, video_url)
+                out_path.write_bytes(data)
+            else:
+                import httpx
+                async with httpx.AsyncClient() as client:
+                    r = await client.get(video_url, timeout=60)
+                    r.raise_for_status()
+                    out_path.write_bytes(r.content)
+            logger.success(f"[FastGen] Video saved: {out_path.name}")
+            return out_path
+        except Exception as e:
+            logger.error(f"[FastGen] Failed to download video: {e}")
+            return None
+
     async def generate_video(
         self,
         prompt: str,
@@ -991,6 +1170,103 @@ async def generate_single_video_fastgen(
     return await asyncio.to_thread(
         _run_single_video_sync,
         index, prompt, output_dir, Path(reference_image_path) if reference_image_path else None,
+    )
+
+
+# ── Mode 6: Multiple references support ───────────────────────────────────────
+
+def _run_single_video_multi_ref_sync(
+    index: int,
+    prompt: str,
+    output_dir: Path,
+    reference_image_paths: list[Path],
+) -> Path | None:
+    """Generate video with MULTIPLE reference images (for Mode 6)."""
+    import asyncio as _asyncio
+
+    async def _inner() -> Path | None:
+        scraper = FastGenScraper()
+        await scraper.start()
+        try:
+            return await scraper.generate_video_with_references(
+                prompt, output_dir, index=index,
+                reference_image_paths=reference_image_paths,
+            )
+        finally:
+            await scraper.stop()
+
+    loop = _asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(_inner())
+    finally:
+        loop.close()
+
+
+def _run_fastgen_video_multi_ref_sync(
+    prompts: list[str],
+    output_dir: Path,
+    reference_image_paths: list[Path],
+) -> list[Path | None]:
+    """Generate videos in parallel with MULTIPLE reference images per video."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    workers = min(
+        len(prompts),
+        max(1, getattr(settings, "fastgen_video_parallel_workers", 10)),
+    )
+    logger.info(f"[FastGen] Generating {len(prompts)} videos with {len(reference_image_paths)} refs each ({workers} workers) ...")
+
+    result: list[Path | None] = [None] * len(prompts)
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(
+                _run_single_video_multi_ref_sync,
+                i, prompts[i], output_dir, reference_image_paths,
+            ): i
+            for i in range(len(prompts))
+        }
+        for future in as_completed(futures):
+            idx = futures[future]
+            try:
+                result[idx] = future.result()
+            except Exception as e:
+                logger.error(f"[FastGen] Video {idx} failed: {e}")
+                result[idx] = None
+
+    return result
+
+
+async def generate_videos_fastgen_multi_ref(
+    prompts: list[str],
+    output_dir: Path,
+    reference_image_paths: list[Path],
+) -> list[Path | None]:
+    """
+    Generate videos via fast-gen.ai with MULTIPLE reference images.
+    Each video gets ALL reference images uploaded.
+    For Mode 6: Cartoon Drama with multiple character references.
+    """
+    logger.info(f"[FastGen] Starting parallel video generation with {len(reference_image_paths)} references per video ...")
+    return await asyncio.to_thread(
+        _run_fastgen_video_multi_ref_sync, prompts, output_dir, reference_image_paths
+    )
+
+
+async def generate_single_video_multi_ref(
+    index: int,
+    prompt: str,
+    output_dir: Path,
+    reference_image_paths: list[Path],
+) -> Path | None:
+    """
+    Generate SINGLE video with MULTIPLE reference images.
+    For Mode 6: Each scene with its specific characters.
+    """
+    return await asyncio.to_thread(
+        _run_single_video_multi_ref_sync,
+        index, prompt, output_dir, reference_image_paths,
     )
 
 

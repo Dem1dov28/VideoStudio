@@ -70,6 +70,7 @@ agents/
 | 3 | Восстановление домов | modes/mode3/pipeline.py |
 | 4 | Цитата + фото | modes/mode4/pipeline.py |
 | 5 | Длинные видео (~1 ч) | modes/mode5/pipeline.py |
+| 6 | Viral Cartoon Drama | modes/mode6/pipeline.py |
 
 ## Зависимости между модулями
 

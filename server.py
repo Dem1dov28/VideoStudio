@@ -86,6 +86,7 @@ async def _run_pipeline_task(
             mode4_quote=getattr(req, "mode4_quote", None),
             mode4_person_name=getattr(req, "mode4_person_name", None),
             mode4_photo_path=getattr(req, "mode4_photo_path", None),
+            mode6_num_characters=getattr(req, "mode6_num_characters", 3),
             control=control,
         )
 
@@ -193,6 +194,8 @@ class StartRequest(BaseModel):
     mode4_quote: str | None = None
     mode4_person_name: str | None = None
     mode4_photo_path: str | None = None
+    # Mode 6: viral cartoon drama
+    mode6_num_characters: int = 3
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -238,6 +241,9 @@ async def start_pipeline(req: StartRequest):
     elif req.mode == 5:
         if not req.topic or not req.topic.strip():
             raise HTTPException(400, "Mode 5: введите тему для длинного видео")
+    elif req.mode == 6:
+        # Mode 6: Cartoon Drama — no required inputs, auto-generates everything
+        pass
     elif not req.topic and not req.auto_topic:
         raise HTTPException(400, "Provide 'topic' or set 'auto_topic: true'")
 
@@ -254,7 +260,7 @@ async def start_pipeline(req: StartRequest):
         "error": None,
         "started_at": time.time(),
         "control": control,
-        "topic": req.topic or getattr(req, "mode3_topic", "") or getattr(req, "mode4_quote", "")[:80] or "",
+        "topic": req.topic or getattr(req, "mode3_topic", "") or (getattr(req, "mode4_quote", "") or "")[:80] or ("[Cartoon]" if req.mode == 6 else ""),
         "mode": req.mode,
         "request": req.model_dump(),  # для перезапуска с теми же параметрами
     }
@@ -406,7 +412,7 @@ async def restart_pipeline(session_id: str):
         "error": None,
         "started_at": time.time(),
         "control": control,
-        "topic": req.topic or getattr(req, "mode3_topic", "") or getattr(req, "mode4_quote", "")[:80] or "",
+        "topic": req.topic or getattr(req, "mode3_topic", "") or (getattr(req, "mode4_quote", "") or "")[:80] or ("[Cartoon]" if req.mode == 6 else ""),
         "mode": req.mode,
         "request": req_data,
     }
