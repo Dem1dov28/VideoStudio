@@ -1,10 +1,13 @@
 """
-Mode 6 Video Generator — Generate cartoon drama videos via FastGen in parallel.
+Mode 6 Video Generator — Generate cartoon drama videos via FastGen with reference images.
 
-Each scene is generated as a video clip using ONLY the characters that appear in that scene.
-Videos are generated in parallel (multiple browser windows).
+Workflow:
+1. Generate ALL reference images for ALL scenes FIRST
+2. Wait for all images to complete and save
+3. Generate ALL videos using the saved reference images
+4. Videos are generated in parallel
+
 Videos include AI-generated audio/voiceover from FastGen.
-
 Prompt format follows PEROSNS/Example_prompt.md structure.
 """
 
@@ -16,7 +19,10 @@ from typing import Any
 
 from loguru import logger
 
-from agents.content_generator.fastgen_scraper import generate_single_video_multi_ref
+from agents.content_generator.fastgen_scraper import (
+    generate_images_with_references_fastgen,
+    generate_single_video_multi_ref,
+)
 from config import settings
 
 
@@ -58,6 +64,52 @@ def get_character_image_paths(character_names: list[str]) -> list[Path]:
         else:
             logger.warning(f"[Mode6] No image found for character: {char_name}")
     return images
+
+
+def _build_image_prompt(scene: dict[str, Any], index: int, language: str = "ru") -> str:
+    """
+    Build a prompt for generating the reference image (first frame of the scene).
+    This image will be used as reference for video generation.
+    """
+    characters = scene.get("characters", [])
+    action = scene.get("action", "")
+    emotion = scene.get("emotion", "drama")
+    location = scene.get("location", "").strip()
+    
+    # Build character descriptions
+    char_descriptions = []
+    for char in characters:
+        visual = CHARACTER_VISUALS.get(char, f"{char} vegetable character")
+        char_descriptions.append(f"{char} ({visual})")
+    characters_block = "\n".join(f"{i+1}. {desc}" for i, desc in enumerate(char_descriptions))
+    
+    # Location
+    location_desc = location if location else "neutral indoor/outdoor setting"
+    
+    prompt = f"""Create a high-quality still image (first frame) for a cartoon drama scene.
+
+STYLE: Stylized 3D cartoon, Pixar-quality rendering, vibrant colors, cinematic soft lighting.
+
+CHARACTERS IN SCENE:
+{characters_block}
+
+LOCATION: {location_desc}
+
+SCENE DESCRIPTION:
+{action}
+
+EMOTION: {emotion} — exaggerated expressions and poses.
+
+COMPOSITION:
+- Full body visible for all characters
+- Vertical 9:16 aspect ratio composition
+- Characters positioned clearly (left, center, right)
+- Dynamic poses matching the emotion
+- Cinematic framing
+
+This is the FIRST FRAME of an 8-second video scene. Capture the key moment."""
+
+    return prompt
 
 
 def _build_video_prompt(scene: dict[str, Any], index: int, total: int, language: str = "ru") -> str:
@@ -214,25 +266,27 @@ IMPORTANT:
 - Keep animation smooth and readable
 - Focus on emotional contrast between characters
 
-━━━ CONTENT SAFETY (MANDATORY) ━━━
-This is a family-friendly cartoon. The following are STRICTLY FORBIDDEN:
+━━━ CONTENT SAFETY (VISUAL ONLY — AUDIO IS NOT CENSORED) ━━━
+This is a cartoon. The following visual elements are STRICTLY FORBIDDEN:
 
-❌ VIOLENCE: No weapons, no blood, no fighting with intent to harm, no physical abuse, no hitting, punching, kicking that causes injury
-❌ INAPPROPRIATE CONTENT: No sexual content, no nudity, no explicit romantic physical contact beyond hugging/holding hands
-❌ DANGEROUS ACTIONS: No characters in dangerous situations (falling from heights, near fire, in traffic), no self-harm, no dangerous stunts
-❌ SUBSTANCE USE: No alcohol, drugs, smoking, or any substance abuse
-❌ HATE SPEECH: No discriminatory language or actions based on race, gender, religion, etc.
-❌ SCARY CONTENT: No horror elements, no disturbing imagery, no jump scares
-❌ ILLEGAL ACTIVITIES: No crime, theft, vandalism, or illegal behavior
+❌ VIOLENCE: No weapons, no blood, no physical abuse, no hitting/punching/kicking that causes injury
+❌ INAPPROPRIATE VISUALS: No nudity, no explicit sexual content
+❌ DANGEROUS ACTIONS: No characters in dangerous situations (falling from heights, near fire, in traffic), no self-harm
+❌ SUBSTANCE USE: No alcohol, drugs, smoking visuals
+❌ HATE SYMBOLS: No discriminatory symbols or imagery
+❌ SCARY CONTENT: No horror elements, no disturbing imagery
+❌ ILLEGAL ACTIVITIES: No crime, theft, vandalism visuals
 
-ALLOWED (cartoon-appropriate):
-✅ Dramatic emotional confrontations (shouting, arguing)
-✅ Cartoon slapstick comedy (silly falls, comedic mishaps without injury)
-✅ Romantic drama (flirting, heartbreak, jealousy — but not explicit)
-✅ Absurd transformations (vegetable to vegetable, funny mutations)
-✅ Comedy pratfalls and cartoon logic
+⚠️ AUDIO: Dialogue and speech are NOT censored — characters can speak freely, argue, express emotions, use dramatic language.
 
-If a scene contains forbidden content, SIMPLIFY it to focus on emotions and dialogue instead.
+ALLOWED:
+✅ Dramatic emotional confrontations (shouting, arguing, crying)
+✅ Cartoon slapstick comedy (silly falls without injury)
+✅ Romantic drama (flirting, heartbreak, jealousy)
+✅ Absurd transformations (vegetable to vegetable)
+✅ Any dialogue and emotional expressions in audio
+
+If a scene contains forbidden VISUAL content, simplify the visuals while keeping the dialogue and audio intact.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
 
     return prompt
@@ -245,11 +299,12 @@ async def generate_cartoon_videos(
     language: str = "ru",
 ) -> tuple[list[Path | None], dict[str, Any]]:
     """
-    Generate cartoon drama video clips via FastGen in PARALLEL.
+    Generate cartoon drama video clips via FastGen with reference images.
     
-    For EACH scene, uploads ONLY the characters that appear in that specific scene.
-    Maximum 3 reference images per video (FastGen limit).
-    All videos are generated simultaneously in separate browser windows.
+    Workflow:
+    1. Generate ALL reference images for ALL scenes FIRST
+    2. Wait for all images to complete and save
+    3. Generate ALL videos using the saved reference images (in parallel)
     
     Returns:
         Tuple of (list of video paths, enriched scenario with video paths)
@@ -264,73 +319,117 @@ async def generate_cartoon_videos(
         raise RuntimeError("FASTGEN_API_KEY not set — required for Mode 6")
     
     output_dir.mkdir(parents=True, exist_ok=True)
+    images_dir = output_dir / "reference_images"
+    images_dir.mkdir(parents=True, exist_ok=True)
     
-    # Prepare data for each scene: prompt + character images
-    scene_data = []
+    # STEP 1: Generate ALL reference images FIRST (with character references)
+    logger.info(f"[Mode6] STEP 1: Generating {len(scenes)} reference images with character references...")
+    
+    # Build prompts with character references for all scenes
+    prompts_with_refs: list[tuple[str, list[Path]]] = []
+    scene_data = []  # Store scene info for video generation later
+    
     for i, scene in enumerate(scenes):
         # Get characters for THIS specific scene
         scene_characters = scene.get("characters", [])[:3]  # Max 3 for FastGen
-        
-        # Get image paths for these characters
         character_images = get_character_image_paths(scene_characters)
         
         if not character_images:
             logger.warning(f"[Mode6] Scene {i+1}: No character images found for {scene_characters}!")
-            # Try to get any available character as fallback
             fallback_char = scenario.get("characters", [])
             if fallback_char:
                 character_images = get_character_image_paths(fallback_char[:1])
         
-        # Build prompt for this scene
-        prompt = _build_video_prompt(scene, i, len(scenes), language)
+        # Build image prompt
+        image_prompt = _build_image_prompt(scene, i, language)
         
+        # Store prompt with character references
+        prompts_with_refs.append((image_prompt, character_images))
+        
+        # Store data for video generation
+        video_prompt = _build_video_prompt(scene, i, len(scenes), language)
         scene_data.append({
             "index": i,
-            "prompt": prompt,
-            "characters": scene_characters,
+            "video_prompt": video_prompt,
             "character_images": character_images,
         })
         
-        logger.info(f"[Mode6] Scene {i+1}: characters={scene_characters}, images={[p.name for p in character_images]}")
+        logger.info(f"[Mode6] Scene {i+1}: characters={scene_characters}, refs={[p.name for p in character_images]}")
     
-    # Generate ALL videos in PARALLEL with their specific character references
-    logger.info(f"[Mode6] Generating {len(scenes)} videos in PARALLEL with scene-specific references...")
+    # Generate ALL images with character references (PARALLEL - multiple browsers)
+    logger.info(f"[Mode6] Generating {len(prompts_with_refs)} reference images with character references in PARALLEL...")
+    image_paths = await generate_images_with_references_fastgen(prompts_with_refs, images_dir, parallel=True)
     
-    # Use asyncio.gather to run all generations in parallel
-    tasks = []
-    for data in scene_data:
+    if len(image_paths) < len(prompts_with_refs):
+        logger.warning(f"[Mode6] Expected {len(prompts_with_refs)} images, got {len(image_paths)}")
+    
+    # Rename images to scene indices
+    ref_image_paths: list[Path | None] = []
+    for i, img_path in enumerate(image_paths):
+        if img_path and Path(img_path).exists():
+            new_path = images_dir / f"scene_{i:03d}_ref.png"
+            Path(img_path).rename(new_path)
+            ref_image_paths.append(new_path)
+            logger.success(f"[Mode6] Scene {i+1} reference image: {new_path.name}")
+        else:
+            ref_image_paths.append(None)
+            logger.error(f"[Mode6] Scene {i+1}: Failed to generate reference image")
+    
+    # STEP 2: Generate ALL videos using the reference images
+    logger.info(f"[Mode6] STEP 2: Generating {len(scenes)} videos with reference images...")
+    
+    video_tasks = []
+    for i, data in enumerate(scene_data):
+        # Get reference image for this scene
+        ref_image = ref_image_paths[i] if i < len(ref_image_paths) else None
+        
+        # Combine character images + reference image
+        all_references = data["character_images"].copy()
+        if ref_image and ref_image.exists():
+            all_references.append(ref_image)
+            logger.info(f"[Mode6] Scene {i+1}: Using {len(all_references)} references (chars + generated)")
+        else:
+            logger.info(f"[Mode6] Scene {i+1}: Using {len(all_references)} character references (no generated ref)")
+        
+        # Limit to 3 references (FastGen limit)
+        all_references = all_references[:3]
+        
         task = _generate_single_scene_video(
-            data["index"],
-            data["prompt"],
-            data["character_images"],
-            output_dir,
+            index=i,
+            prompt=data["video_prompt"],
+            reference_image_paths=all_references,
+            output_dir=output_dir,
         )
-        tasks.append(task)
+        video_tasks.append(task)
     
-    video_paths = await asyncio.gather(*tasks, return_exceptions=True)
+    # Generate ALL videos in parallel
+    video_paths = await asyncio.gather(*video_tasks, return_exceptions=True)
     
-    # Handle results and exceptions
+    # Handle results
     valid_paths: list[Path | None] = []
     for i, result in enumerate(video_paths):
         if isinstance(result, Exception):
-            logger.error(f"[Mode6] Scene {i+1} failed: {result}")
+            logger.error(f"[Mode6] Scene {i+1} video failed: {result}")
             valid_paths.append(None)
         else:
             valid_paths.append(result)
     
-    # Enrich scenario with video paths
+    # Enrich scenario with video paths and reference image paths
     enriched_scenes = []
     for i, scene in enumerate(scenes):
         enriched_scene = dict(scene)
         if i < len(valid_paths) and valid_paths[i]:
             enriched_scene["video_path"] = str(valid_paths[i])
+        if i < len(ref_image_paths) and ref_image_paths[i]:
+            enriched_scene["reference_image_path"] = str(ref_image_paths[i])
         enriched_scenes.append(enriched_scene)
     
     enriched_scenario = dict(scenario)
     enriched_scenario["scenes"] = enriched_scenes
     
     valid_count = sum(1 for p in valid_paths if p and Path(p).exists())
-    logger.success(f"[Mode6] Generated {valid_count}/{len(scenes)} video clips in parallel")
+    ref_count = sum(1 for p in ref_image_paths if p and Path(p).exists())
+    logger.success(f"[Mode6] Generated {ref_count}/{len(scenes)} reference images and {valid_count}/{len(scenes)} video clips")
     
     return valid_paths, enriched_scenario
 
@@ -338,18 +437,18 @@ async def generate_cartoon_videos(
 async def _generate_single_scene_video(
     index: int,
     prompt: str,
-    character_images: list[Path],
+    reference_image_paths: list[Path],
     output_dir: Path,
 ) -> Path | None:
-    """Generate a single video with specific character references."""
+    """Generate a single video with character images + reference image."""
     
     try:
-        # Generate single video with its specific references
+        # Generate video with all references
         result = await generate_single_video_multi_ref(
             index=index,
             prompt=prompt,
             output_dir=output_dir,
-            reference_image_paths=character_images,
+            reference_image_paths=reference_image_paths,
         )
         
         if result and Path(result).exists():

@@ -87,6 +87,11 @@ async def _run_pipeline_task(
             mode4_person_name=getattr(req, "mode4_person_name", None),
             mode4_photo_path=getattr(req, "mode4_photo_path", None),
             mode6_num_characters=getattr(req, "mode6_num_characters", 3),
+            mode7_keyboards=getattr(req, "mode7_keyboards", None),
+            mode7_animal_type=getattr(req, "mode7_animal_type", None),
+            mode8_house_style=getattr(req, "mode8_house_style", None),
+            mode8_location=getattr(req, "mode8_location", None),
+            mode8_num_stages=getattr(req, "mode8_num_stages", 5),
             control=control,
         )
 
@@ -172,6 +177,14 @@ class ScenarioRequest(BaseModel):
     language: str = "ru"
 
 
+class KeyframeVideoRequest(BaseModel):
+    """Request for generating video from start and end keyframes."""
+    prompt: str
+    start_frame_path: str  # Path to start frame image
+    end_frame_path: str    # Path to end frame image
+    output_dir: str | None = None  # Optional custom output directory
+
+
 class StartRequest(BaseModel):
     topic: str | None = None
     auto_topic: bool = False
@@ -196,6 +209,13 @@ class StartRequest(BaseModel):
     mode4_photo_path: str | None = None
     # Mode 6: viral cartoon drama
     mode6_num_characters: int = 3
+    # Mode 7: ASMR animal keyboard videos
+    mode7_keyboards: list[str] | None = None  # ["honey", "jelly", "ice", "chocolate"]
+    mode7_animal_type: str | None = None  # "cat", "dog", "kitten", "puppy", "random"
+    # Mode 8: House Building Timelapse
+    mode8_house_style: str | None = None  # "modern", "cottage", "villa", "cabin", "farmhouse"
+    mode8_location: str | None = None  # "suburbs", "forest", "seaside", "countryside", "mountains"
+    mode8_num_stages: int = 5
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -244,6 +264,12 @@ async def start_pipeline(req: StartRequest):
     elif req.mode == 6:
         # Mode 6: Cartoon Drama — no required inputs, auto-generates everything
         pass
+    elif req.mode == 7:
+        # Mode 7: Animal Keyboard Videos — no required inputs, auto-generates everything
+        pass
+    elif req.mode == 8:
+        # Mode 8: House Building Timelapse — no required inputs, auto-generates everything
+        pass
     elif not req.topic and not req.auto_topic:
         raise HTTPException(400, "Provide 'topic' or set 'auto_topic: true'")
 
@@ -260,7 +286,7 @@ async def start_pipeline(req: StartRequest):
         "error": None,
         "started_at": time.time(),
         "control": control,
-        "topic": req.topic or getattr(req, "mode3_topic", "") or (getattr(req, "mode4_quote", "") or "")[:80] or ("[Cartoon]" if req.mode == 6 else ""),
+        "topic": req.topic or getattr(req, "mode3_topic", "") or (getattr(req, "mode4_quote", "") or "")[:80] or ("[Cartoon]" if req.mode == 6 else "") or ("[Animal]" if req.mode == 7 else "") or ("[Timelapse]" if req.mode == 8 else ""),
         "mode": req.mode,
         "request": req.model_dump(),  # для перезапуска с теми же параметрами
     }
@@ -412,7 +438,7 @@ async def restart_pipeline(session_id: str):
         "error": None,
         "started_at": time.time(),
         "control": control,
-        "topic": req.topic or getattr(req, "mode3_topic", "") or (getattr(req, "mode4_quote", "") or "")[:80] or ("[Cartoon]" if req.mode == 6 else ""),
+        "topic": req.topic or getattr(req, "mode3_topic", "") or (getattr(req, "mode4_quote", "") or "")[:80] or ("[Cartoon]" if req.mode == 6 else "") or ("[Animal]" if req.mode == 7 else ""),
         "mode": req.mode,
         "request": req_data,
     }
@@ -776,6 +802,56 @@ async def log_client_error(data: dict):
     url = data.get("url", "")
     logger.warning(f"[CLIENT ERROR] {msg} | url={url}")
     return {}
+
+
+@app.post("/api/video/keyframe")
+async def generate_keyframe_video(req: KeyframeVideoRequest):
+    """
+    Generate video from start and end keyframe images.
+    Uses fast-gen.ai keyframes mode for image-to-video transition.
+    
+    Args:
+        req: KeyframeVideoRequest with prompt, start_frame_path, end_frame_path
+    
+    Returns:
+        Path to generated video
+    """
+    from pathlib import Path as _PathLib
+    
+    start_path = _PathLib(req.start_frame_path)
+    end_path = _PathLib(req.end_frame_path)
+    
+    if not start_path.exists():
+        raise HTTPException(400, f"Start frame not found: {req.start_frame_path}")
+    if not end_path.exists():
+        raise HTTPException(400, f"End frame not found: {req.end_frame_path}")
+    
+    output_dir = _PathLib(req.output_dir) if req.output_dir else settings.videos_dir / "keyframes"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        from agents.content_generator.fastgen_scraper import generate_video_from_keyframes
+        
+        video_path = await generate_video_from_keyframes(
+            prompt=req.prompt,
+            output_dir=output_dir,
+            start_frame_path=start_path,
+            end_frame_path=end_path,
+            index=0,
+        )
+        
+        if video_path and video_path.exists():
+            return {
+                "success": True,
+                "video_path": str(video_path),
+                "video_url": f"/api/video/keyframes/{video_path.name}",
+            }
+        else:
+            raise HTTPException(500, "Video generation failed")
+            
+    except Exception as e:
+        logger.error(f"[Keyframe Video] Generation error: {e}")
+        raise HTTPException(500, str(e))
 
 
 # ── Serve built React frontend ─────────────────────────────────────────────────

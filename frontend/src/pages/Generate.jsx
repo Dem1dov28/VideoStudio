@@ -62,7 +62,22 @@ const MODES = [
   { id: 4, label: 'Цитата + фото', desc: 'Цитата известной личности и фото → кинематографичный видеофрагмент', icon: '💬' },
   { id: 5, label: 'Длинные видео', desc: '~1 час: большой сценарий, озвучка, картинки при смене сюжета', icon: '📹' },
   { id: 6, label: 'Cartoon Drama', desc: 'Абсурдные вирусные истории с овощными персонажами', icon: '🥦' },
+  { id: 7, label: 'ASMR Keyboard', desc: 'Животные нажимают клавиши: мёд, желе, лёд, шоколад', icon: '🐱' },
+  { id: 8, label: 'House Timelapse', desc: 'Строительство дома: пустой участок → готовый дом', icon: '🏗️' },
+  { id: 9, label: 'Keyframe Video', desc: 'Генерация видео по начальному и конечному кадру', icon: '🎬' },
 ];
+
+const KEYBOARD_LABELS = {
+  honey: 'Мёд',
+  caramel: 'Карамель',
+  jelly: 'Желе',
+  slime: 'Слизь',
+  ice: 'Лёд',
+  chocolate: 'Шоколад',
+  cheese: 'Сыр',
+  marshmallow: 'Маршмеллоу',
+  liquid_metal: 'Жидкий металл',
+};
 
 export default function Generate() {
   const navigate = useNavigate();
@@ -92,6 +107,21 @@ export default function Generate() {
   const [mode5Lang, setMode5Lang] = useState('ru'); // ru | en
   // Mode 6: cartoon drama
   const [mode6NumCharacters, setMode6NumCharacters] = useState(3);
+  // Mode 7: ASMR animal keyboard videos
+  const [mode7AnimalType, setMode7AnimalType] = useState('random'); // 'cat', 'dog', 'kitten', 'puppy', 'random'
+  const [mode7Keyboards, setMode7Keyboards] = useState(['honey', 'caramel', 'jelly']); // Default: 3 keyboards
+  const [mode7NumKeyboards, setMode7NumKeyboards] = useState(4); // 3-4 keyboards
+  // Mode 8: House Building Timelapse
+  const [mode8HouseStyle, setMode8HouseStyle] = useState('modern');
+  const [mode8Location, setMode8Location] = useState('suburbs');
+  const [mode8NumStages, setMode8NumStages] = useState(5);
+  const [mode8UseKeyframes, setMode8UseKeyframes] = useState(false);
+  const [mode8StartFrame, setMode8StartFrame] = useState(null);
+  const [mode8EndFrame, setMode8EndFrame] = useState(null);
+  // Mode 9: Keyframe Video (start + end frame)
+  const [mode9StartFrame, setMode9StartFrame] = useState(null);
+  const [mode9EndFrame, setMode9EndFrame] = useState(null);
+  const [mode9Prompt, setMode9Prompt] = useState('');
 
   /* scenario editing state */
   const [step, setStep]             = useState('select_mode');   // 'select_mode' | 'form' | 'generating_scenario' | 'editing' | 'launching'
@@ -201,6 +231,108 @@ export default function Generate() {
       const res = await api.startPipeline(payload);
       setStep('form');
       setStartedSession(res.session_id);
+    } catch (e) {
+      setError(e.message);
+      setStep('form');
+    }
+  }
+
+  /* Mode 7: ASMR animal keyboard videos — прямой запуск */
+  async function handleMode7Launch() {
+    if (mode7Keyboards.length < 3) {
+      setError('Выберите минимум 3 клавиатуры');
+      return;
+    }
+    setError('');
+    setStep('launching');
+    try {
+      const payload = {
+        topic: null,
+        auto_topic: false,
+        num_scenes: mode7NumKeyboards,
+        use_scenario: false,
+        local_only: localOnly,
+        show_subtitles: false,
+        show_watermark: false,
+        scenario: null,
+        mode: 7,
+        language: lang,
+        mode7_animal_type: mode7AnimalType === 'random' ? null : mode7AnimalType,
+        mode7_keyboards: mode7Keyboards,
+      };
+      const res = await api.startPipeline(payload);
+      setStep('form');
+      setStartedSession(res.session_id);
+    } catch (e) {
+      setError(e.message);
+      setStep('form');
+    }
+  }
+
+  /* Mode 8: House Building Timelapse — прямой запуск */
+  async function handleMode8Launch() {
+    if (mode8UseKeyframes) {
+      if (!mode8StartFrame?.path) {
+        setError('Загрузите начальный кадр');
+        return;
+      }
+      if (!mode8EndFrame?.path) {
+        setError('Загрузите конечный кадр');
+        return;
+      }
+    }
+    setError('');
+    setStep('launching');
+    try {
+      const payload = {
+        topic: null,
+        auto_topic: false,
+        num_scenes: mode8NumStages,
+        use_scenario: false,
+        local_only: localOnly,
+        show_subtitles: false,
+        show_watermark: false,
+        scenario: null,
+        mode: 8,
+        language: lang,
+        mode8_house_style: mode8UseKeyframes ? null : (mode8HouseStyle === 'random' ? null : mode8HouseStyle),
+        mode8_location: mode8UseKeyframes ? null : (mode8Location === 'random' ? null : mode8Location),
+        mode8_num_stages: mode8NumStages,
+        mode8_use_keyframes: mode8UseKeyframes,
+        mode8_start_frame_path: mode8UseKeyframes ? mode8StartFrame?.path : null,
+        mode8_end_frame_path: mode8UseKeyframes ? mode8EndFrame?.path : null,
+      };
+      const res = await api.startPipeline(payload);
+      setStep('form');
+      setStartedSession(res.session_id);
+    } catch (e) {
+      setError(e.message);
+      setStep('form');
+    }
+  }
+
+  /* Mode 9: Keyframe Video — генерация по начальному и конечному кадру */
+  async function handleMode9Launch() {
+    if (!mode9StartFrame?.path) {
+      setError('Загрузите начальный кадр');
+      return;
+    }
+    if (!mode9EndFrame?.path) {
+      setError('Загрузите конечный кадр');
+      return;
+    }
+    setError('');
+    setStep('launching');
+    try {
+      const res = await api.generateKeyframeVideo({
+        prompt: mode9Prompt || 'Smooth transition between frames',
+        start_frame_path: mode9StartFrame.path,
+        end_frame_path: mode9EndFrame.path,
+      });
+      setStep('form');
+      if (res.video_path) {
+        setStartedSession('keyframe_' + Date.now());
+      }
     } catch (e) {
       setError(e.message);
       setStep('form');
@@ -382,7 +514,7 @@ export default function Generate() {
             {/* Header */}
             <div className="mb-6">
               <h1 className="text-2xl font-bold text-white mb-1">
-                {mode === 3 ? 'Реставрация дома' : mode === 4 ? 'Цитата + фото' : mode === 5 ? 'Длинные видео' : mode === 6 ? 'Cartoon Drama' : 'Создать видео'}
+                {mode === 3 ? 'Реставрация дома' : mode === 4 ? 'Цитата + фото' : mode === 5 ? 'Длинные видео' : mode === 6 ? 'Cartoon Drama' : mode === 7 ? 'ASMR Keyboard' : mode === 8 ? 'House Timelapse' : mode === 9 ? 'Keyframe Video' : 'Создать видео'}
               </h1>
               <p className="text-[#71717a] text-sm">
                 {mode === 3
@@ -393,7 +525,13 @@ export default function Generate() {
                       ? '~1 час видео: AI пишет большой сценарий, генерирует картинки при смене сюжета, озвучивает. Без субтитров. RU или EN.'
                       : mode === 6
                         ? 'AI генерирует абсурдные вирусные истории с овощными персонажами. Драма, конфликт, шокирующие повороты. Идеально для TikTok/Reels/Shorts.'
-                        : 'AI-агенты напишут сценарий, сгенерируют изображения и смонтируют видео.'}
+                        : mode === 7
+                          ? 'ASMR видео: животные нажимают клавиши разных поверхностей (мёд, желе, лёд, шоколад). Без голоса и субтитров — только качественные звуки нажатий.'
+                          : mode === 8
+                            ? 'Timelapse видео: пустой участок → фундамент → стены → крыша → готовый дом. Фотореалистичный стиль, как снято на смартфон.'
+                            : mode === 9
+                              ? 'Загрузите начальный и конечный кадр — AI сгенерирует плавный переход между ними.'
+                              : 'AI-агенты напишут сценарий, сгенерируют изображения и смонтируют видео.'}
               </p>
             </div>
 
@@ -451,6 +589,407 @@ export default function Generate() {
                     <div>🥑 <span className="text-purple-400">Авокадо</span> — инфлюенсер</div>
                     <div>🧄 <span className="text-purple-400">Чеснок</span> — трикстер, хаос</div>
                   </div>
+                </div>
+              </div>
+            ) : mode === 7 ? (
+              <div className="space-y-4">
+                {/* Animal selection */}
+                <div className="card p-5">
+                  <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
+                    Животное
+                  </label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      { key: 'random', label: '🎲 Случайное' },
+                      { key: 'cat', label: '🐱 Кот' },
+                      { key: 'dog', label: '🐶 Собака' },
+                      { key: 'kitten', label: '🐱 Котёнок' },
+                      { key: 'puppy', label: '🐶 Щенок' },
+                    ].map(opt => (
+                      <button
+                        key={opt.key}
+                        type="button"
+                        onClick={() => setMode7AnimalType(opt.key)}
+                        className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                          mode7AnimalType === opt.key
+                            ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                            : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                
+                {/* Keyboard selection */}
+                <div className="card p-5">
+                  <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
+                    Клавиатуры (выберите 3-4)
+                  </label>
+                  <p className="text-xs text-[#52525b] mb-3">
+                    Выберите поверхности для ASMR видео. Животное будет нажимать клавиши каждой.
+                  </p>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { key: 'honey', label: '🍯 Мёд', desc: 'липкий, тянется' },
+                      { key: 'caramel', label: '🍬 Карамель', desc: 'упругая, сладкая' },
+                      { key: 'jelly', label: '🍮 Желе', desc: 'дрожит, хлюпает' },
+                      { key: 'slime', label: '🧪 Слизь', desc: 'тянется, хлюпает' },
+                      { key: 'ice', label: '🧊 Лёд', desc: 'хрустит, трескается' },
+                      { key: 'chocolate', label: '🍫 Шоколад', desc: 'тает, мягкий' },
+                      { key: 'cheese', label: '🧀 Сыр', desc: 'упругий, пористый' },
+                      { key: 'marshmallow', label: '☁️ Маршмеллоу', desc: 'воздушный, пружинит' },
+                      { key: 'liquid_metal', label: '✨ Жидкий металл', desc: 'течёт, зеркальный' },
+                    ].map(kb => (
+                      <button
+                        key={kb.key}
+                        type="button"
+                        onClick={() => {
+                          const selected = mode7Keyboards;
+                          if (selected.includes(kb.key)) {
+                            setMode7Keyboards(selected.filter(k => k !== kb.key));
+                          } else if (selected.length < 4) {
+                            setMode7Keyboards([...selected, kb.key]);
+                          }
+                        }}
+                        className={`py-2.5 px-3 rounded-lg text-xs font-medium transition-all text-left ${
+                          mode7Keyboards.includes(kb.key)
+                            ? 'bg-amber-600/20 text-amber-300 border border-amber-600/40'
+                            : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                        }`}
+                      >
+                        <div className="font-medium">{kb.label}</div>
+                        <div className="text-[10px] text-[#52525b]">{kb.desc}</div>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="mt-3 flex items-center gap-2">
+                    <span className="text-xs text-[#71717a]">Выбрано:</span>
+                    <span className="text-xs font-medium text-amber-400">
+                      {mode7Keyboards.length > 0 
+                        ? mode7Keyboards.map(k => KEYBOARD_LABELS[k] || k).join(', ')
+                        : 'Выберите минимум 3 клавиатуры'}
+                    </span>
+                    <span className="text-xs text-[#52525b]">({mode7Keyboards.length}/4)</span>
+                  </div>
+                </div>
+
+                {/* ASMR Info card */}
+                <div className="card p-4 bg-gradient-to-br from-purple-900/20 to-pink-900/10 border-purple-700/30">
+                  <div className="text-sm font-semibold text-purple-300 mb-2">🎧 ASMR Режим</div>
+                  <p className="text-xs text-[#a1a1aa]">
+                    Видео без голоса и субтитров — только качественные ASMR звуки нажатий и отпускания клавиш.
+                  </p>
+                </div>
+              </div>
+            ) : mode === 8 ? (
+              <div className="space-y-4">
+                {/* Keyframes toggle */}
+                <div className="card p-5">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-semibold text-[#e4e4f0]">Ключ. кадры</div>
+                      <div className="text-xs text-[#71717a]">Генерация видео по начальному и конечному кадру</div>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={mode8UseKeyframes}
+                      onClick={() => setMode8UseKeyframes(!mode8UseKeyframes)}
+                      className={`inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent shadow-sm transition-colors ${
+                        mode8UseKeyframes ? 'bg-brand-600' : 'bg-[#27272f]'
+                      }`}
+                    >
+                      <span
+                        className={`pointer-events-none block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
+                          mode8UseKeyframes ? 'translate-x-4' : 'translate-x-0'
+                        }`}
+                      />
+                    </button>
+                  </div>
+                </div>
+
+                {mode8UseKeyframes ? (
+                  /* Keyframe mode: start + end frame upload */
+                  <>
+                    {/* Start frame upload */}
+                    <div className="card p-5">
+                      <div className="text-sm font-semibold text-[#e4e4f0] mb-1">Начальный кадр</div>
+                      <div className="text-xs text-[#71717a] mb-3">Загрузите изображение для начального кадра видео</div>
+                      <div
+                        className="h-24 flex flex-col items-center justify-center rounded-lg border-2 border-dashed transition-colors cursor-pointer gap-2 border-[#27272f] hover:border-[#71717a]"
+                        onClick={() => document.getElementById('mode8-start-frame')?.click()}
+                      >
+                        {mode8StartFrame?.preview ? (
+                          <img src={mode8StartFrame.preview} alt="Start frame" className="h-20 w-32 object-cover rounded" />
+                        ) : (
+                          <>
+                            <RiImageAddLine className="text-2xl text-[#71717a]" />
+                            <span className="text-xs text-[#71717a]">Нажмите для загрузки</span>
+                          </>
+                        )}
+                      </div>
+                      <input
+                        id="mode8-start-frame"
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        className="hidden"
+                        onChange={async (e) => {
+                          const f = e.target.files?.[0];
+                          if (!f) return;
+                          setUploadingRef(true);
+                          try {
+                            const { path } = await api.uploadImage(f);
+                            setMode8StartFrame({ path, preview: URL.createObjectURL(f) });
+                          } catch (err) { setError(err.message); }
+                          finally { setUploadingRef(false); e.target.value = ''; }
+                        }}
+                      />
+                      {mode8StartFrame && (
+                        <button
+                          type="button"
+                          onClick={() => setMode8StartFrame(null)}
+                          className="mt-2 text-xs text-[#71717a] hover:text-red-400"
+                        >
+                          Удалить
+                        </button>
+                      )}
+                    </div>
+
+                    {/* End frame upload */}
+                    <div className="card p-5">
+                      <div className="text-sm font-semibold text-[#e4e4f0] mb-1">Конечный кадр</div>
+                      <div className="text-xs text-[#71717a] mb-3">Загрузите изображение для конечного кадра видео</div>
+                      <div
+                        className="w-full aspect-square flex flex-col items-center justify-center rounded-lg border-2 border-dashed transition-colors cursor-pointer border-[#27272f] hover:border-[#71717a]"
+                        onClick={() => document.getElementById('mode8-end-frame')?.click()}
+                      >
+                        {mode8EndFrame?.preview ? (
+                          <img src={mode8EndFrame.preview} alt="End frame" className="h-full w-full object-cover rounded-lg" />
+                        ) : (
+                          <>
+                            <RiImageAddLine className="text-3xl text-[#71717a]" />
+                            <span className="text-sm text-[#71717a]">Нажмите для загрузки</span>
+                          </>
+                        )}
+                      </div>
+                      <input
+                        id="mode8-end-frame"
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        className="hidden"
+                        onChange={async (e) => {
+                          const f = e.target.files?.[0];
+                          if (!f) return;
+                          setUploadingRef(true);
+                          try {
+                            const { path } = await api.uploadImage(f);
+                            setMode8EndFrame({ path, preview: URL.createObjectURL(f) });
+                          } catch (err) { setError(err.message); }
+                          finally { setUploadingRef(false); e.target.value = ''; }
+                        }}
+                      />
+                      {mode8EndFrame && (
+                        <button
+                          type="button"
+                          onClick={() => setMode8EndFrame(null)}
+                          className="mt-2 text-xs text-[#71717a] hover:text-red-400"
+                        >
+                          Удалить
+                        </button>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  /* Default mode: style/location selection */
+                  <>
+                    {/* House style selection */}
+                    <div className="card p-5">
+                      <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
+                        Стиль дома
+                      </label>
+                      <div className="grid grid-cols-3 gap-2">
+                        {[
+                          { key: 'random', label: '🎲 Случайный' },
+                          { key: 'modern', label: '🏙️ Современный' },
+                          { key: 'cottage', label: '🏡 Коттедж' },
+                          { key: 'villa', label: '🏛️ Вилла' },
+                          { key: 'cabin', label: '🌲 Домик в лесу' },
+                          { key: 'farmhouse', label: '🌾 Ферма' },
+                        ].map(opt => (
+                          <button
+                            key={opt.key}
+                            type="button"
+                            onClick={() => setMode8HouseStyle(opt.key)}
+                            className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                              mode8HouseStyle === opt.key
+                                ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                                : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Location selection */}
+                    <div className="card p-5">
+                      <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
+                        Локация
+                      </label>
+                      <div className="grid grid-cols-3 gap-2">
+                        {[
+                          { key: 'random', label: '🎲 Случайная' },
+                          { key: 'suburbs', label: '🏘️ Пригород' },
+                          { key: 'forest', label: '🌲 Лес' },
+                          { key: 'seaside', label: '🌊 Побережье' },
+                          { key: 'countryside', label: '🌾 Поле' },
+                          { key: 'mountains', label: '⛰️ Горы' },
+                        ].map(opt => (
+                          <button
+                            key={opt.key}
+                            type="button"
+                            onClick={() => setMode8Location(opt.key)}
+                            className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                              mode8Location === opt.key
+                                ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                                : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Number of stages */}
+                    <div className="card p-5">
+                      <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
+                        Количество стадий строительства
+                      </label>
+                      <div className="flex gap-2">
+                        {[5, 6, 7, 8].map(n => (
+                          <button
+                            key={n}
+                            type="button"
+                            onClick={() => setMode8NumStages(n)}
+                            className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                              mode8NumStages === n
+                                ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                                : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                            }`}
+                          >
+                            {n} стадий
+                          </button>
+                        ))}
+                      </div>
+                      <p className="text-xs text-[#52525b] mt-3">
+                        Каждая стадия — отдельный видеофрагмент: пустой участок → фундамент → стены → крыша → готовый дом.
+                      </p>
+                    </div>
+                  </>
+                )}
+
+                {/* Timelapse Info card */}
+                <div className="card p-4 bg-gradient-to-br from-amber-900/20 to-orange-900/10 border-amber-700/30">
+                  <div className="text-sm font-semibold text-amber-300 mb-2">🏗️ Timelapse Режим</div>
+                  <p className="text-xs text-[#a1a1aa]">
+                    {mode8UseKeyframes
+                      ? 'AI сгенерирует плавный переход от начального кадра к конечному в стиле timelapse.'
+                      : 'Видео в стиле ускоренной съёмки строительства. Фотореалистичный стиль, как снято на камеру телефона. Звуки строительной площадки.'}
+                  </p>
+                </div>
+              </div>
+            ) : mode === 9 ? (
+              <div className="space-y-4">
+                {/* Prompt for keyframe video */}
+                <div className="card p-5">
+                  <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
+                    Описание перехода (опционально)
+                  </label>
+                  <input
+                    className="input text-base"
+                    placeholder="Например: плавный переход, морфинг, превращение"
+                    value={mode9Prompt}
+                    onChange={e => setMode9Prompt(e.target.value)}
+                  />
+                  <p className="text-xs text-[#52525b] mt-2">
+                    Опишите, как должен происходить переход между кадрами. Можно оставить пустым.
+                  </p>
+                </div>
+
+                {/* Start frame upload */}
+                <div className="card p-5">
+                  <div className="text-sm font-semibold text-[#e4e4f0] mb-1">Начальный кадр</div>
+                  <div className="text-xs text-[#71717a] mb-3">Загрузите изображение для начального кадра видео</div>
+                  <div className="flex items-center gap-2">
+                    <label className="flex items-center gap-2 px-3 py-2 rounded-lg bg-[#1a1a24] border border-[#27272f] hover:border-brand-600/40 cursor-pointer text-sm text-[#e4e4f0] transition-colors">
+                      <RiImageAddLine className="text-lg" />
+                      {uploadingRef ? 'Загрузка…' : (mode9StartFrame ? 'Заменить' : 'Выбрать изображение')}
+                      <input type="file" accept="image/jpeg,image/png,image/webp" className="hidden"
+                        onChange={async (e) => {
+                          const f = e.target.files?.[0];
+                          if (!f) return;
+                          setUploadingRef(true);
+                          try {
+                            const { path } = await api.uploadImage(f);
+                            setMode9StartFrame({ path, preview: URL.createObjectURL(f) });
+                          } catch (err) { setError(err.message); }
+                          finally { setUploadingRef(false); e.target.value = ''; }
+                        }} />
+                    </label>
+                    {mode9StartFrame && (
+                      <button type="button" onClick={() => setMode9StartFrame(null)}
+                        className="p-2 rounded-lg text-[#71717a] hover:text-red-400 hover:bg-red-900/20">
+                        <RiCloseLine />
+                      </button>
+                    )}
+                  </div>
+                  {mode9StartFrame?.preview && (
+                    <img src={mode9StartFrame.preview} alt="Start frame" className="mt-2 w-32 h-20 object-cover rounded-lg border border-[#27272f]" />
+                  )}
+                </div>
+
+                {/* End frame upload */}
+                <div className="card p-5">
+                  <div className="text-sm font-semibold text-[#e4e4f0] mb-1">Конечный кадр</div>
+                  <div className="text-xs text-[#71717a] mb-3">Загрузите изображение для конечного кадра видео</div>
+                  <div className="flex items-center gap-2">
+                    <label className="flex items-center gap-2 px-3 py-2 rounded-lg bg-[#1a1a24] border border-[#27272f] hover:border-brand-600/40 cursor-pointer text-sm text-[#e4e4f0] transition-colors">
+                      <RiImageAddLine className="text-lg" />
+                      {uploadingRef ? 'Загрузка…' : (mode9EndFrame ? 'Заменить' : 'Выбрать изображение')}
+                      <input type="file" accept="image/jpeg,image/png,image/webp" className="hidden"
+                        onChange={async (e) => {
+                          const f = e.target.files?.[0];
+                          if (!f) return;
+                          setUploadingRef(true);
+                          try {
+                            const { path } = await api.uploadImage(f);
+                            setMode9EndFrame({ path, preview: URL.createObjectURL(f) });
+                          } catch (err) { setError(err.message); }
+                          finally { setUploadingRef(false); e.target.value = ''; }
+                        }} />
+                    </label>
+                    {mode9EndFrame && (
+                      <button type="button" onClick={() => setMode9EndFrame(null)}
+                        className="p-2 rounded-lg text-[#71717a] hover:text-red-400 hover:bg-red-900/20">
+                        <RiCloseLine />
+                      </button>
+                    )}
+                  </div>
+                  {mode9EndFrame?.preview && (
+                    <img src={mode9EndFrame.preview} alt="End frame" className="mt-2 w-32 h-20 object-cover rounded-lg border border-[#27272f]" />
+                  )}
+                </div>
+
+                {/* Keyframe Info card */}
+                <div className="card p-4 bg-gradient-to-br from-purple-900/20 to-pink-900/10 border-purple-700/30">
+                  <div className="text-sm font-semibold text-purple-300 mb-2">🎬 Keyframe Режим</div>
+                  <p className="text-xs text-[#a1a1aa]">
+                    AI сгенерирует видео с плавным переходом от начального кадра к конечному. Используйте для морфинга, превращений, переходов между сценами.
+                  </p>
                 </div>
               </div>
             ) : mode === 4 ? (
@@ -694,7 +1233,7 @@ export default function Generate() {
                     className="overflow-hidden"
                   >
                     <div className="px-5 pb-5 border-t border-[#27272f] pt-4 space-y-4">
-                      {mode !== 3 && mode !== 4 && mode !== 6 && (
+                      {mode !== 3 && mode !== 4 && mode !== 6 && mode !== 7 && mode !== 8 && mode !== 9 && (
                       <div>
                         <div className="flex justify-between mb-2">
                           <label className="text-xs font-medium text-[#a1a1aa]">Количество сцен</label>
@@ -719,7 +1258,7 @@ export default function Generate() {
                         <Toggle value={localOnly} onChange={setLocalOnly} />
                       </div>
 
-                      {(mode !== 3 && mode !== 5) || mode === 4 ? (
+                      {((mode !== 3 && mode !== 5 && mode !== 7 && mode !== 8 && mode !== 9) || mode === 4) ? (
                       <div className="flex items-center justify-between">
                         <div>
                           <div className="text-sm font-medium text-[#e4e4f0]">Субтитры</div>
@@ -731,7 +1270,7 @@ export default function Generate() {
                       </div>
                       ) : null}
 
-                      {(mode !== 3 && mode !== 4) && (
+                      {mode !== 3 && mode !== 4 && mode !== 7 && mode !== 8 && mode !== 9 && (
                       <div>
                         <div className="text-sm font-medium text-[#e4e4f0] mb-2">Язык субтитров</div>
                         <div className="text-xs text-[#71717a] mb-2">Язык озвучки и текста на видео</div>
@@ -833,7 +1372,34 @@ export default function Generate() {
 
             {/* Actions */}
             <div className="flex gap-3">
-              {mode === 6 ? (
+              {mode === 9 ? (
+                <button
+                  onClick={handleMode9Launch}
+                  disabled={isLoading || !mode9StartFrame?.path || !mode9EndFrame?.path}
+                  className="btn-primary flex-1 flex items-center justify-center gap-2 text-base py-4"
+                >
+                  <RiSparklingLine className="text-lg" />
+                  Сгенерировать видео
+                </button>
+              ) : mode === 8 ? (
+                <button
+                  onClick={handleMode8Launch}
+                  disabled={isLoading || (mode8UseKeyframes && (!mode8StartFrame?.path || !mode8EndFrame?.path))}
+                  className="btn-primary flex-1 flex items-center justify-center gap-2 text-base py-4"
+                >
+                  <RiSparklingLine className="text-lg" />
+                  {mode8UseKeyframes ? 'Сгенерировать видео' : 'Сгенерировать timelapse'}
+                </button>
+              ) : mode === 7 ? (
+                <button
+                  onClick={handleMode7Launch}
+                  disabled={isLoading}
+                  className="btn-primary flex-1 flex items-center justify-center gap-2 text-base py-4"
+                >
+                  <RiSparklingLine className="text-lg" />
+                  Сгенерировать видео
+                </button>
+              ) : mode === 6 ? (
                 <button
                   onClick={handleMode6Launch}
                   disabled={isLoading}
@@ -894,7 +1460,7 @@ export default function Generate() {
               )}
             </div>
 
-            {mode !== 3 && mode !== 4 && mode !== 6 && (
+            {mode !== 3 && mode !== 4 && mode !== 6 && mode !== 7 && mode !== 8 && mode !== 9 && (
             <p className="text-center text-xs text-[#52525b]">
               «Написать сценарий» — посмотреть и отредактировать перед генерацией
             </p>

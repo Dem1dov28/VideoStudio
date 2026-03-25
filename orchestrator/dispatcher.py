@@ -7,6 +7,7 @@ Mode 3: Восстановление домов
 Mode 4: Цитата + фото
 Mode 5: Длинные видео (~1 час)
 Mode 6: Viral Cartoon Drama
+Mode 7: Animal Keyboard Videos
 """
 
 from __future__ import annotations
@@ -44,10 +45,42 @@ async def run_pipeline(
     mode4_person_name: str | None = None,
     mode4_photo_path: str | None = None,
     mode6_num_characters: int = 3,
+    mode7_keyboards: list[str] | None = None,
+    mode7_animal_type: str | None = None,
+    mode8_house_style: str | None = None,
+    mode8_location: str | None = None,
+    mode8_num_stages: int = 5,
     control: dict | None = None,
 ) -> dict[str, Any]:
     """Route to the appropriate pipeline by mode."""
     from pipeline_control import checkpoint
+
+    # Mode 8: House Building Timelapse
+    if mode == 8:
+        await checkpoint(control)
+        from modes.mode8.pipeline import run_mode8_pipeline
+        return await run_mode8_pipeline(
+            session_id=session_id,
+            local_only=local_only,
+            house_style=mode8_house_style,
+            location=mode8_location,
+            num_stages=mode8_num_stages,
+            language=language or "ru",
+            control=control,
+        )
+
+    # Mode 7: Animal Keyboard Videos
+    if mode == 7:
+        await checkpoint(control)
+        from modes.mode7.pipeline import run_mode7_pipeline
+        return await run_mode7_pipeline(
+            session_id=session_id,
+            local_only=local_only,
+            keyboards=mode7_keyboards,
+            animal_type=mode7_animal_type,
+            language=language or "ru",
+            control=control,
+        )
 
     # Mode 6: Viral Cartoon Drama
     if mode == 6:

@@ -85,6 +85,8 @@ export const api = {
   videoUrl:           (sid, fname) => `${BASE}/api/video/${sid ?? ''}/${fname ?? ''}`,
   thumbnailUrl:       (sid)        => `${BASE}/api/video/${sid}/thumbnail`,
   deleteVideo:        (sid)        => request(`/api/videos/${sid}`, { method: 'DELETE' }),
+  // Keyframe video generation (start + end frame)
+  generateKeyframeVideo: (data) => request('/api/video/keyframe', { method: 'POST', body: JSON.stringify(data) }),
 };
 
 /** Subscribe to SSE log stream. Returns cleanup function. */
