@@ -98,10 +98,11 @@ export default function Generate() {
   const [mode3HouseType, setMode3HouseType] = useState(''); // id из HOUSE_TYPES
   const [mode3StartImage, setMode3StartImage] = useState(null);
   const [mode3EndImage, setMode3EndImage] = useState(null);
-  // Mode 4: цитата + фото личности (язык определяется автоматически)
+  // Mode 4: цитата + фото; версия вывода: оба ролика или один язык
   const [mode4Quote, setMode4Quote] = useState('');
   const [mode4PersonName, setMode4PersonName] = useState('');
   const [mode4Photo, setMode4Photo] = useState(null);
+  const [mode4OutputLang, setMode4OutputLang] = useState('both'); // 'both' | 'ru' | 'en'
   // Mode 5: длинные видео
   const [mode5Topic, setMode5Topic] = useState('');
   const [mode5Lang, setMode5Lang] = useState('ru'); // ru | en
@@ -366,10 +367,11 @@ export default function Generate() {
         show_watermark: false,
         scenario: null,
         mode: 4,
-        language: 'auto',
+        language: 'both',
         mode4_quote: mode4Quote.trim(),
         mode4_person_name: mode4PersonName.trim(),
         mode4_photo_path: mode4Photo.path,
+        mode4_only_lang: mode4OutputLang === 'both' ? null : mode4OutputLang,
       };
       const res = await api.startPipeline(payload);
       setStep('form');
@@ -520,7 +522,7 @@ export default function Generate() {
                 {mode === 3
                   ? 'Маленький дом, одна комната-студия. AI создаст промпты и фото. 8 фрагментов: intro, 3 экстерьер, 3 интерьер (как снаружи), финал (скриншот clip 3 → снаружи→внутри). Музыка.'
                   : mode === 4
-                    ? 'Цитата известной личности + фото. Агент пишет кинематографичный промпт, генерируется 1 или 2 видеофрагмента. Без озвучки и музыки, только субтитры (в настройках).'
+                    ? 'Цитата и имя автора на русском. Можно сгенерировать оба ролика (RU + EN), только русскую или только английскую версию. Озвучка FastGen, субтитры — в настройках.'
                     : mode === 5
                       ? '~1 час видео: AI пишет большой сценарий, генерирует картинки при смене сюжета, озвучивает. Без субтитров. RU или EN.'
                       : mode === 6
@@ -1009,10 +1011,10 @@ export default function Generate() {
                   <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
                     Цитата
                   </label>
-                  <p className="text-xs text-brand-400/80 mb-2">Введите цитату на любом языке — система определит язык и покажет субтитры в нём</p>
+                  <p className="text-xs text-brand-400/80 mb-2">Цитату и имя вводите на русском; для английского ролика агент переведёт текст</p>
                   <textarea
                     className="input text-base min-h-[100px] resize-y"
-                    placeholder="Русский: Безумцы прокладывают пути... / English: The only way to do great work... / Deutsch: Einmal ist keinmal..."
+                    placeholder="Например: Безумцы прокладывают пути, по которым потом с ума сходят нормальные люди."
                     value={mode4Quote}
                     onChange={e => setMode4Quote(e.target.value)}
                   />
@@ -1046,6 +1048,32 @@ export default function Generate() {
                   {mode4Photo?.preview && (
                     <img src={mode4Photo.preview} alt="Личность" className="mt-2 w-40 h-28 object-cover rounded-lg border border-[#27272f]" />
                   )}
+                </div>
+                <div className="card p-5">
+                  <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
+                    Какую версию сгенерировать
+                  </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    {[
+                      { id: 'both', title: 'Оба сразу', sub: 'video_ru + video_en' },
+                      { id: 'ru', title: 'Только русская', sub: 'Озвучка и титры на русском' },
+                      { id: 'en', title: 'Только английская', sub: 'Перевод цитаты и озвучка EN' },
+                    ].map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setMode4OutputLang(opt.id)}
+                        className={`text-left px-4 py-3 rounded-xl border transition-all ${
+                          mode4OutputLang === opt.id
+                            ? 'border-brand-500 bg-brand-600/15 ring-1 ring-brand-500/40'
+                            : 'border-[#27272f] bg-[#14141c] hover:border-[#3f3f46]'
+                        }`}
+                      >
+                        <div className="text-sm font-semibold text-[#e4e4f0]">{opt.title}</div>
+                        <div className="text-[10px] text-[#71717a] mt-1 leading-snug">{opt.sub}</div>
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
             ) : mode === 3 ? (

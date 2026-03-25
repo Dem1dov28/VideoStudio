@@ -8,6 +8,7 @@ Mode 4: Цитата + фото
 Mode 5: Длинные видео (~1 час)
 Mode 6: Viral Cartoon Drama
 Mode 7: Animal Keyboard Videos
+Mode 8: House Building Timelapse
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ async def run_pipeline(
     mode4_quote: str | None = None,
     mode4_person_name: str | None = None,
     mode4_photo_path: str | None = None,
+    mode4_only_lang: str | None = None,
     mode6_num_characters: int = 3,
     mode7_keyboards: list[str] | None = None,
     mode7_animal_type: str | None = None,
@@ -116,9 +118,14 @@ async def run_pipeline(
             person_name=mode4_person_name.strip(),
             photo_path=mode4_photo_path,
             session_id=session_id,
-            language=language,
+            language="both",
             show_subtitles=show_subtitles,
             control=control,
+            only_lang=(
+                (mode4_only_lang or "").strip().lower()
+                if (mode4_only_lang or "").strip().lower() in ("ru", "en")
+                else None
+            ),
         )
 
     # Mode 3: Восстановление домов

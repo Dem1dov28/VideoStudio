@@ -44,7 +44,7 @@ async def run_mode5_pipeline(
     Returns:
         dict с video_path, session_id
     """
-    from pipeline_control import checkpoint
+    from pipeline_control import checkpoint, fastgen_cancel_event
 
     session_id = session_id or str(int(time.time() * 1000))
     output_dir = settings.output_dir / session_id
@@ -78,7 +78,9 @@ async def run_mode5_pipeline(
 
     logger.info(f"Step 2/4 - Image Generator ({len(prompts_with_idx)} images)")
     image_prompts = [p for _, p in prompts_with_idx]
-    image_paths = await generate_images_fastgen(image_prompts, images_dir, parallel=False)
+    image_paths = await generate_images_fastgen(
+        image_prompts, images_dir, parallel=False, cancel_event=fastgen_cancel_event(control)
+    )
     if len(image_paths) < len(prompts_with_idx):
         raise RuntimeError(f"[Mode5] Expected {len(prompts_with_idx)} images, got {len(image_paths)}")
 

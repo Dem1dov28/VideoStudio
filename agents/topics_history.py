@@ -2,7 +2,8 @@
 Topics History — persistent journal of generated video topics.
 
 Stores used topics in  output/topics_history.json  so the Trends Analyzer
-can skip topics that have already been covered.
+can skip topics that have already been covered. After each successful run the
+server may attach start_request (StartRequest JSON) for «Перегенерировать» in the video library.
 
 Format:
 {
@@ -146,6 +147,32 @@ def get_used_topics() -> list[dict]:
     return _load().get("topics", [])
 
 
+def get_start_request_for_session(session_id: str) -> dict | None:
+    """Снимок тела StartRequest для перегенерации из библиотеки видео."""
+    for e in get_used_topics():
+        if e.get("session_id") != session_id:
+            continue
+        snap = e.get("start_request")
+        if isinstance(snap, dict) and snap:
+            return snap
+    return None
+
+
+def attach_start_request_to_session(session_id: str, payload: dict) -> bool:
+    """Привязать параметры пайплайна к записи истории (после успешной генерации)."""
+    if not payload:
+        return False
+    data = _load()
+    found = False
+    for e in data.get("topics", []):
+        if e.get("session_id") == session_id:
+            e["start_request"] = dict(payload)
+            found = True
+    if found:
+        _save(data)
+    return found
+
+
 def is_topic_used(topic: str, video_angle: str = "") -> bool:
     """Return True if this topic (or a close variant) was already generated."""
     existing = get_used_topics()
@@ -158,6 +185,7 @@ def mark_topic_used(
     session_id: str,
     video_path: str = "",
     video_angle: str = "",
+    quote_caption_en: str | None = None,
 ) -> None:
     """
     Record a topic as used after a successful video generation.
@@ -176,6 +204,8 @@ def mark_topic_used(
         "video_path":   video_path,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
+    if quote_caption_en:
+        entry["quote_caption_en"] = quote_caption_en
     data["topics"].append(entry)
     _save(data)
     logger.info(f"[TopicsHistory] Recorded: {topic!r}  (total: {len(data['topics'])})")

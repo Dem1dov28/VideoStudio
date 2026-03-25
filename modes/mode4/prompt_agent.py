@@ -50,9 +50,18 @@ _SYSTEM = """Ты — эксперт по кинематографичной AI-
   "voice_description": "...",
   "script_ru": "цитата дословно",
   "script_en": "перевод (если bilingual ИЛИ subtitle_lang=en)",
+  "person_name_en": "имя автора на английском (только если source_russian_only+bilingual)",
   "detected_lang": "ru|en|de|fr|es|... (если auto_detect — ISO 639-1 код языка цитаты)"
 }
-При auto_detect: определи язык цитаты, верни detected_lang. Субтитры = цитата как есть. script_ru/script_en — устаревшие при auto_detect."""
+При auto_detect: определи язык цитаты, верни detected_lang. Субтитры = цитата как есть. script_ru/script_en — устаревшие при auto_detect.
+
+Режим source_russian_only + bilingual: цитата и имя автора ВВОДА на русском. Обязательно:
+- script_ru — цитата дословно по-русски;
+- script_en — точный литературный перевод цитаты на английский;
+- person_name_en — принятое английское написание имени (Marcus Aurelius, Leo Tolstoy, …);
+- video_prompt_ru — персонаж/сцена, в речи дословная русская цитата в кавычках;
+- video_prompt_en — НЕ переписывай заново внешность: это ТОТ ЖЕ человек и ТА ЖЕ сцена, что в video_prompt_ru. Скопируй блоки 1–4 (персонаж, окружение, свет, движение) с video_prompt_ru, переведи их на английский ДОСЛОВНО по смыслу, без новых черт лица/причёски/возраста. Меняется только пункт РЕЧЬ: speaking in English + английская цитата в кавычках. Лицо и тело задаёт только фото-референс в генераторе — в тексте не противоречь фото и не описывай «другого» человека.
+- video_prompt — ВСЕГДА заполни: дублируй video_prompt_en (или общий промпт на английском 150–250 слов). Без ключа video_prompt ответ считается ошибочным."""
 
 
 def _image_to_base64_url(path: str | Path) -> str:
@@ -67,13 +76,29 @@ def _image_to_base64_url(path: str | Path) -> str:
 
 
 def _parse_json_response(text: str) -> dict:
-    raw = text.strip()
-    for pattern in (r"```(?:json)?\s*(.*?)\s*```", r"(\{[\s\S]*\})"):
-        m = re.search(pattern, raw, re.DOTALL)
-        if m:
-            raw = m.group(1).strip()
-            break
-    return json.loads(raw)
+    from utils.json_parse import parse_json_safe
+    return parse_json_safe(text)
+
+
+def _ensure_video_prompt(data: dict) -> None:
+    """
+    LLM иногда отдаёт только video_prompt_ru / video_prompt_en (bilingual), без video_prompt.
+    """
+    vp = (data.get("video_prompt") or "").strip()
+    if vp:
+        return
+    ru = (data.get("video_prompt_ru") or "").strip()
+    en = (data.get("video_prompt_en") or "").strip()
+    if en:
+        data["video_prompt"] = en
+        logger.warning("[Mode4 Prompt] Filled video_prompt from video_prompt_en")
+    elif ru:
+        data["video_prompt"] = ru
+        logger.warning("[Mode4 Prompt] Filled video_prompt from video_prompt_ru")
+    else:
+        raise ValueError(
+            "Prompt agent missing video_prompt (and no video_prompt_ru / video_prompt_en)"
+        )
 
 
 async def run_quote_prompt_agent(
@@ -83,6 +108,7 @@ async def run_quote_prompt_agent(
     bilingual: bool = False,
     subtitle_lang: str = "ru",
     auto_detect_lang: bool = False,
+    source_russian_only: bool = False,
 ) -> dict:
     """
     Анализирует фото личности и цитату, возвращает промпты для видео.
@@ -94,6 +120,7 @@ async def run_quote_prompt_agent(
         bilingual: если True — 2 фрагмента (RU + EN)
         subtitle_lang: "ru" | "en" — язык субтитров при одном фрагменте
         auto_detect_lang: если True — определить язык цитаты, субтитры = цитата как есть
+        source_russian_only: цитата и имя на русском; при bilingual — перевод для EN-версии и person_name_en
 
     Returns:
         {
@@ -113,6 +140,16 @@ async def run_quote_prompt_agent(
         "Субтитры = цитата без изменений."
     ) if auto_detect_lang else ""
 
+    ru_bilingual_hint = (
+        "\n\nsource_russian_only: True — цитата и имя автора УЖЕ на русском. "
+        "Сгенерируй ДВЕ версии промптов (video_prompt_ru + video_prompt_en), script_ru, script_en, person_name_en. "
+        "ОБЯЗАТЕЛЬНО также ключ video_prompt — скопируй туда video_prompt_en (полный английский промпт). "
+        "Имя автора в промпты НЕ включать; для подписи пользователю нужен person_name_en. "
+        "КРИТИЧНО: сначала полностью сформируй video_prompt_ru (одно лицо/сцена по фото). "
+        "video_prompt_en = тот же персонаж и сцена (перевод описания), отличается только язык речи и цитата в кавычках. "
+        "Запрещено в EN-версии выдумывать другую внешность."
+    ) if source_russian_only and bilingual else ""
+
     msg = HumanMessage(content=[
         {"type": "text", "text": (
             f"Имя личности (НЕ писать в промпте! Используй для эпохи и исторической точности): {person_name}\n\n"
@@ -120,12 +157,14 @@ async def run_quote_prompt_agent(
             f"bilingual: {bilingual}\n"
             f"subtitle_lang: {subtitle_lang}\n"
             f"auto_detect_lang: {auto_detect_lang}\n"
+            f"source_russian_only: {source_russian_only}\n"
             "video_prompt: 150–250 слов. ДЕТАЛЬНО опиши персонажа (внешность, одежда эпохи, выражение), "
             "окружение (архитектура, предметы, природа — всё соответствующие эпохе), освещение, атмосферу. "
             "Проверь историческую точность: одежда, материалы, технологии должны соответствовать эпохе персонажа. "
             "Цитату в кавычках."
-            + auto_hint +
-            " Верни ТОЛЬКО JSON."
+            + auto_hint
+            + ru_bilingual_hint
+            + " Верни ТОЛЬКО JSON."
         )},
         {"type": "image_url", "image_url": {"url": img_url}},
     ])
@@ -134,12 +173,23 @@ async def run_quote_prompt_agent(
     text = resp.content if hasattr(resp, "content") else str(resp)
     data = _parse_json_response(text)
 
-    if "video_prompt" not in data:
-        raise ValueError("Prompt agent missing video_prompt")
+    _ensure_video_prompt(data)
+
     data.setdefault("script_ru", quote)
     data.setdefault("script_en", "")
+    data.setdefault("person_name_en", "")
     data.setdefault("voice_description", "")
     data.setdefault("detected_lang", "")
+
+    if source_russian_only and bilingual:
+        if not data.get("script_ru"):
+            data["script_ru"] = quote
+        if not (data.get("script_en") or "").strip():
+            logger.warning("[Mode4 Prompt] Missing script_en — using Russian quote as fallback")
+            data["script_en"] = quote
+        if not (data.get("person_name_en") or "").strip():
+            logger.warning("[Mode4 Prompt] Missing person_name_en — using Russian name as fallback")
+            data["person_name_en"] = person_name
 
     if auto_detect_lang:
         # Субтитры = цитата как есть (в языке ввода)

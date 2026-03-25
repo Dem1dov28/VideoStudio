@@ -87,32 +87,48 @@ export const api = {
   deleteVideo:        (sid)        => request(`/api/videos/${sid}`, { method: 'DELETE' }),
   // Keyframe video generation (start + end frame)
   generateKeyframeVideo: (data) => request('/api/video/keyframe', { method: 'POST', body: JSON.stringify(data) }),
+  regenerateVideo: (sid, opts = {}) =>
+    request(`/api/videos/${sid}/regenerate`, {
+      method: 'POST',
+      body: JSON.stringify(opts.filename ? { filename: opts.filename } : {}),
+    }),
 };
 
 /** Subscribe to SSE log stream. Returns cleanup function. */
 export function subscribeToStream(sessionId, onMessage, onDone, onError) {
   const es = new EventSource(`${BASE}/api/pipeline/${sessionId}/stream`);
+  let closed = false;
+
+  const finish = () => {
+    closed = true;
+    try {
+      es.close();
+    } catch {/* ignore */}
+  };
 
   es.onmessage = (e) => {
+    if (closed) return;
     try {
       const data = JSON.parse(e.data);
       if (data.type === 'done') {
+        finish();
         onDone(data);
-        es.close();
       } else if (data.type === 'error') {
+        finish();
         onError(data.error);
-        es.close();
       } else if (data.type === 'log') {
         onMessage(data);
       }
-      // heartbeat — ignore
     } catch {/* ignore */}
   };
 
   es.onerror = () => {
+    if (closed) return;
+    finish();
     onError('Connection lost');
-    es.close();
   };
 
-  return () => es.close();
+  return () => {
+    finish();
+  };
 }

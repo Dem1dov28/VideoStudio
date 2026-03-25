@@ -69,8 +69,18 @@ export default function VideoCard({ video, onClick, onDelete }) {
 
       {/* Info */}
       <div className="p-3 space-y-2">
-        <div className="font-medium text-sm text-[#e4e4f0] line-clamp-2" title={video.title}>
-          {video.title || `Видео #${video.session_id.slice(-8)}`}
+        <div className="flex items-start gap-2 min-w-0">
+          {(video.video_lang === 'ru' || video.video_lang === 'en') && (
+            <span
+              className="shrink-0 text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded bg-[#27272f] text-[#a1a1aa]"
+              title={video.video_lang === 'en' ? 'English' : 'Русский'}
+            >
+              {video.video_lang}
+            </span>
+          )}
+          <div className="font-medium text-sm text-[#e4e4f0] line-clamp-2 min-w-0 flex-1" title={video.title}>
+            {video.title || `Видео #${video.session_id.slice(-8)}`}
+          </div>
         </div>
         <div className="flex items-center justify-between gap-2">
           <span className="text-xs text-[#71717a]">{video.size_mb ?? '—'} MB</span>

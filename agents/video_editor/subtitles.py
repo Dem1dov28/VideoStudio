@@ -367,6 +367,62 @@ def render_subtitle_overlay(
     return np.array(img_out)
 
 
+def render_static_quote_caption_overlay(
+    text: str,
+    width: int,
+    height: int,
+    t: float,
+    duration: float,
+    *,
+    fade_in: float = 0.45,
+    bottom_frac: float = 0.88,
+) -> np.ndarray:
+    """
+    Полная подпись «"цитата" – Автор» несколькими строками у нижнего края (Mode 4).
+    Без пословной синхронизации с Whisper — текст виден на протяжении ролика.
+    """
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    if not text or not text.strip():
+        return np.array(img)
+    draw = ImageDraw.Draw(img)
+    font_size = max(30, min(54, width // 16))
+    font = load_ui_font(font_size, bold=True)
+    max_text_w = int(width * dt.SUBTITLE_MAX_WIDTH_FRAC) - 2 * dt.SUBTITLE_PAD_X
+    lines = _wrap_text(text.strip(), font, max_text_w, draw)
+    if not lines:
+        return np.array(img)
+
+    line_heights: list[int] = []
+    for line in lines:
+        bb = draw.textbbox((0, 0), line, font=font)
+        line_heights.append(bb[3] - bb[1])
+    gap = max(4, font_size // 10)
+    total_h = sum(line_heights) + gap * (len(lines) - 1)
+    bottom_y = int(height * bottom_frac)
+    y = max(dt.SUBTITLE_PAD_Y, bottom_y - total_h)
+
+    alpha_m = min(1.0, t / fade_in) if fade_in > 0 else 1.0
+    for line, lh in zip(lines, line_heights):
+        bb = draw.textbbox((0, 0), line, font=font)
+        line_w = bb[2] - bb[0]
+        x = (width - line_w) // 2
+        draw.text(
+            (x, y),
+            line,
+            font=font,
+            fill=dt.SUB_WHITE,
+            stroke_width=5,
+            stroke_fill=(20, 12, 30, 245),
+        )
+        y += lh + gap
+
+    arr = np.array(img)
+    if alpha_m < 1.0:
+        arr = arr.copy()
+        arr[:, :, 3] = (arr[:, :, 3].astype(np.float32) * alpha_m).astype(np.uint8)
+    return arr
+
+
 # ── Backwards-compatible alias (static frame = no karaoke progression) ─────
 
 def _make_subtitle_frame(text: str, width: int, height: int) -> np.ndarray:

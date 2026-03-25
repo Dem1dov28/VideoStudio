@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     fastgen_video_parallel_workers: int = Field(10, alias="FASTGEN_VIDEO_PARALLEL_WORKERS")
     # Сколько изображений генерировать параллельно (Mode 1 и др.). 5 = до 5 одновременно.
     fastgen_image_parallel_workers: int = Field(5, alias="FASTGEN_IMAGE_PARALLEL_WORKERS")
+    # Img2img: доля шума 0.0–1.0 (как в SD denoising strength). Ниже = больше похоже на референс.
+    # Рекомендации из гайдов: ~0.15–0.35 для сохранения композиции; None = не трогать UI FastGen.
+    # Если на сайте слайдер 0–100, в .env можно указать 25 (= 0.25).
+    fastgen_img2img_strength: float | None = Field(None, alias="FASTGEN_IMG2IMG_STRENGTH")
 
     # ── HuggingFace (fallback, free) ──────────────────────────────────────────
     hf_token: str = Field("", alias="HF_TOKEN")

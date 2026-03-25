@@ -1,10 +1,20 @@
 import { useEffect, useState, useReducer } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { RiVideoLine, RiLoader4Line, RiCloseLine } from 'react-icons/ri';
+import { RiVideoLine, RiLoader4Line, RiCloseLine, RiRestartLine } from 'react-icons/ri';
 import { api } from '../services/api';
 import VideoCard from '../components/VideoCard';
 
 const initialState = { videos: [], loading: true, error: false };
+
+/** Подпись под превью в модалке: RU/EN в формате цитаты с автором, если есть в API. */
+function captionForLibraryVideo(v) {
+  if (!v) return '';
+  const fn = (v.filename || '').toLowerCase();
+  if (fn.includes('video_en')) return v.quote_caption_en || v.quote_caption_ru || v.title || '';
+  if (fn.includes('video_ru')) return v.quote_caption_ru || v.title || '';
+  return v.quote_caption_ru || v.quote_caption_en || v.title || '';
+}
 
 function historyReducer(state, action) {
   switch (action.type) {
@@ -20,8 +30,10 @@ function historyReducer(state, action) {
 }
 
 export default function History() {
+  const navigate = useNavigate();
   const [state, dispatch] = useReducer(historyReducer, initialState);
   const [selected, setSelected] = useState(null);
+  const [regenBusy, setRegenBusy] = useState(false);
   const { videos, loading, networkError } = {
     videos: state.videos,
     loading: state.loading,
@@ -145,14 +157,67 @@ export default function History() {
                   <source src={api.videoUrl(selected?.session_id, selected?.filename)} type="video/mp4" />
                 </video>
               </div>
-              <div className="p-4 flex gap-2">
-                <a
-                  href={api.videoUrl(selected?.session_id, selected?.filename)}
-                  download
-                  className="btn-primary flex items-center gap-2 text-sm flex-1 justify-center"
-                >
-                  ⬇ Скачать
-                </a>
+              {(() => {
+                const cap = captionForLibraryVideo(selected);
+                if (!cap) return null;
+                return (
+                  <div className="px-4 pt-2 pb-0">
+                    <p className="text-[#d4d4d8] text-sm leading-relaxed text-center">{cap}</p>
+                  </div>
+                );
+              })()}
+              <div className="p-4 flex flex-col gap-2">
+                <div className="flex gap-2">
+                  <a
+                    href={api.videoUrl(selected?.session_id, selected?.filename)}
+                    download
+                    className="btn-primary flex items-center gap-2 text-sm flex-1 justify-center"
+                  >
+                    ⬇ Скачать
+                  </a>
+                </div>
+                {selected?.can_regenerate && (
+                  <button
+                    type="button"
+                    disabled={regenBusy}
+                    onClick={async () => {
+                      if (!selected?.session_id) return;
+                      const fn = (selected.filename || '').toLowerCase();
+                      const enOnly = fn === 'video_en.mp4';
+                      const ruOnly = fn === 'video_ru.mp4';
+                      const msg = enOnly
+                        ? 'Перегенерировать только английскую версию? Файлы этой сессии будут удалены, затем создастся новая сессия с одним EN-роликом.'
+                        : ruOnly
+                          ? 'Перегенерировать только русскую версию? Файлы этой сессии будут удалены, затем создастся новая сессия с одним RU-роликом.'
+                          : 'Перегенерировать это видео с теми же параметрами? Текущие файлы сессии будут удалены.';
+                      if (!confirm(msg)) return;
+                      setRegenBusy(true);
+                      try {
+                        const res = await api.regenerateVideo(selected.session_id, {
+                          filename: selected.filename || undefined,
+                        });
+                        const newSid = res?.session_id;
+                        if (newSid) {
+                          setSelected(null);
+                          navigate(`/run/${newSid}`);
+                        }
+                      } catch (e) {
+                        alert(e.message || 'Не удалось запустить перегенерацию');
+                      } finally {
+                        setRegenBusy(false);
+                      }
+                    }}
+                    className="btn-secondary flex items-center justify-center gap-2 text-sm w-full"
+                  >
+                    <RiRestartLine className="text-lg" />
+                    {regenBusy ? 'Запуск…' : 'Перегенерировать'}
+                  </button>
+                )}
+                {selected && !selected.can_regenerate && (
+                  <p className="text-[10px] text-[#52525b] text-center leading-snug">
+                    Перегенерация недоступна: нет сохранённых параметров (создайте ролик ещё раз после обновления — дальше кнопка появится).
+                  </p>
+                )}
               </div>
             </motion.div>
           </motion.div>
