@@ -124,6 +124,17 @@ The BACKGROUND (sky, trees, neighboring houses, street, landscape) MUST REMAIN E
 - This is essential for smooth timelapse video.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+━━━ CONTENT SAFETY (MANDATORY) ━━━
+Generate ONLY original, generic content.
+- NO brand names, company names, logos
+- NO copyrighted characters
+- NO famous buildings or real-world designs
+- NO "in the style of" known brands
+- All vehicles and tools must be GENERIC (e.g., "excavator", not branded)
+- NO visible text or logos in the scene
+- Use only neutral descriptions (materials, shapes, function)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 STYLE: Photorealistic, shot on smartphone camera, natural lighting, authentic construction site look. NOT 3D render, NOT CGI, NOT animated, NOT cartoon. Must look like REAL smartphone footage.
 
 {title_line}
@@ -430,6 +441,8 @@ TRANSITION: "{start_state}" → "{end_state}".
 MUST strictly follow start frame to end frame. No sudden jumps.
 
 BACKGROUND: Sky, trees, street stay SAME. Only house evolves.
+
+SAFETY: Generic content ONLY. NO brands, logos, copyrighted material. Generic equipment.
 
 TECHNICAL: Vertical 9:16, 1080x1920, cinematic, photorealistic 4K."""
 

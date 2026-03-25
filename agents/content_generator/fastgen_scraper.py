@@ -229,22 +229,43 @@ async def _wait_for_new_video_with_regen(
             last_error_check = time.monotonic()
         
         # Auto-regenerate after 7 minutes if still no result
-        if gen_button_el and gen_button_sel and (time.monotonic() - last_regen >= REGEN_INTERVAL_SECONDS):
+        if gen_button_sel and (time.monotonic() - last_regen >= REGEN_INTERVAL_SECONDS):
             logger.warning(f"[FastGen] No video after {REGEN_INTERVAL_SECONDS}s — clicking Generate again...")
-            await _screenshot(page, "auto_regen_video")
+            await _screenshot(page, "auto_regen_video_before")
             
-            # Check if button is enabled
+            # Find button FRESH (old element may be stale after 7 minutes)
             try:
-                disabled = await gen_button_el.get_attribute("disabled")
-                if disabled is None:
-                    await page.keyboard.press("Escape")
-                    await asyncio.sleep(0.3)
-                    await gen_button_el.click()
-                    last_regen = time.monotonic()
-                    logger.info("[FastGen] Generate button clicked again (auto-regen)")
-                    await asyncio.sleep(2)
+                fresh_btn = page.locator(gen_button_sel).first
+                if await fresh_btn.is_visible(timeout=2000):
+                    disabled = await fresh_btn.get_attribute("disabled")
+                    if disabled is None:
+                        await page.keyboard.press("Escape")
+                        await asyncio.sleep(0.5)
+                        await fresh_btn.click()
+                        last_regen = time.monotonic()
+                        logger.info("[FastGen] Generate button clicked again (auto-regen)")
+                        await asyncio.sleep(2)
+                        await _screenshot(page, "auto_regen_video_after")
+                    else:
+                        logger.warning("[FastGen] Generate button is disabled, skipping auto-regen")
+                else:
+                    logger.warning("[FastGen] Generate button not visible, trying alternative selectors...")
+                    # Try all generate selectors
+                    for sel in _GENERATE_SELECTORS:
+                        try:
+                            alt_btn = page.locator(sel).first
+                            if await alt_btn.is_visible(timeout=1000):
+                                disabled = await alt_btn.get_attribute("disabled")
+                                if disabled is None:
+                                    await alt_btn.click()
+                                    last_regen = time.monotonic()
+                                    logger.info(f"[FastGen] Clicked alt button: {sel}")
+                                    await asyncio.sleep(2)
+                                    break
+                        except Exception:
+                            continue
             except Exception as e:
-                logger.warning(f"[FastGen] Auto-regen click failed: {e}")
+                logger.warning(f"[FastGen] Auto-regen failed: {e}")
 
         await asyncio.sleep(4)
         elapsed += 4
@@ -281,21 +302,43 @@ async def _wait_for_new_image_with_regen(
             return list(new)
         
         # Auto-regenerate after 7 minutes if still no result
-        if gen_button_el and gen_button_sel and (time.monotonic() - last_regen >= REGEN_INTERVAL_SECONDS):
+        if gen_button_sel and (time.monotonic() - last_regen >= REGEN_INTERVAL_SECONDS):
             logger.warning(f"[FastGen] No image after {REGEN_INTERVAL_SECONDS}s — clicking Generate again...")
-            await _screenshot(page, "auto_regen_image")
+            await _screenshot(page, "auto_regen_image_before")
             
+            # Find button FRESH (old element may be stale after 7 minutes)
             try:
-                disabled = await gen_button_el.get_attribute("disabled")
-                if disabled is None:
-                    await page.keyboard.press("Escape")
-                    await asyncio.sleep(0.3)
-                    await gen_button_el.click()
-                    last_regen = time.monotonic()
-                    logger.info("[FastGen] Generate button clicked again (auto-regen)")
-                    await asyncio.sleep(2)
+                fresh_btn = page.locator(gen_button_sel).first
+                if await fresh_btn.is_visible(timeout=2000):
+                    disabled = await fresh_btn.get_attribute("disabled")
+                    if disabled is None:
+                        await page.keyboard.press("Escape")
+                        await asyncio.sleep(0.5)
+                        await fresh_btn.click()
+                        last_regen = time.monotonic()
+                        logger.info("[FastGen] Generate button clicked again (auto-regen)")
+                        await asyncio.sleep(2)
+                        await _screenshot(page, "auto_regen_image_after")
+                    else:
+                        logger.warning("[FastGen] Generate button is disabled, skipping auto-regen")
+                else:
+                    logger.warning("[FastGen] Generate button not visible, trying alternative selectors...")
+                    # Try all generate selectors
+                    for sel in _GENERATE_SELECTORS:
+                        try:
+                            alt_btn = page.locator(sel).first
+                            if await alt_btn.is_visible(timeout=1000):
+                                disabled = await alt_btn.get_attribute("disabled")
+                                if disabled is None:
+                                    await alt_btn.click()
+                                    last_regen = time.monotonic()
+                                    logger.info(f"[FastGen] Clicked alt button: {sel}")
+                                    await asyncio.sleep(2)
+                                    break
+                        except Exception:
+                            continue
             except Exception as e:
-                logger.warning(f"[FastGen] Auto-regen click failed: {e}")
+                logger.warning(f"[FastGen] Auto-regen failed: {e}")
         
         await asyncio.sleep(3)
         elapsed += 3
