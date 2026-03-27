@@ -15,6 +15,7 @@ function formatDate(ts) {
 export default function VideoCard({ video, onClick, onDelete }) {
   const [hovered, setHovered] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [showPublishing, setShowPublishing] = useState(false);
 
   const base = import.meta.env.VITE_API_URL || '';
   const thumbUrl = video?.thumbnail_url ? base + video.thumbnail_url : null;
@@ -33,6 +34,23 @@ export default function VideoCard({ video, onClick, onDelete }) {
       alert(err.message);
     } finally {
       setDeleting(false);
+    }
+  }
+
+  // Copy to clipboard helper
+  async function copyToClipboard(text, label) {
+    try {
+      await navigator.clipboard.writeText(text);
+      alert(`${label} скопирован в буфер обмена!`);
+    } catch (err) {
+      // Fallback for older browsers
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+      alert(`${label} скопирован в буфер обмена!`);
     }
   }
 
@@ -76,6 +94,114 @@ export default function VideoCard({ video, onClick, onDelete }) {
           <span className="text-xs text-[#71717a]">{video.size_mb ?? '—'} MB</span>
           <span className="text-[10px] text-[#52525b]">{formatDate(video.created_at)}</span>
         </div>
+        
+        {/* Publishing metadata button */}
+        {video.publishing && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowPublishing(!showPublishing);
+            }}
+            className="w-full flex items-center justify-center gap-1.5 text-brand-400 hover:text-brand-300 text-xs font-medium transition-colors py-1.5 px-2 rounded border border-brand-400/30 hover:border-brand-300 bg-brand-400/10"
+          >
+            📝 {showPublishing ? 'Скрыть' : 'Для YouTube'}
+          </button>
+        )}
+        
+        {/* Publishing metadata panel */}
+        {showPublishing && video.publishing && (
+          <div className="space-y-3 pt-2 border-t border-[#27272f]">
+            {/* Title */}
+            <div>
+              <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
+                Название
+              </label>
+              <div className="flex gap-1.5">
+                <input
+                  type="text"
+                  value={video.publishing.title || ''}
+                  readOnly
+                  className="flex-1 bg-[#0d0d14] border border-[#27272f] rounded px-2 py-1 text-xs text-white"
+                />
+                <button
+                  type="button"
+                  onClick={() => copyToClipboard(video.publishing.title || '', 'Название')}
+                  className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2 py-1 rounded transition-colors"
+                >
+                  Копия
+                </button>
+              </div>
+            </div>
+            
+            {/* Hashtags */}
+            <div>
+              <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
+                Хештеги
+              </label>
+              <div className="flex gap-1.5">
+                <input
+                  type="text"
+                  value={(video.publishing.hashtags || []).join(' ')}
+                  readOnly
+                  className="flex-1 bg-[#0d0d14] border border-[#27272f] rounded px-2 py-1 text-xs text-white"
+                />
+                <button
+                  type="button"
+                  onClick={() => copyToClipboard((video.publishing.hashtags || []).join(' '), 'Хештеги')}
+                  className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2 py-1 rounded transition-colors"
+                >
+                  Копия
+                </button>
+              </div>
+            </div>
+            
+            {/* Description */}
+            <div>
+              <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
+                Описание
+              </label>
+              <div className="flex gap-1.5">
+                <textarea
+                  value={video.publishing.description || ''}
+                  readOnly
+                  rows={3}
+                  className="flex-1 bg-[#0d0d14] border border-[#27272f] rounded px-2 py-1 text-xs text-white resize-none"
+                />
+                <button
+                  type="button"
+                  onClick={() => copyToClipboard(video.publishing.description || '', 'Описание')}
+                  className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2 py-1 rounded transition-colors self-start mt-0.5"
+                >
+                  Копия
+                </button>
+              </div>
+            </div>
+            
+            {/* Tags */}
+            <div>
+              <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
+                Теги
+              </label>
+              <div className="flex gap-1.5">
+                <input
+                  type="text"
+                  value={(video.publishing.tags || []).join(', ')}
+                  readOnly
+                  className="flex-1 bg-[#0d0d14] border border-[#27272f] rounded px-2 py-1 text-xs text-white"
+                />
+                <button
+                  type="button"
+                  onClick={() => copyToClipboard((video.publishing.tags || []).join(', '), 'Теги')}
+                  className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2 py-1 rounded transition-colors"
+                >
+                  Копия
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        
         <div className="flex items-center gap-2">
           <a
             href={video?.url ? base + video.url : '#'}

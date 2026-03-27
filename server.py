@@ -92,6 +92,9 @@ async def _run_pipeline_task(
             mode8_house_style=getattr(req, "mode8_house_style", None),
             mode8_location=getattr(req, "mode8_location", None),
             mode8_num_stages=getattr(req, "mode8_num_stages", 5),
+            mode9_vehicle_type=getattr(req, "mode9_vehicle_type", None),
+            mode9_location=getattr(req, "mode9_location", None),
+            mode9_num_stages=getattr(req, "mode9_num_stages", 5),
             control=control,
         )
 
@@ -104,6 +107,7 @@ async def _run_pipeline_task(
             "topic": result.get("topic"),
             "trend": result.get("trend"),
             "session_id": session_id,
+            "publishing": result.get("publishing"),
         }
         await queue.put({"type": "done", **session["result"]})
 
@@ -213,9 +217,13 @@ class StartRequest(BaseModel):
     mode7_keyboards: list[str] | None = None  # ["honey", "jelly", "ice", "chocolate"]
     mode7_animal_type: str | None = None  # "cat", "dog", "kitten", "puppy", "random"
     # Mode 8: House Building Timelapse
-    mode8_house_style: str | None = None  # "modern", "cottage", "villa", "cabin", "farmhouse"
-    mode8_location: str | None = None  # "suburbs", "forest", "seaside", "countryside", "mountains"
+    mode8_house_style: str | None = None  # "modern", "contemporary", "minimalist", "scandinavian", "cottage", "villa", "farmhouse", "colonial", "victorian", "mediterranean", "cabin", "log_house", "chalet", "adobe", "mansion", "estate"
+    mode8_location: str | None = None  # "suburbs", "urban_edge", "planned_community", "forest", "wooded_area", "seaside", "lakefront", "riverside", "countryside", "farmland", "vineyard", "mountains", "hillside", "valley", "desert", "oasis", "tropical", "island"
     mode8_num_stages: int = 5
+    # Mode 9: Vehicle Assembly Timelapse
+    mode9_vehicle_type: str | None = None  # "airplane_passenger", "airplane_private", "car_modern", "car_sport", "truck_cargo", "tractor", "excavator", "ship_cargo", "yacht", "helicopter", "drone", and 21 more...
+    mode9_location: str | None = None  # "construction_site", "factory", "shipyard", "hangar", "empty_field", "forest_clearing", "desert", "mountain_valley", "city_outskirts", "port", and 9 more...
+    mode9_num_stages: int = 5
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -269,6 +277,9 @@ async def start_pipeline(req: StartRequest):
         pass
     elif req.mode == 8:
         # Mode 8: House Building Timelapse — no required inputs, auto-generates everything
+        pass
+    elif req.mode == 9:
+        # Mode 9: Vehicle Assembly Timelapse — no required inputs, auto-generates everything
         pass
     elif not req.topic and not req.auto_topic:
         raise HTTPException(400, "Provide 'topic' or set 'auto_topic: true'")
@@ -454,12 +465,14 @@ def _get_video_metadata() -> list[dict]:
     """Список видео: плоская папка video_*.mp4 и legacy session/*.mp4."""
     videos_dir = settings.videos_dir
     topics_by_session: dict[str, str] = {}
+    publishing_by_session: dict[str, dict] = {}
     try:
-        from agents.topics_history import get_used_topics
+        from agents.topics_history import get_used_topics, get_publishing_by_session
         for t in get_used_topics():
             sid = t.get("session_id")
             if sid:
                 topics_by_session[sid] = t.get("topic") or t.get("video_angle") or f"Видео #{sid[-8:]}"
+        publishing_by_session = get_publishing_by_session()
     except Exception:
         pass
 
@@ -483,6 +496,7 @@ def _get_video_metadata() -> list[dict]:
                     "created_at": stat.st_mtime,
                     "url": f"/api/video/{sid}/{mp4.name}",
                     "thumbnail_url": f"/api/video/{sid}/thumbnail",
+                    "publishing": publishing_by_session.get(sid),
                 })
             except Exception:
                 pass
@@ -515,6 +529,7 @@ def _get_video_metadata() -> list[dict]:
                     "created_at": stat.st_mtime,
                     "url": f"/api/video/{sid}/{mp4.name}",
                     "thumbnail_url": f"/api/video/{sid}/thumbnail",
+                    "publishing": publishing_by_session.get(sid),
                 })
 
     videos.sort(key=lambda v: v["created_at"], reverse=True)

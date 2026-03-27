@@ -8,6 +8,8 @@ Mode 4: Цитата + фото
 Mode 5: Длинные видео (~1 час)
 Mode 6: Viral Cartoon Drama
 Mode 7: Animal Keyboard Videos
+Mode 8: House Building Timelapse
+Mode 9: Vehicle Assembly Timelapse
 """
 
 from __future__ import annotations
@@ -50,10 +52,27 @@ async def run_pipeline(
     mode8_house_style: str | None = None,
     mode8_location: str | None = None,
     mode8_num_stages: int = 5,
+    mode9_vehicle_type: str | None = None,
+    mode9_location: str | None = None,
+    mode9_num_stages: int = 5,
     control: dict | None = None,
 ) -> dict[str, Any]:
     """Route to the appropriate pipeline by mode."""
     from pipeline_control import checkpoint
+
+    # Mode 9: Vehicle Assembly Timelapse
+    if mode == 9:
+        await checkpoint(control)
+        from modes.mode9.pipeline import run_mode9_pipeline
+        return await run_mode9_pipeline(
+            session_id=session_id,
+            local_only=local_only,
+            vehicle_type=mode9_vehicle_type,
+            location=mode9_location,
+            num_stages=mode9_num_stages,
+            language=language or "ru",
+            control=control,
+        )
 
     # Mode 8: House Building Timelapse
     if mode == 8:

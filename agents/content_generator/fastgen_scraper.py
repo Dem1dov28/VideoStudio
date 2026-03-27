@@ -185,6 +185,42 @@ async def _check_video_page_errors(page: Page) -> str | None:
     return None
 
 
+async def _count_error_blocks(page: Page) -> int:
+    """
+    Count error blocks in the error container.
+    Returns the number of error divs with class 'text-xs bg-destructive/10'.
+    """
+    try:
+        count = await page.evaluate("""() => {
+            // Find error blocks: divs with class containing 'bg-destructive/10'
+            const errorDivs = document.querySelectorAll('div.text-xs.bg-destructive\\/10, div[class*=\"bg-destructive\"]');
+            return errorDivs.length;
+        }""")
+        return int(count) if count else 0
+    except Exception as e:
+        logger.debug(f"[FastGen] Could not count error blocks: {e}")
+        return 0
+
+
+async def _wait_for_error_count_increase(page: Page, initial_count: int, timeout_s: int = 60) -> bool:
+    """
+    Wait until the error count on page increases.
+    Returns True if error count increased, False if timeout.
+    """
+    deadline = time.monotonic() + timeout_s
+    check_interval = 2
+    
+    while time.monotonic() < deadline:
+        current_count = await _count_error_blocks(page)
+        if current_count > initial_count:
+            logger.info(f"[FastGen] Error count increased: {initial_count} → {current_count}")
+            return True
+        await asyncio.sleep(check_interval)
+    
+    logger.warning(f"[FastGen] Error count did not increase within {timeout_s}s (still {initial_count})")
+    return False
+
+
 class VideoGenerationError(RuntimeError):
     """Ошибка генерации, обнаруженная на странице (можно перегенерировать)."""
     pass
@@ -202,14 +238,25 @@ async def _wait_for_new_video_with_regen(
     gen_button_sel: str = None,
 ) -> list[str]:
     """
-    Wait for video generation with auto-regeneration after 7 minutes.
-    If no video appears after REGEN_INTERVAL_SECONDS, clicks Generate button again.
+    Wait for video generation with error-count-based retry.
+    
+    Logic:
+    1. Get initial error count at start
+    2. Wait for video to appear
+    3. If error detected: wait for error count to increase, then click Generate
+    
+    IMPORTANT: Only click Generate when error count increases.
+    This prevents queue overflow from multiple rapid clicks.
     """
-    logger.info(f"[FastGen] Waiting for video generation (timeout {timeout_s}s, auto-regen after {REGEN_INTERVAL_SECONDS}s) ...")
+    logger.info(f"[FastGen] Waiting for video generation (timeout {timeout_s}s) ...")
+    
+    # Get initial error count
+    initial_error_count = await _count_error_blocks(page)
+    logger.info(f"[FastGen] Initial error count: {initial_error_count}")
+    
     deadline = time.monotonic() + timeout_s
     last_log = time.monotonic()
     last_error_check = time.monotonic()
-    last_regen = time.monotonic()  # Time of last Generate click
     elapsed = 0
     ERROR_CHECK_INTERVAL = 10
     
@@ -224,48 +271,47 @@ async def _wait_for_new_video_with_regen(
         if time.monotonic() - last_error_check >= ERROR_CHECK_INTERVAL:
             err = await _check_video_page_errors(page)
             if err:
-                logger.warning(f"[FastGen] {err} — retrying earlier")
-                raise VideoGenerationError(err)
-            last_error_check = time.monotonic()
-        
-        # Auto-regenerate after 7 minutes if still no result
-        if gen_button_sel and (time.monotonic() - last_regen >= REGEN_INTERVAL_SECONDS):
-            logger.warning(f"[FastGen] No video after {REGEN_INTERVAL_SECONDS}s — clicking Generate again...")
-            await _screenshot(page, "auto_regen_video_before")
-            
-            # Find button FRESH (old element may be stale after 7 minutes)
-            try:
-                fresh_btn = page.locator(gen_button_sel).first
-                if await fresh_btn.is_visible(timeout=2000):
-                    disabled = await fresh_btn.get_attribute("disabled")
-                    if disabled is None:
-                        await page.keyboard.press("Escape")
-                        await asyncio.sleep(0.5)
-                        await fresh_btn.click()
-                        last_regen = time.monotonic()
-                        logger.info("[FastGen] Generate button clicked again (auto-regen)")
-                        await asyncio.sleep(2)
-                        await _screenshot(page, "auto_regen_video_after")
-                    else:
-                        logger.warning("[FastGen] Generate button is disabled, skipping auto-regen")
-                else:
-                    logger.warning("[FastGen] Generate button not visible, trying alternative selectors...")
-                    # Try all generate selectors
-                    for sel in _GENERATE_SELECTORS:
+                logger.warning(f"[FastGen] {err} — waiting for error count to increase...")
+                
+                # Wait for error count to increase before clicking Generate
+                error_increased = await _wait_for_error_count_increase(
+                    page, initial_error_count, timeout_s=60
+                )
+                
+                if error_increased:
+                    # Update initial count for next cycle
+                    initial_error_count = await _count_error_blocks(page)
+                    
+                    # Click Generate button for new attempt
+                    if gen_button_sel:
+                        logger.info("[FastGen] Error count increased — clicking Generate for retry...")
+                        await _screenshot(page, "error_regen_before")
+                        
                         try:
-                            alt_btn = page.locator(sel).first
-                            if await alt_btn.is_visible(timeout=1000):
-                                disabled = await alt_btn.get_attribute("disabled")
+                            fresh_btn = page.locator(gen_button_sel).first
+                            if await fresh_btn.is_visible(timeout=2000):
+                                disabled = await fresh_btn.get_attribute("disabled")
                                 if disabled is None:
-                                    await alt_btn.click()
-                                    last_regen = time.monotonic()
-                                    logger.info(f"[FastGen] Clicked alt button: {sel}")
+                                    await page.keyboard.press("Escape")
+                                    await asyncio.sleep(0.5)
+                                    await fresh_btn.click()
+                                    logger.info("[FastGen] Generate button clicked (error-triggered retry)")
                                     await asyncio.sleep(2)
-                                    break
-                        except Exception:
-                            continue
-            except Exception as e:
-                logger.warning(f"[FastGen] Auto-regen failed: {e}")
+                                    await _screenshot(page, "error_regen_after")
+                                    # Reset deadline after clicking Generate - give new attempt full timeout
+                                    deadline = time.monotonic() + timeout_s
+                                    elapsed = 0
+                                    logger.info(f"[FastGen] Deadline reset, waiting for video (timeout {timeout_s}s)...")
+                                else:
+                                    logger.warning("[FastGen] Generate button is disabled, skipping error-retry")
+                            else:
+                                logger.warning("[FastGen] Generate button not visible for error-retry")
+                        except Exception as e:
+                            logger.warning(f"[FastGen] Error-triggered regen failed: {e}")
+                else:
+                    logger.warning("[FastGen] Error count did not increase — not clicking Generate")
+                
+            last_error_check = time.monotonic()
 
         await asyncio.sleep(4)
         elapsed += 4
@@ -285,14 +331,27 @@ async def _wait_for_new_image_with_regen(
     gen_button_sel: str = None,
 ) -> list[str]:
     """
-    Wait for image generation with auto-regeneration after 7 minutes.
-    If no image appears after REGEN_INTERVAL_SECONDS, clicks Generate button again.
+    Wait for image generation with error-count-based retry.
+    
+    Logic:
+    1. Get initial error count at start
+    2. Wait for image to appear
+    3. If error detected: wait for error count to increase, then click Generate
+    
+    IMPORTANT: Only click Generate when error count increases.
+    This prevents queue overflow from multiple rapid clicks.
     """
-    logger.info(f"[FastGen] Waiting for image generation (timeout {timeout_s}s, auto-regen after {REGEN_INTERVAL_SECONDS}s) ...")
+    logger.info(f"[FastGen] Waiting for image generation (timeout {timeout_s}s) ...")
+    
+    # Get initial error count
+    initial_error_count = await _count_error_blocks(page)
+    logger.info(f"[FastGen] Initial error count: {initial_error_count}")
+    
     deadline = time.monotonic() + timeout_s
     last_log = time.monotonic()
-    last_regen = time.monotonic()
+    last_error_check = time.monotonic()
     elapsed = 0
+    ERROR_CHECK_INTERVAL = 10
     
     while time.monotonic() < deadline:
         current = await _collect_image_srcs(page)
@@ -301,44 +360,51 @@ async def _wait_for_new_image_with_regen(
             logger.success(f"[FastGen] Image ready after ~{int(elapsed)}s")
             return list(new)
         
-        # Auto-regenerate after 7 minutes if still no result
-        if gen_button_sel and (time.monotonic() - last_regen >= REGEN_INTERVAL_SECONDS):
-            logger.warning(f"[FastGen] No image after {REGEN_INTERVAL_SECONDS}s — clicking Generate again...")
-            await _screenshot(page, "auto_regen_image_before")
-            
-            # Find button FRESH (old element may be stale after 7 minutes)
-            try:
-                fresh_btn = page.locator(gen_button_sel).first
-                if await fresh_btn.is_visible(timeout=2000):
-                    disabled = await fresh_btn.get_attribute("disabled")
-                    if disabled is None:
-                        await page.keyboard.press("Escape")
-                        await asyncio.sleep(0.5)
-                        await fresh_btn.click()
-                        last_regen = time.monotonic()
-                        logger.info("[FastGen] Generate button clicked again (auto-regen)")
-                        await asyncio.sleep(2)
-                        await _screenshot(page, "auto_regen_image_after")
-                    else:
-                        logger.warning("[FastGen] Generate button is disabled, skipping auto-regen")
-                else:
-                    logger.warning("[FastGen] Generate button not visible, trying alternative selectors...")
-                    # Try all generate selectors
-                    for sel in _GENERATE_SELECTORS:
+        # Check for errors every 10 seconds
+        if time.monotonic() - last_error_check >= ERROR_CHECK_INTERVAL:
+            err = await _check_video_page_errors(page)
+            if err:
+                logger.warning(f"[FastGen] {err} — waiting for error count to increase...")
+                
+                # Wait for error count to increase before clicking Generate
+                error_increased = await _wait_for_error_count_increase(
+                    page, initial_error_count, timeout_s=60
+                )
+                
+                if error_increased:
+                    # Update initial count for next cycle
+                    initial_error_count = await _count_error_blocks(page)
+                    
+                    # Click Generate button for new attempt
+                    if gen_button_sel:
+                        logger.info("[FastGen] Error count increased — clicking Generate for retry...")
+                        await _screenshot(page, "error_regen_image_before")
+                        
                         try:
-                            alt_btn = page.locator(sel).first
-                            if await alt_btn.is_visible(timeout=1000):
-                                disabled = await alt_btn.get_attribute("disabled")
+                            fresh_btn = page.locator(gen_button_sel).first
+                            if await fresh_btn.is_visible(timeout=2000):
+                                disabled = await fresh_btn.get_attribute("disabled")
                                 if disabled is None:
-                                    await alt_btn.click()
-                                    last_regen = time.monotonic()
-                                    logger.info(f"[FastGen] Clicked alt button: {sel}")
+                                    await page.keyboard.press("Escape")
+                                    await asyncio.sleep(0.5)
+                                    await fresh_btn.click()
+                                    logger.info("[FastGen] Generate button clicked (error-triggered retry)")
                                     await asyncio.sleep(2)
-                                    break
-                        except Exception:
-                            continue
-            except Exception as e:
-                logger.warning(f"[FastGen] Auto-regen failed: {e}")
+                                    await _screenshot(page, "error_regen_image_after")
+                                    # Reset deadline after clicking Generate - give new attempt full timeout
+                                    deadline = time.monotonic() + timeout_s
+                                    elapsed = 0
+                                    logger.info(f"[FastGen] Deadline reset, waiting for image (timeout {timeout_s}s)...")
+                                else:
+                                    logger.warning("[FastGen] Generate button is disabled, skipping error-retry")
+                            else:
+                                logger.warning("[FastGen] Generate button not visible for error-retry")
+                        except Exception as e:
+                            logger.warning(f"[FastGen] Error-triggered regen failed: {e}")
+                else:
+                    logger.warning("[FastGen] Error count did not increase — not clicking Generate")
+                
+            last_error_check = time.monotonic()
         
         await asyncio.sleep(3)
         elapsed += 3
@@ -879,26 +945,42 @@ class FastGenScraper:
                 if not gen_el:
                     await _screenshot(page, "error_no_gen_btn_retry")
                     raise RuntimeError("Generate button not found on retry.")
-
+            
             # Snapshot right before each click (new img src must differ from this set)
             images_before = await _collect_image_srcs(page)
-
+            
             # Wait up to 5s for button to become enabled
             for _ in range(10):
                 disabled = await gen_el.get_attribute("disabled")
                 if disabled is None:
                     break
                 await asyncio.sleep(0.5)
-
+            
             await page.keyboard.press("Escape")
             await asyncio.sleep(0.3)
-
+            
             if attempt > 0:
+                # After TimeoutError: check if button is still disabled (generation in progress)
+                # This can happen if _wait_for_new_image_with_regen clicked Generate recently
+                disabled = await gen_el.get_attribute("disabled")
+                if disabled is not None:
+                    logger.warning("[FastGen] Generate button still disabled after timeout - generation may still be in progress")
+                    # Wait a bit more for the button to become enabled
+                    for _ in range(10):
+                        disabled = await gen_el.get_attribute("disabled")
+                        if disabled is None:
+                            break
+                        await asyncio.sleep(0.5)
+                    if disabled is not None:
+                        logger.warning("[FastGen] Button still disabled after 5s - skipping retry click")
+                        await asyncio.sleep(2)
+                        continue
+                            
                 logger.warning(
                     f"[FastGen] Retry {attempt + 1}/{max_attempts} "
                     f"(timeout was {timeout_s}s) ..."
                 )
-
+            
             logger.info(f"Clicking: {gen_sel}")
             await page.evaluate("""(sel) => {
                 const el = document.querySelector(sel);
@@ -906,7 +988,7 @@ class FastGenScraper:
             }""", gen_sel)
             await asyncio.sleep(2)
             await _screenshot(page, "05_generating")
-
+            
             try:
                 new_srcs = await _wait_for_new_image_with_regen(
                     page, images_before, timeout_s=timeout_s,
@@ -1023,26 +1105,42 @@ class FastGenScraper:
                 if not gen_el:
                     await _screenshot(page, "error_no_gen_btn_retry")
                     raise RuntimeError("Generate button not found on retry.")
-
+            
             # Snapshot right before each click (new img src must differ from this set)
             images_before = await _collect_image_srcs(page)
-
+            
             # Wait up to 5s for button to become enabled
             for _ in range(10):
                 disabled = await gen_el.get_attribute("disabled")
                 if disabled is None:
                     break
                 await asyncio.sleep(0.5)
-
+            
             await page.keyboard.press("Escape")
             await asyncio.sleep(0.3)
-
+            
             if attempt > 0:
+                # After TimeoutError: check if button is still disabled (generation in progress)
+                # This can happen if _wait_for_new_image_with_regen clicked Generate recently
+                disabled = await gen_el.get_attribute("disabled")
+                if disabled is not None:
+                    logger.warning("[FastGen] Generate button still disabled after timeout - generation may still be in progress")
+                    # Wait a bit more for the button to become enabled
+                    for _ in range(10):
+                        disabled = await gen_el.get_attribute("disabled")
+                        if disabled is None:
+                            break
+                        await asyncio.sleep(0.5)
+                    if disabled is not None:
+                        logger.warning("[FastGen] Button still disabled after 5s - skipping retry click")
+                        await asyncio.sleep(2)
+                        continue
+                            
                 logger.warning(
                     f"[FastGen] Retry {attempt + 1}/{max_attempts} "
                     f"(timeout was {timeout_s}s) ..."
                 )
-
+            
             logger.info(f"Clicking: {gen_sel}")
             await page.evaluate("""(sel) => {
                 const el = document.querySelector(sel);
@@ -1050,7 +1148,7 @@ class FastGenScraper:
             }""", gen_sel)
             await asyncio.sleep(2)
             await _screenshot(page, "05_generating")
-
+            
             try:
                 new_srcs = await _wait_for_new_image_with_regen(
                     page, images_before, timeout_s=timeout_s,
@@ -1151,50 +1249,51 @@ class FastGenScraper:
         new_srcs: list[str] = []
 
         for attempt in range(max_attempts):
-            if attempt > 0:
-                gen_el, gen_sel = await _find_first(page, _GENERATE_SELECTORS, timeout=5000)
-                if not gen_el:
-                    raise RuntimeError("Generate button not found on retry.")
-                try:
-                    await page.fill(sel, "")
-                    await asyncio.sleep(0.5)
-                except Exception:
-                    pass
-                await _react_fill(page, sel, prompt)
-                await asyncio.sleep(0.5)
-                logger.warning(
-                    f"[FastGen] Retry {attempt + 1}/{max_attempts} for video "
-                    "(previous attempt failed: timeout or content filtered) ..."
-                )
-
             videos_before = await _collect_video_srcs(page)
 
-            for _ in range(10):
-                disabled = await gen_el.get_attribute("disabled")
-                if disabled is None:
-                    break
-                await asyncio.sleep(0.5)
+            # First attempt: click Generate to start
+            # Subsequent attempts (after TimeoutError): click Generate for retry
+            # Error-triggered retries: handled by _wait_for_new_video_with_regen
+            if attempt == 0:
+                for _ in range(10):
+                    disabled = await gen_el.get_attribute("disabled")
+                    if disabled is None:
+                        break
+                    await asyncio.sleep(0.5)
 
-            await page.keyboard.press("Escape")
-            await asyncio.sleep(0.3)
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.3)
 
-            await gen_el.click()
-            await asyncio.sleep(2)
-            await _screenshot(page, f"05_video_generating{'_retry' + str(attempt) if attempt > 0 else ''}")
+                await gen_el.click()
+                await asyncio.sleep(2)
+                await _screenshot(page, "05_video_generating")
+                logger.info(f"[FastGen] Video attempt {attempt + 1}/{max_attempts} started")
 
             try:
                 new_srcs = await _wait_for_new_video_with_regen(
                     page, videos_before, timeout_s=timeout_s,
                     gen_button_el=gen_el, gen_button_sel=gen_sel
                 )
-            except (TimeoutError, VideoGenerationError) as e:
-                err_type = "error" if isinstance(e, VideoGenerationError) else "timeout"
-                await _screenshot(page, f"{err_type}_video{'_retry' + str(attempt) if attempt > 0 else ''}")
-                logger.warning(f"[FastGen] Video attempt {attempt + 1}/{max_attempts} failed: {e}")
+            except TimeoutError as e:
+                await _screenshot(page, f"timeout_video{'_retry' + str(attempt) if attempt > 0 else ''}")
+                logger.warning(f"[FastGen] Video attempt {attempt + 1}/{max_attempts} timeout: {e}")
                 if attempt + 1 >= max_attempts:
                     logger.error(f"[FastGen] All {max_attempts} attempts exhausted, giving up")
                     return None
-                logger.info(f"[FastGen] Retrying generation ({attempt + 2}/{max_attempts}) ...")
+                # Timeout means: after last Generate click, no video appeared within timeout
+                # This is a genuine retry situation - click Generate for next attempt
+                logger.info(f"[FastGen] Clicking Generate for retry {attempt + 2}...")
+                try:
+                    gen_el, gen_sel = await _find_first(page, _GENERATE_SELECTORS, timeout=5000)
+                    if gen_el:
+                        disabled = await gen_el.get_attribute("disabled")
+                        if disabled is None:
+                            await gen_el.click()
+                            logger.info("[FastGen] Generate button clicked for retry")
+                        else:
+                            logger.warning("[FastGen] Generate button is disabled")
+                except Exception as click_err:
+                    logger.warning(f"[FastGen] Could not click Generate: {click_err}")
                 await asyncio.sleep(3)
                 continue
 
@@ -1281,51 +1380,51 @@ class FastGenScraper:
         new_srcs: list[str] = []
 
         for attempt in range(max_attempts):
-            if attempt > 0:
-                gen_el, gen_sel = await _find_first(page, _GENERATE_SELECTORS, timeout=5000)
-                if not gen_el:
-                    raise RuntimeError("Generate button not found on retry.")
-                # Clear and re-fill prompt (reset error state like "Audio filtered")
-                try:
-                    await page.fill(sel, "")
-                    await asyncio.sleep(0.5)
-                except Exception:
-                    pass
-                await _react_fill(page, sel, prompt)
-                await asyncio.sleep(0.5)
-                logger.warning(
-                    f"[FastGen] Retry {attempt + 1}/{max_attempts} for video "
-                    "(previous attempt failed: timeout or content filtered) ..."
-                )
-
             videos_before = await _collect_video_srcs(page)
 
-            for _ in range(10):
-                disabled = await gen_el.get_attribute("disabled")
-                if disabled is None:
-                    break
-                await asyncio.sleep(0.5)
+            # First attempt: click Generate to start
+            # Subsequent attempts (after TimeoutError): click Generate for retry
+            # Error-triggered retries: handled by _wait_for_new_video_with_regen
+            if attempt == 0:
+                for _ in range(10):
+                    disabled = await gen_el.get_attribute("disabled")
+                    if disabled is None:
+                        break
+                    await asyncio.sleep(0.5)
 
-            await page.keyboard.press("Escape")
-            await asyncio.sleep(0.3)
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.3)
 
-            await gen_el.click()
-            await asyncio.sleep(2)
-            await _screenshot(page, f"05_video_generating{'_retry' + str(attempt) if attempt > 0 else ''}")
+                await gen_el.click()
+                await asyncio.sleep(2)
+                await _screenshot(page, "05_video_generating")
+                logger.info(f"[FastGen] Video attempt {attempt + 1}/{max_attempts} started")
 
             try:
                 new_srcs = await _wait_for_new_video_with_regen(
                     page, videos_before, timeout_s=timeout_s,
                     gen_button_el=gen_el, gen_button_sel=gen_sel
                 )
-            except (TimeoutError, VideoGenerationError) as e:
-                err_type = "error" if isinstance(e, VideoGenerationError) else "timeout"
-                await _screenshot(page, f"{err_type}_video{'_retry' + str(attempt) if attempt > 0 else ''}")
-                logger.warning(f"[FastGen] Video attempt {attempt + 1}/{max_attempts} failed: {e}")
+            except TimeoutError as e:
+                await _screenshot(page, f"timeout_video{'_retry' + str(attempt) if attempt > 0 else ''}")
+                logger.warning(f"[FastGen] Video attempt {attempt + 1}/{max_attempts} timeout: {e}")
                 if attempt + 1 >= max_attempts:
                     logger.error(f"[FastGen] All {max_attempts} attempts exhausted, giving up")
                     return None
-                logger.info(f"[FastGen] Retrying generation ({attempt + 2}/{max_attempts}) ...")
+                # Timeout means: after last Generate click, no video appeared within timeout
+                # This is a genuine retry situation - click Generate for next attempt
+                logger.info(f"[FastGen] Clicking Generate for retry {attempt + 2}...")
+                try:
+                    gen_el, gen_sel = await _find_first(page, _GENERATE_SELECTORS, timeout=5000)
+                    if gen_el:
+                        disabled = await gen_el.get_attribute("disabled")
+                        if disabled is None:
+                            await gen_el.click()
+                            logger.info("[FastGen] Generate button clicked for retry")
+                        else:
+                            logger.warning("[FastGen] Generate button is disabled")
+                except Exception as click_err:
+                    logger.warning(f"[FastGen] Could not click Generate: {click_err}")
                 await asyncio.sleep(3)  # пауза перед повтором
                 continue
 
@@ -2155,42 +2254,52 @@ def _run_keyframe_video_sync(
             new_srcs: list[str] = []
             
             for attempt in range(max_attempts):
-                if attempt > 0:
-                    gen_el, gen_sel = await _find_first(page, _GENERATE_SELECTORS, timeout=5000)
-                    if not gen_el:
-                        raise RuntimeError("Generate button not found on retry.")
-                    logger.warning(
-                        f"[FastGen Keyframes] Retry {attempt + 1}/{max_attempts} ..."
-                    )
-                
                 videos_before = await _collect_video_srcs(page)
                 
-                # Wait for button to be enabled
-                for _ in range(10):
-                    disabled = await gen_el.get_attribute("disabled")
-                    if disabled is None:
-                        break
-                    await asyncio.sleep(0.5)
-                
-                await page.keyboard.press("Escape")
-                await asyncio.sleep(0.3)
-                
-                await gen_el.click()
-                await asyncio.sleep(2)
-                await _screenshot(page, f"kf_06_generating{'_retry' + str(attempt) if attempt > 0 else ''}")
+                # First attempt: click Generate to start
+                # Subsequent attempts (after TimeoutError): click Generate for retry
+                # Error-triggered retries: handled by _wait_for_new_video_with_regen
+                if attempt == 0:
+                    # Wait for button to be enabled
+                    for _ in range(10):
+                        disabled = await gen_el.get_attribute("disabled")
+                        if disabled is None:
+                            break
+                        await asyncio.sleep(0.5)
+                    
+                    await page.keyboard.press("Escape")
+                    await asyncio.sleep(0.3)
+                    
+                    await gen_el.click()
+                    await asyncio.sleep(2)
+                    await _screenshot(page, "kf_06_generating")
+                    logger.info(f"[FastGen Keyframes] Attempt {attempt + 1}/{max_attempts} started")
                 
                 try:
                     new_srcs = await _wait_for_new_video_with_regen(
-                    page, videos_before, timeout_s=timeout_s,
-                    gen_button_el=gen_el, gen_button_sel=gen_sel
-                )
-                except (TimeoutError, VideoGenerationError) as e:
-                    err_type = "error" if isinstance(e, VideoGenerationError) else "timeout"
-                    await _screenshot(page, f"kf_{err_type}{'_retry' + str(attempt) if attempt > 0 else ''}")
-                    logger.warning(f"[FastGen Keyframes] Attempt {attempt + 1}/{max_attempts} failed: {e}")
+                        page, videos_before, timeout_s=timeout_s,
+                        gen_button_el=gen_el, gen_button_sel=gen_sel
+                    )
+                except TimeoutError as e:
+                    await _screenshot(page, f"kf_timeout{'_retry' + str(attempt) if attempt > 0 else ''}")
+                    logger.warning(f"[FastGen Keyframes] Attempt {attempt + 1}/{max_attempts} timeout: {e}")
                     if attempt + 1 >= max_attempts:
                         logger.error(f"[FastGen Keyframes] All {max_attempts} attempts exhausted")
                         return None
+                    # Timeout means: after last Generate click, no video appeared within timeout
+                    # This is a genuine retry situation - click Generate for next attempt
+                    logger.info(f"[FastGen Keyframes] Clicking Generate for retry {attempt + 2}...")
+                    try:
+                        gen_el, gen_sel = await _find_first(page, _GENERATE_SELECTORS, timeout=5000)
+                        if gen_el:
+                            disabled = await gen_el.get_attribute("disabled")
+                            if disabled is None:
+                                await gen_el.click()
+                                logger.info("[FastGen Keyframes] Generate button clicked for retry")
+                            else:
+                                logger.warning("[FastGen Keyframes] Generate button is disabled")
+                    except Exception as click_err:
+                        logger.warning(f"[FastGen Keyframes] Could not click Generate: {click_err}")
                     await asyncio.sleep(3)
                     continue
                 

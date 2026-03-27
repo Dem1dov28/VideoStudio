@@ -64,7 +64,7 @@ const MODES = [
   { id: 6, label: 'Cartoon Drama', desc: 'Абсурдные вирусные истории с овощными персонажами', icon: '🥦' },
   { id: 7, label: 'ASMR Keyboard', desc: 'Животные нажимают клавиши: мёд, желе, лёд, шоколад', icon: '🐱' },
   { id: 8, label: 'House Timelapse', desc: 'Строительство дома: пустой участок → готовый дом', icon: '🏗️' },
-  { id: 9, label: 'Keyframe Video', desc: 'Генерация видео по начальному и конечному кадру', icon: '🎬' },
+  { id: 9, label: 'Vehicle Assembly', desc: 'Сборка транспорта: рама → двигатель → кузов → готовый автомобиль', icon: '🚗' },
 ];
 
 const KEYBOARD_LABELS = {
@@ -118,10 +118,10 @@ export default function Generate() {
   const [mode8UseKeyframes, setMode8UseKeyframes] = useState(false);
   const [mode8StartFrame, setMode8StartFrame] = useState(null);
   const [mode8EndFrame, setMode8EndFrame] = useState(null);
-  // Mode 9: Keyframe Video (start + end frame)
-  const [mode9StartFrame, setMode9StartFrame] = useState(null);
-  const [mode9EndFrame, setMode9EndFrame] = useState(null);
-  const [mode9Prompt, setMode9Prompt] = useState('');
+  // Mode 9: Vehicle Assembly Timelapse
+  const [mode9VehicleType, setMode9VehicleType] = useState('car_modern'); // 'airplane_passenger', 'car_modern', 'tractor', etc.
+  const [mode9Location, setMode9Location] = useState('factory'); // 'construction_site', 'factory', 'shipyard', etc.
+  const [mode9NumStages, setMode9NumStages] = useState(5);
 
   /* scenario editing state */
   const [step, setStep]             = useState('select_mode');   // 'select_mode' | 'form' | 'generating_scenario' | 'editing' | 'launching'
@@ -311,28 +311,29 @@ export default function Generate() {
     }
   }
 
-  /* Mode 9: Keyframe Video — генерация по начальному и конечному кадру */
+  /* Mode 9: Vehicle Assembly Timelapse — прямой запуск */
   async function handleMode9Launch() {
-    if (!mode9StartFrame?.path) {
-      setError('Загрузите начальный кадр');
-      return;
-    }
-    if (!mode9EndFrame?.path) {
-      setError('Загрузите конечный кадр');
-      return;
-    }
     setError('');
     setStep('launching');
     try {
-      const res = await api.generateKeyframeVideo({
-        prompt: mode9Prompt || 'Smooth transition between frames',
-        start_frame_path: mode9StartFrame.path,
-        end_frame_path: mode9EndFrame.path,
-      });
+      const payload = {
+        topic: null,
+        auto_topic: false,
+        num_scenes: mode9NumStages,
+        use_scenario: false,
+        local_only: localOnly,
+        show_subtitles: false,
+        show_watermark: false,
+        scenario: null,
+        mode: 9,
+        language: lang,
+        mode9_vehicle_type: mode9VehicleType === 'random' ? null : mode9VehicleType,
+        mode9_location: mode9Location === 'random' ? null : mode9Location,
+        mode9_num_stages: mode9NumStages,
+      };
+      const res = await api.startPipeline(payload);
       setStep('form');
-      if (res.video_path) {
-        setStartedSession('keyframe_' + Date.now());
-      }
+      setStartedSession(res.session_id);
     } catch (e) {
       setError(e.message);
       setStep('form');
@@ -514,7 +515,7 @@ export default function Generate() {
             {/* Header */}
             <div className="mb-6">
               <h1 className="text-2xl font-bold text-white mb-1">
-                {mode === 3 ? 'Реставрация дома' : mode === 4 ? 'Цитата + фото' : mode === 5 ? 'Длинные видео' : mode === 6 ? 'Cartoon Drama' : mode === 7 ? 'ASMR Keyboard' : mode === 8 ? 'House Timelapse' : mode === 9 ? 'Keyframe Video' : 'Создать видео'}
+                {mode === 3 ? 'Реставрация дома' : mode === 4 ? 'Цитата + фото' : mode === 5 ? 'Длинные видео' : mode === 6 ? 'Cartoon Drama' : mode === 7 ? 'ASMR Keyboard' : mode === 8 ? 'House Timelapse' : mode === 9 ? 'Vehicle Assembly' : 'Создать видео'}
               </h1>
               <p className="text-[#71717a] text-sm">
                 {mode === 3
@@ -530,7 +531,7 @@ export default function Generate() {
                           : mode === 8
                             ? 'Timelapse видео: пустой участок → фундамент → стены → крыша → готовый дом. Фотореалистичный стиль, как снято на смартфон.'
                             : mode === 9
-                              ? 'Загрузите начальный и конечный кадр — AI сгенерирует плавный переход между ними.'
+                              ? 'Timelapse сборки транспорта: рама → двигатель → кузов → колёса → готовый автомобиль/самолёт/трактор. Фотореалистичный стиль.'
                               : 'AI-агенты напишут сценарий, сгенерируют изображения и смонтируют видео.'}
               </p>
             </div>
@@ -809,28 +810,109 @@ export default function Generate() {
                       <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
                         Стиль дома
                       </label>
-                      <div className="grid grid-cols-3 gap-2">
-                        {[
-                          { key: 'random', label: '🎲 Случайный' },
-                          { key: 'modern', label: '🏙️ Современный' },
-                          { key: 'cottage', label: '🏡 Коттедж' },
-                          { key: 'villa', label: '🏛️ Вилла' },
-                          { key: 'cabin', label: '🌲 Домик в лесу' },
-                          { key: 'farmhouse', label: '🌾 Ферма' },
-                        ].map(opt => (
-                          <button
-                            key={opt.key}
-                            type="button"
-                            onClick={() => setMode8HouseStyle(opt.key)}
-                            className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
-                              mode8HouseStyle === opt.key
-                                ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
-                                : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
-                            }`}
-                          >
-                            {opt.label}
-                          </button>
-                        ))}
+                      
+                      {/* 🏙️ СОВРЕМЕННЫЕ */}
+                      <div className="mb-4">
+                        <div className="text-xs font-semibold text-brand-400 mb-2 uppercase">🏙️ Современные</div>
+                        <div className="grid grid-cols-3 gap-2">
+                          {[
+                            { key: 'modern', label: '🏙️ Современный' },
+                            { key: 'contemporary', label: '🏢 Контемпорари' },
+                            { key: 'minimalist', label: '⬜ Минимализм' },
+                            { key: 'scandinavian', label: '🇸🇪 Скандинавский' },
+                          ].map(opt => (
+                            <button
+                              key={opt.key}
+                              type="button"
+                              onClick={() => setMode8HouseStyle(opt.key)}
+                              className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                                mode8HouseStyle === opt.key
+                                  ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                                  : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      
+                      {/* 🏡 ТРАДИЦИОННЫЕ */}
+                      <div className="mb-4">
+                        <div className="text-xs font-semibold text-amber-400 mb-2 uppercase">🏡 Традиционные</div>
+                        <div className="grid grid-cols-3 gap-2">
+                          {[
+                            { key: 'cottage', label: '🏡 Коттедж' },
+                            { key: 'villa', label: '🏛️ Вилла' },
+                            { key: 'farmhouse', label: '🌾 Ферма' },
+                            { key: 'colonial', label: '🏛️ Колониальный' },
+                            { key: 'victorian', label: '🏰 Викторианский' },
+                            { key: 'mediterranean', label: '🏺 Средиземноморский' },
+                          ].map(opt => (
+                            <button
+                              key={opt.key}
+                              type="button"
+                              onClick={() => setMode8HouseStyle(opt.key)}
+                              className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                                mode8HouseStyle === opt.key
+                                  ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                                  : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      
+                      {/* 🌲 НАТУРАЛЬНЫЕ */}
+                      <div className="mb-4">
+                        <div className="text-xs font-semibold text-green-400 mb-2 uppercase">🌲 Натуральные</div>
+                        <div className="grid grid-cols-3 gap-2">
+                          {[
+                            { key: 'cabin', label: '🌲 Домик в лесу' },
+                            { key: 'log_house', label: '🪵 Бревенчатый' },
+                            { key: 'chalet', label: '🏔️ Шале' },
+                            { key: 'adobe', label: '🏜️ Адобе' },
+                          ].map(opt => (
+                            <button
+                              key={opt.key}
+                              type="button"
+                              onClick={() => setMode8HouseStyle(opt.key)}
+                              className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                                mode8HouseStyle === opt.key
+                                  ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                                  : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      
+                      {/* 🏛️ ЭЛИТНЫЕ */}
+                      <div>
+                        <div className="text-xs font-semibold text-purple-400 mb-2 uppercase">🏛️ Элитные</div>
+                        <div className="grid grid-cols-3 gap-2">
+                          {[
+                            { key: 'mansion', label: '🏰 Особняк' },
+                            { key: 'estate', label: '🌳 Поместье' },
+                          ].map(opt => (
+                            <button
+                              key={opt.key}
+                              type="button"
+                              onClick={() => setMode8HouseStyle(opt.key)}
+                              className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                                mode8HouseStyle === opt.key
+                                  ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                                  : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
                       </div>
                     </div>
 
@@ -839,28 +921,111 @@ export default function Generate() {
                       <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
                         Локация
                       </label>
-                      <div className="grid grid-cols-3 gap-2">
-                        {[
-                          { key: 'random', label: '🎲 Случайная' },
-                          { key: 'suburbs', label: '🏘️ Пригород' },
-                          { key: 'forest', label: '🌲 Лес' },
-                          { key: 'seaside', label: '🌊 Побережье' },
-                          { key: 'countryside', label: '🌾 Поле' },
-                          { key: 'mountains', label: '⛰️ Горы' },
-                        ].map(opt => (
-                          <button
-                            key={opt.key}
-                            type="button"
-                            onClick={() => setMode8Location(opt.key)}
-                            className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
-                              mode8Location === opt.key
-                                ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
-                                : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
-                            }`}
-                          >
-                            {opt.label}
-                          </button>
-                        ))}
+                      
+                      {/* 🏙️ ПРИГОРОДНЫЕ */}
+                      <div className="mb-4">
+                        <div className="text-xs font-semibold text-blue-400 mb-2 uppercase">🏙️ Пригородные</div>
+                        <div className="grid grid-cols-3 gap-2">
+                          {[
+                            { key: 'suburbs', label: '🏘️ Пригород' },
+                            { key: 'urban_edge', label: '🌆 Окраина' },
+                            { key: 'planned_community', label: '🏘️ Район' },
+                          ].map(opt => (
+                            <button
+                              key={opt.key}
+                              type="button"
+                              onClick={() => setMode8Location(opt.key)}
+                              className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                                mode8Location === opt.key
+                                  ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                                  : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      
+                      {/* 🌲 ПРИРОДНЫЕ */}
+                      <div className="mb-4">
+                        <div className="text-xs font-semibold text-green-400 mb-2 uppercase">🌲 Природные</div>
+                        <div className="grid grid-cols-3 gap-2">
+                          {[
+                            { key: 'forest', label: '🌲 Лес' },
+                            { key: 'wooded_area', label: '🌳 Лесная зона' },
+                            { key: 'seaside', label: '🌊 Побережье' },
+                            { key: 'lakefront', label: '🏞️ Озеро' },
+                            { key: 'riverside', label: '🌊 Река' },
+                            { key: 'countryside', label: '🌾 Село' },
+                            { key: 'farmland', label: '🚜 Поля' },
+                            { key: 'vineyard', label: '🍇 Виноградник' },
+                            { key: 'mountains', label: '⛰️ Горы' },
+                          ].map(opt => (
+                            <button
+                              key={opt.key}
+                              type="button"
+                              onClick={() => setMode8Location(opt.key)}
+                              className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                                mode8Location === opt.key
+                                  ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                                  : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      
+                      {/* 🏔️ ЛАНДШАФТНЫЕ */}
+                      <div className="mb-4">
+                        <div className="text-xs font-semibold text-amber-400 mb-2 uppercase">🏔️ Ландшафтные</div>
+                        <div className="grid grid-cols-3 gap-2">
+                          {[
+                            { key: 'hillside', label: '⛰️ Холм' },
+                            { key: 'valley', label: '🏞️ Долина' },
+                          ].map(opt => (
+                            <button
+                              key={opt.key}
+                              type="button"
+                              onClick={() => setMode8Location(opt.key)}
+                              className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                                mode8Location === opt.key
+                                  ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                                  : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      
+                      {/* 🏜️ ЭКЗОТИЧЕСКИЕ */}
+                      <div>
+                        <div className="text-xs font-semibold text-orange-400 mb-2 uppercase">🏜️ Экзотические</div>
+                        <div className="grid grid-cols-3 gap-2">
+                          {[
+                            { key: 'desert', label: '🏜️ Пустыня' },
+                            { key: 'oasis', label: '🌴 Оазис' },
+                            { key: 'tropical', label: '🌴 Тропики' },
+                            { key: 'island', label: '🏝️ Остров' },
+                          ].map(opt => (
+                            <button
+                              key={opt.key}
+                              type="button"
+                              onClick={() => setMode8Location(opt.key)}
+                              className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                                mode8Location === opt.key
+                                  ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                                  : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
                       </div>
                     </div>
 
@@ -904,91 +1069,297 @@ export default function Generate() {
               </div>
             ) : mode === 9 ? (
               <div className="space-y-4">
-                {/* Prompt for keyframe video */}
+                {/* Vehicle Type */}
                 <div className="card p-5">
                   <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
-                    Описание перехода (опционально)
+                    Тип транспорта
+                  </label>
+                  
+                  {/* ✈️ АВИАЦИЯ */}
+                  <div className="mb-4">
+                    <div className="text-xs font-semibold text-blue-400 mb-2 uppercase">✈️ Авиация</div>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { key: 'airplane_passenger', label: '✈️ Пассажирский' },
+                        { key: 'airplane_private', label: '🛩️ Частный джет' },
+                        { key: 'airplane_fighter', label: '⚔️ Истребитель' },
+                        { key: 'airplane_cargo', label: '📦 Грузовой' },
+                        { key: 'helicopter', label: '🚁 Вертолёт' },
+                        { key: 'drone', label: '🛰️ Дрон' },
+                        { key: 'seaplane', label: '🌊 Гидросамолёт' },
+                      ].map(opt => (
+                        <button
+                          key={opt.key}
+                          type="button"
+                          onClick={() => setMode9VehicleType(opt.key)}
+                          className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                            mode9VehicleType === opt.key
+                              ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                              : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  
+                  {/* 🚗 АВТОМОБИЛИ */}
+                  <div className="mb-4">
+                    <div className="text-xs font-semibold text-green-400 mb-2 uppercase">🚗 Автомобили</div>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { key: 'car_modern', label: '🚗 Современный' },
+                        { key: 'car_sport', label: '🏎️ Спорткар' },
+                        { key: 'car_suv', label: '🚙 Внедорожник' },
+                        { key: 'car_electric', label: '⚡ Электромобиль' },
+                        { key: 'truck_cargo', label: '🚚 Грузовик' },
+                        { key: 'truck_pickup', label: '🛻 Пикап' },
+                        { key: 'bus_city', label: '🚌 Автобус' },
+                      ].map(opt => (
+                        <button
+                          key={opt.key}
+                          type="button"
+                          onClick={() => setMode9VehicleType(opt.key)}
+                          className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                            mode9VehicleType === opt.key
+                              ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                              : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  
+                  {/* 🚜 СПЕЦТЕХНИКА */}
+                  <div className="mb-4">
+                    <div className="text-xs font-semibold text-amber-400 mb-2 uppercase">🚜 Спецтехника</div>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { key: 'tractor', label: '🚜 Трактор' },
+                        { key: 'excavator', label: '🏗️ Экскаватор' },
+                        { key: 'bulldozer', label: '🚜 Бульдозер' },
+                        { key: 'crane_construction', label: '🏢 Подъёмный кран' },
+                        { key: 'concrete_mixer', label: '🚐 Бетономешалка' },
+                        { key: 'road_roller', label: '🛣️ Каток' },
+                        { key: 'loader', label: '🪣 Погрузчик' },
+                      ].map(opt => (
+                        <button
+                          key={opt.key}
+                          type="button"
+                          onClick={() => setMode9VehicleType(opt.key)}
+                          className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                            mode9VehicleType === opt.key
+                              ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                              : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  
+                  {/* 🚢 ТРАНСПОРТ */}
+                  <div className="mb-4">
+                    <div className="text-xs font-semibold text-cyan-400 mb-2 uppercase">🚢 Водный транспорт</div>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { key: 'ship_cargo', label: '🚢 Грузовое судно' },
+                        { key: 'yacht', label: '⛵ Яхта' },
+                        { key: 'fishing_boat', label: '🎣 Рыболовное' },
+                        { key: 'submarine', label: '🔍 Подлодка' },
+                        { key: 'ferry', label: '⛴️ Паром' },
+                      ].map(opt => (
+                        <button
+                          key={opt.key}
+                          type="button"
+                          onClick={() => setMode9VehicleType(opt.key)}
+                          className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                            mode9VehicleType === opt.key
+                              ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                              : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  
+                  {/* 💨 ИНДУСТРИЯ */}
+                  <div>
+                    <div className="text-xs font-semibold text-purple-400 mb-2 uppercase">💨 Индустрия</div>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { key: 'wind_turbine', label: '💨 Ветряк' },
+                        { key: 'industrial_crane', label: '🏭 Пром. кран' },
+                        { key: 'industrial_robot', label: '🤖 Пром. робот' },
+                        { key: 'oil_rig', label: '⛽ Буровая' },
+                        { key: 'solar_farm', label: '☀️ Солнечная ферма' },
+                      ].map(opt => (
+                        <button
+                          key={opt.key}
+                          type="button"
+                          onClick={() => setMode9VehicleType(opt.key)}
+                          className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                            mode9VehicleType === opt.key
+                              ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                              : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Location */}
+                <div className="card p-5">
+                  <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
+                    Место сборки
+                  </label>
+                  
+                  {/* 🏗️ ИНДУСТРИАЛЬНЫЕ */}
+                  <div className="mb-4">
+                    <div className="text-xs font-semibold text-red-400 mb-2 uppercase">🏗️ Индустриальные</div>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { key: 'construction_site', label: '🏗️ Стройка' },
+                        { key: 'factory', label: '🏭 Завод' },
+                        { key: 'shipyard', label: '🚢 Верфь' },
+                        { key: 'hangar', label: '🛩️ Ангар' },
+                        { key: 'industrial_zone', label: '⚙️ Инд. зона' },
+                      ].map(opt => (
+                        <button
+                          key={opt.key}
+                          type="button"
+                          onClick={() => setMode9Location(opt.key)}
+                          className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                            mode9Location === opt.key
+                              ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                              : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  
+                  {/* 🌿 ПРИРОДА */}
+                  <div className="mb-4">
+                    <div className="text-xs font-semibold text-green-400 mb-2 uppercase">🌿 Природные</div>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { key: 'empty_field', label: '🌾 Поле' },
+                        { key: 'forest_clearing', label: '🌲 Лесная поляна' },
+                        { key: 'desert', label: '🏜️ Пустыня' },
+                        { key: 'mountain_valley', label: '🏔️ Горная долина' },
+                        { key: 'snowy_plain', label: '❄️ Снежная равнина' },
+                      ].map(opt => (
+                        <button
+                          key={opt.key}
+                          type="button"
+                          onClick={() => setMode9Location(opt.key)}
+                          className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                            mode9Location === opt.key
+                              ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                              : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  
+                  {/* 🌆 УРБАН */}
+                  <div className="mb-4">
+                    <div className="text-xs font-semibold text-blue-400 mb-2 uppercase">🌆 Урбан</div>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { key: 'city_outskirts', label: '🌆 Окраина' },
+                        { key: 'parking_lot', label: '🅿️ Парковка' },
+                        { key: 'abandoned_industrial', label: '🏚️ Заброшенный' },
+                        { key: 'building_roof', label: '🏢 Крыша' },
+                      ].map(opt => (
+                        <button
+                          key={opt.key}
+                          type="button"
+                          onClick={() => setMode9Location(opt.key)}
+                          className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                            mode9Location === opt.key
+                              ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                              : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  
+                  {/* 🌊 УНИКАЛЬНЫЕ */}
+                  <div>
+                    <div className="text-xs font-semibold text-cyan-400 mb-2 uppercase">🌊 Уникальные</div>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { key: 'ocean_coast', label: '🌊 Побережье' },
+                        { key: 'floating_platform', label: '🛟 Платформа' },
+                        { key: 'island', label: '🏝️ Остров' },
+                        { key: 'quarry', label: '⛏️ Карьер' },
+                        { key: 'port', label: '⚓ Порт' },
+                      ].map(opt => (
+                        <button
+                          key={opt.key}
+                          type="button"
+                          onClick={() => setMode9Location(opt.key)}
+                          className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                            mode9Location === opt.key
+                              ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                              : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Number of Stages */}
+                <div className="card p-5">
+                  <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
+                    Количество этапов: {mode9NumStages}
                   </label>
                   <input
-                    className="input text-base"
-                    placeholder="Например: плавный переход, морфинг, превращение"
-                    value={mode9Prompt}
-                    onChange={e => setMode9Prompt(e.target.value)}
+                    type="range"
+                    min="5"
+                    max="7"
+                    step="1"
+                    value={mode9NumStages}
+                    onChange={e => setMode9NumStages(parseInt(e.target.value))}
+                    className="w-full accent-brand-500"
                   />
+                  <div className="flex justify-between text-xs text-[#52525b] mt-1">
+                    <span>5</span>
+                    <span>6</span>
+                    <span>7</span>
+                  </div>
                   <p className="text-xs text-[#52525b] mt-2">
-                    Опишите, как должен происходить переход между кадрами. Можно оставить пустым.
+                    Больше этапов = более детальная сборка
                   </p>
                 </div>
 
-                {/* Start frame upload */}
-                <div className="card p-5">
-                  <div className="text-sm font-semibold text-[#e4e4f0] mb-1">Начальный кадр</div>
-                  <div className="text-xs text-[#71717a] mb-3">Загрузите изображение для начального кадра видео</div>
-                  <div className="flex items-center gap-2">
-                    <label className="flex items-center gap-2 px-3 py-2 rounded-lg bg-[#1a1a24] border border-[#27272f] hover:border-brand-600/40 cursor-pointer text-sm text-[#e4e4f0] transition-colors">
-                      <RiImageAddLine className="text-lg" />
-                      {uploadingRef ? 'Загрузка…' : (mode9StartFrame ? 'Заменить' : 'Выбрать изображение')}
-                      <input type="file" accept="image/jpeg,image/png,image/webp" className="hidden"
-                        onChange={async (e) => {
-                          const f = e.target.files?.[0];
-                          if (!f) return;
-                          setUploadingRef(true);
-                          try {
-                            const { path } = await api.uploadImage(f);
-                            setMode9StartFrame({ path, preview: URL.createObjectURL(f) });
-                          } catch (err) { setError(err.message); }
-                          finally { setUploadingRef(false); e.target.value = ''; }
-                        }} />
-                    </label>
-                    {mode9StartFrame && (
-                      <button type="button" onClick={() => setMode9StartFrame(null)}
-                        className="p-2 rounded-lg text-[#71717a] hover:text-red-400 hover:bg-red-900/20">
-                        <RiCloseLine />
-                      </button>
-                    )}
-                  </div>
-                  {mode9StartFrame?.preview && (
-                    <img src={mode9StartFrame.preview} alt="Start frame" className="mt-2 w-32 h-20 object-cover rounded-lg border border-[#27272f]" />
-                  )}
-                </div>
-
-                {/* End frame upload */}
-                <div className="card p-5">
-                  <div className="text-sm font-semibold text-[#e4e4f0] mb-1">Конечный кадр</div>
-                  <div className="text-xs text-[#71717a] mb-3">Загрузите изображение для конечного кадра видео</div>
-                  <div className="flex items-center gap-2">
-                    <label className="flex items-center gap-2 px-3 py-2 rounded-lg bg-[#1a1a24] border border-[#27272f] hover:border-brand-600/40 cursor-pointer text-sm text-[#e4e4f0] transition-colors">
-                      <RiImageAddLine className="text-lg" />
-                      {uploadingRef ? 'Загрузка…' : (mode9EndFrame ? 'Заменить' : 'Выбрать изображение')}
-                      <input type="file" accept="image/jpeg,image/png,image/webp" className="hidden"
-                        onChange={async (e) => {
-                          const f = e.target.files?.[0];
-                          if (!f) return;
-                          setUploadingRef(true);
-                          try {
-                            const { path } = await api.uploadImage(f);
-                            setMode9EndFrame({ path, preview: URL.createObjectURL(f) });
-                          } catch (err) { setError(err.message); }
-                          finally { setUploadingRef(false); e.target.value = ''; }
-                        }} />
-                    </label>
-                    {mode9EndFrame && (
-                      <button type="button" onClick={() => setMode9EndFrame(null)}
-                        className="p-2 rounded-lg text-[#71717a] hover:text-red-400 hover:bg-red-900/20">
-                        <RiCloseLine />
-                      </button>
-                    )}
-                  </div>
-                  {mode9EndFrame?.preview && (
-                    <img src={mode9EndFrame.preview} alt="End frame" className="mt-2 w-32 h-20 object-cover rounded-lg border border-[#27272f]" />
-                  )}
-                </div>
-
-                {/* Keyframe Info card */}
-                <div className="card p-4 bg-gradient-to-br from-purple-900/20 to-pink-900/10 border-purple-700/30">
-                  <div className="text-sm font-semibold text-purple-300 mb-2">🎬 Keyframe Режим</div>
+                {/* Assembly Info card */}
+                <div className="card p-4 bg-gradient-to-br from-blue-900/20 to-cyan-900/10 border-blue-700/30">
+                  <div className="text-sm font-semibold text-blue-300 mb-2">🚗 Assembly Режим</div>
                   <p className="text-xs text-[#a1a1aa]">
-                    AI сгенерирует видео с плавным переходом от начального кадра к конечному. Используйте для морфинга, превращений, переходов между сценами.
+                    Видео в стиле ускоренной съёмки сборки транспорта. Фотореалистичный стиль, как снято на камеру телефона. Звуки производства и механических работ.
                   </p>
                 </div>
               </div>
@@ -1375,11 +1746,11 @@ export default function Generate() {
               {mode === 9 ? (
                 <button
                   onClick={handleMode9Launch}
-                  disabled={isLoading || !mode9StartFrame?.path || !mode9EndFrame?.path}
+                  disabled={isLoading}
                   className="btn-primary flex-1 flex items-center justify-center gap-2 text-base py-4"
                 >
                   <RiSparklingLine className="text-lg" />
-                  Сгенерировать видео
+                  Сгенерировать timelapse
                 </button>
               ) : mode === 8 ? (
                 <button

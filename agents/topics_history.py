@@ -146,6 +146,17 @@ def get_used_topics() -> list[dict]:
     return _load().get("topics", [])
 
 
+def get_publishing_by_session() -> dict[str, dict]:
+    """Return a dict mapping session_id to publishing metadata."""
+    topics = get_used_topics()
+    result = {}
+    for t in topics:
+        sid = t.get("session_id")
+        if sid and t.get("publishing"):
+            result[sid] = t["publishing"]
+    return result
+
+
 def is_topic_used(topic: str, video_angle: str = "") -> bool:
     """Return True if this topic (or a close variant) was already generated."""
     existing = get_used_topics()
@@ -158,6 +169,7 @@ def mark_topic_used(
     session_id: str,
     video_path: str = "",
     video_angle: str = "",
+    publishing: dict | None = None,
 ) -> None:
     """
     Record a topic as used after a successful video generation.
@@ -167,6 +179,7 @@ def mark_topic_used(
         session_id:  Pipeline session identifier.
         video_path:  Path to the generated mp4.
         video_angle: Optional more specific angle (from TrendsAgent).
+        publishing:  Optional publishing metadata (title, description, hashtags, tags).
     """
     data = _load()
     entry = {
@@ -176,6 +189,8 @@ def mark_topic_used(
         "video_path":   video_path,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
+    if publishing:
+        entry["publishing"] = publishing
     data["topics"].append(entry)
     _save(data)
     logger.info(f"[TopicsHistory] Recorded: {topic!r}  (total: {len(data['topics'])})")

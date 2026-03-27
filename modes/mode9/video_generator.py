@@ -1,5 +1,5 @@
 """
-Mode 8 Video Generator — House Building Timelapse.
+Mode 9 Video Generator — Vehicle Assembly Timelapse.
 
 KEYFRAME APPROACH for smooth transitions:
 1. Generate ALL images SEQUENTIALLY with reference chaining:
@@ -13,7 +13,7 @@ KEYFRAME APPROACH for smooth transitions:
    - ...
    - Video N-1: transition from stage_(N-1) to stage_N
 
-STYLE: Photorealistic timelapse with workers and machinery.
+STYLE: Photorealistic timelapse with mechanics and machinery.
 """
 
 from __future__ import annotations
@@ -32,155 +32,221 @@ from config import settings
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# HOUSE STYLE VISUALS
+# VEHICLE TYPE VISUALS
 # ═══════════════════════════════════════════════════════════════════════════
 
-HOUSE_STYLE_VISUALS = {
-    # 🏙️ СОВРЕМЕННЫЕ
-    "modern": {
-        "visual": "modern minimalist house, flat roof, large windows, geometric shapes, concrete and glass",
-        "features": "clean lines, large glass panels, flat roof, minimalist design",
+VEHICLE_TYPE_VISUALS = {
+    # ✈️ АВИАЦИЯ
+    "airplane_passenger": {
+        "visual": "passenger airplane, metallic fuselage, wings with flaps, tail section, jet engines under wings",
+        "features": "aluminum body, jet engines, swept wings, modern aviation design",
     },
-    "contemporary": {
-        "visual": "ultra-modern contemporary house, panoramic windows, mixed materials, asymmetrical shape",
-        "features": "steel, glass, concrete, composites, cutting-edge design",
+    "airplane_private": {
+        "visual": "luxury private jet, streamlined fuselage, small wings, spoilers",
+        "features": "composite materials, aluminum, leather interior, sleek design",
     },
-    "minimalist": {
-        "visual": "minimalist house, clean lines, monochromatic palette, hidden elements",
-        "features": "concrete, glass, aluminum, simplicity",
+    "airplane_fighter": {
+        "visual": "fighter jet, triangular wings, jet engine, camouflage paint",
+        "features": "titanium, aluminum, composites, military aviation",
     },
-    "scandinavian": {
-        "visual": "scandinavian house, light facades, wooden accents, large windows",
-        "features": "wood, stone, glass, nordic design",
+    "airplane_cargo": {
+        "visual": "large cargo airplane, wide fuselage, cargo door, powerful engines",
+        "features": "steel, aluminum, composites, freight transport",
     },
-    # 🏡 ТРАДИЦИОННЫЕ
-    "cottage": {
-        "visual": "cozy cottage with pitched roof, stone facade, wooden elements",
-        "features": "pitched roof, stone walls, wooden accents, cozy atmosphere",
+    "helicopter": {
+        "visual": "helicopter with large main rotor, tail rotor, pilot cabin, landing skids",
+        "features": "aluminum, composites, steel, glass, aviation",
     },
-    "villa": {
-        "visual": "luxurious villa, multiple floors, terraces, pool, elegant architecture",
-        "features": "multiple floors, elegant columns, large terraces, luxurious finish",
+    "drone": {
+        "visual": "large industrial quadcopter, industrial propellers, camera, sensors",
+        "features": "carbon fiber, plastic, aluminum, drone technology",
     },
-    "farmhouse": {
-        "visual": "classic farmhouse, wide porch, white fence, barn nearby",
-        "features": "wide front porch, white siding, barn, rural setting",
+    "seaplane": {
+        "visual": "seaplane with floats instead of wheels, water-landing hull",
+        "features": "aluminum, composites, stainless steel, marine aviation",
     },
-    "colonial": {
-        "visual": "colonial house, symmetrical facade, columns, central door",
-        "features": "brick, wood, shingles, traditional colonial style",
+    # 🚗 АВТОМОБИЛИ
+    "car_modern": {
+        "visual": "modern sedan, streamlined body, LED headlights, alloy wheels",
+        "features": "steel, aluminum, plastic, glass, modern automotive design",
     },
-    "victorian": {
-        "visual": "victorian house, towers, bay windows, decorative elements, vibrant colors",
-        "features": "wood, brick, slate, ornate details",
+    "car_sport": {
+        "visual": "low sports car, aggressive design, large wheels, spoiler",
+        "features": "carbon fiber, aluminum, leather, performance design",
     },
-    "mediterranean": {
-        "visual": "mediterranean villa, red tile roof, arched windows, stucco",
-        "features": "stucco, tile roof, stone, mediterranean style",
+    "car_suv": {
+        "visual": "large SUV, high ground clearance, massive wheels, roof rails",
+        "features": "steel, aluminum, plastic, off-road capability",
     },
-    # 🌲 НАТУРАЛЬНЫЕ
-    "cabin": {
-        "visual": "wooden log cabin in forest, log walls, cozy porch, chimney",
-        "features": "log construction, wooden walls, stone chimney, forest setting",
+    "car_electric": {
+        "visual": "futuristic electric vehicle, smooth body, hidden grille",
+        "features": "aluminum, composites, lithium batteries, EV technology",
     },
-    "log_house": {
-        "visual": "large log house, massive logs, traditional architecture",
-        "features": "logs, stone, metal, traditional craftsmanship",
+    "truck_cargo": {
+        "visual": "large cargo truck, cabin, cargo compartment, many wheels",
+        "features": "steel, aluminum, rubber, commercial vehicle",
     },
-    "chalet": {
-        "visual": "alpine chalet, sloping roof, wooden balconies, stone foundation",
-        "features": "wood, stone, tiles, alpine architecture",
+    "truck_pickup": {
+        "visual": "pickup truck with open bed, powerful wheels, strong frame",
+        "features": "steel, aluminum, plastic, utility vehicle",
     },
-    "adobe": {
-        "visual": "adobe house, rounded forms, earth tones, traditional style",
-        "features": "adobe, clay, straw, southwestern style",
+    "bus_city": {
+        "visual": "long city bus, many windows, passenger doors",
+        "features": "steel, aluminum, glass, public transport",
     },
-    # 🏛️ ЭЛИТНЫЕ
-    "mansion": {
-        "visual": "huge mansion, columns, fountains, landscape design",
-        "features": "marble, granite, bronze, glass, luxury estate",
+    # 🚜 СПЕЦТЕХНИКА
+    "tractor": {
+        "visual": "powerful agricultural tractor, large wheels with rough tread, driver cab, hitch",
+        "features": "steel, cast iron, rubber, glass, agricultural machinery",
     },
-    "estate": {
-        "visual": "family estate, multiple buildings, park, pond",
-        "features": "brick, stone, metal, heritage property",
+    "excavator": {
+        "visual": "construction excavator, long boom, bucket, tracks or wheels",
+        "features": "steel, hydraulics, rubber, heavy machinery",
+    },
+    "bulldozer": {
+        "visual": "powerful bulldozer, large front blade, tracks",
+        "features": "steel, hydraulics, cast iron, earthmoving equipment",
+    },
+    "crane_construction": {
+        "visual": "tall construction crane, long boom, counterweight, operator cabin",
+        "features": "steel, hydraulics, electronics, lifting equipment",
+    },
+    "concrete_mixer": {
+        "visual": "truck with rotating drum, chassis, discharge chute",
+        "features": "steel, hydraulics, rubber, concrete equipment",
+    },
+    "road_roller": {
+        "visual": "road roller, large metal cylinder, operator cabin",
+        "features": "steel, hydraulics, rubber, road construction equipment",
+    },
+    "loader": {
+        "visual": "front loader, bucket in front, articulated frame",
+        "features": "steel, hydraulics, rubber, loading equipment",
+    },
+    # 🚢 ТРАНСПОРТ
+    "ship_cargo": {
+        "visual": "large cargo ship, containers on deck, bridge",
+        "features": "steel, aluminum, composites, maritime transport",
+    },
+    "yacht": {
+        "visual": "luxury yacht, smooth hull, masts, deck",
+        "features": "fiberglass, aluminum, teak, luxury marine",
+    },
+    "fishing_boat": {
+        "visual": "fishing vessel, nets, winches, fish hold",
+        "features": "steel, aluminum, nylon, fishing equipment",
+    },
+    "submarine": {
+        "visual": "submarine, cylindrical hull, conning tower, propellers",
+        "features": "special steel, titanium, composites, underwater vessel",
+    },
+    "ferry": {
+        "visual": "passenger ferry, multiple decks, gangways, windows",
+        "features": "steel, aluminum, glass, passenger transport",
+    },
+    # 💨 ИНДУСТРИЯ
+    "wind_turbine": {
+        "visual": "tall wind turbine, three large blades, generator",
+        "features": "steel, composites, copper, renewable energy",
+    },
+    "industrial_crane": {
+        "visual": "massive industrial crane, beams, winches, cabin",
+        "features": "steel, hydraulics, electronics, heavy industry",
+    },
+    "industrial_robot": {
+        "visual": "robotic arm manipulator, joints, gripper, control panel",
+        "features": "aluminum, servomotors, electronics, automation",
+    },
+    "oil_rig": {
+        "visual": "oil rig, drilling column, pumps, platforms",
+        "features": "steel, special alloys, offshore structure",
+    },
+    "solar_farm": {
+        "visual": "solar panels on metal supports, inverters, cables",
+        "features": "silicon, aluminum, glass, copper, solar power",
     },
 }
 
 LOCATION_VISUALS = {
-    # 🏙️ ПРИГОРОДНЫЕ
-    "suburbs": {
-        "visual": "quiet suburban neighborhood, other houses visible, paved street, trees",
-        "features": "suburban setting, neighbors, street, manicured lawns",
+    # 🏗️ ИНДУСТРИАЛЬНЫЕ
+    "construction_site": {
+        "visual": "construction site, cranes, building materials, machinery",
+        "features": "heavy equipment, building materials, outdoor setting",
     },
-    "urban_edge": {
-        "visual": "city outskirts, modern buildings in distance, highway, infrastructure",
-        "features": "city skyline, roads, street lights",
+    "factory": {
+        "visual": "modern assembly plant, conveyor line, industrial robots, bright lighting",
+        "features": "robotic arms, conveyor belt, parts on shelves, automotive setting",
     },
-    "planned_community": {
-        "visual": "new residential area, similar houses, manicured lawns, playgrounds",
-        "features": "similar homes, sidewalks, street lamps",
+    "shipyard": {
+        "visual": "shipbuilding yard, dry docks, slipways, lifting cranes",
+        "features": "ships at various stages, sea water, maritime setting",
     },
-    # 🌲 ПРИРОДНЫЕ
-    "forest": {
-        "visual": "dense forest, pine and spruce trees, clearing for house, natural landscape",
-        "features": "forest setting, tall trees, natural clearing, wilderness",
+    "hangar": {
+        "visual": "large industrial hangar, high ceiling, metal trusses, industrial lighting",
+        "features": "tools on walls, overhead cranes, equipment, aviation setting",
     },
-    "wooded_area": {
-        "visual": "mixed forest, deciduous and coniferous trees, undergrowth",
-        "features": "diverse trees, bushes, woodland",
+    "industrial_zone": {
+        "visual": "industrial zone, factories, pipes, warehouses",
+        "features": "smoking pipes, trucks, cranes, heavy industry",
     },
-    "seaside": {
-        "visual": "coastal area, sandy beach nearby, palm trees, ocean breeze",
-        "features": "ocean view, beach nearby, palm trees, coastal atmosphere",
+    # 🌿 ПРИРОДА
+    "empty_field": {
+        "visual": "open field, green grass, clear sky",
+        "features": "trees on horizon, hills, natural landscape",
     },
-    "lakefront": {
-        "visual": "lake shore, calm water, dock, boat",
-        "features": "lake, opposite shore, waterfront",
+    "forest_clearing": {
+        "visual": "forest clearing, trees surrounding, natural lighting",
+        "features": "tall trees, bushes, woodland setting",
     },
-    "riverside": {
-        "visual": "river bank, flowing water, reeds, trees along river",
-        "features": "river, riverside vegetation, water flow",
-    },
-    "countryside": {
-        "visual": "open field, hills on horizon, pasture, tractor in distance",
-        "features": "rural farmland, rolling hills, open fields, peaceful countryside",
-    },
-    "farmland": {
-        "visual": "cultivated fields, crop rows, agricultural machinery",
-        "features": "fields, farm buildings, crops",
-    },
-    "vineyard": {
-        "visual": "rows of grapevines, hills, mediterranean climate",
-        "features": "vineyards, rural setting, wine country",
-    },
-    "mountains": {
-        "visual": "mountain slope, coniferous forest, snow-capped peaks on horizon, rocks",
-        "features": "mountain setting, elevation, scenic views, alpine atmosphere",
-    },
-    "hillside": {
-        "visual": "hill slope, terraced lot, panoramic view",
-        "features": "hills, valleys below, elevated position",
-    },
-    "valley": {
-        "visual": "green valley, river flowing, trees, meadows",
-        "features": "valley surrounded by mountains, lush greenery",
-    },
-    # 🏜️ ЭКЗОТИЧЕСКИЕ
     "desert": {
-        "visual": "sandy desert, dunes, cacti, bright sun",
-        "features": "sand dunes, sparse vegetation, arid climate",
+        "visual": "sandy desert, dunes, bright sun",
+        "features": "sand dunes, cacti, arid climate",
     },
-    "oasis": {
-        "visual": "desert oasis, palm trees, water source, greenery",
-        "features": "desert with green zone, water, palms",
+    "mountain_valley": {
+        "visual": "valley between mountains, rocky peaks, river",
+        "features": "mountain peaks, clouds, alpine setting",
     },
-    "tropical": {
-        "visual": "tropical forest, exotic plants, humid climate",
-        "features": "jungle, palm trees, tropical vegetation",
+    "snowy_plain": {
+        "visual": "snowy plain, white snow, cold sky",
+        "features": "snowdrifts, ice formations, winter landscape",
+    },
+    # 🌆 УРБАН
+    "city_outskirts": {
+        "visual": "city outskirts, buildings on horizon, roads",
+        "features": "city skyline, highway, urban edge",
+    },
+    "parking_lot": {
+        "visual": "paved parking lot, markings, fences",
+        "features": "nearby buildings, lamp posts, asphalt area",
+    },
+    "abandoned_industrial": {
+        "visual": "old abandoned factory, rusty structures, broken windows",
+        "features": "destroyed buildings, old metal, decay",
+    },
+    "building_roof": {
+        "visual": "flat building roof, parapet, city view",
+        "features": "cityscape, sky, elevated position",
+    },
+    # 🌊 УНИКАЛЬНЫЕ
+    "ocean_coast": {
+        "visual": "ocean coast, waves, beach, rocks",
+        "features": "ocean horizon, seagulls, coastal setting",
+    },
+    "floating_platform": {
+        "visual": "large floating platform, pontoons, moorings",
+        "features": "water, shoreline, marine structure",
     },
     "island": {
-        "visual": "small island, beach all around, coconut palms",
-        "features": "ocean, other islands, island paradise",
+        "visual": "island in middle of water, beach, vegetation",
+        "features": "ocean, other islands, tropical paradise",
+    },
+    "quarry": {
+        "visual": "open quarry, rock formations, machinery",
+        "features": "rock walls, gravel, mining site",
+    },
+    "port": {
+        "visual": "seaport, docks, containers, cranes",
+        "features": "cargo ships, port facilities, maritime industry",
     },
 }
 
@@ -200,12 +266,12 @@ def _build_image_prompt(
 
     CRITICAL: Photorealistic style, like a real smartphone photo.
     """
-    house_style = scenario.get("house_style", "modern")
-    location = scenario.get("location", "suburbs")
-    stage_key = scene.get("stage_key", "empty_land")
+    vehicle_type = scenario.get("vehicle_type", "car_modern")
+    location = scenario.get("location", "factory")
+    stage_key = scene.get("stage_key", "empty_space")
 
-    style_visual = HOUSE_STYLE_VISUALS.get(house_style, HOUSE_STYLE_VISUALS["modern"])
-    loc_visual = LOCATION_VISUALS.get(location, LOCATION_VISUALS["suburbs"])
+    style_visual = VEHICLE_TYPE_VISUALS.get(vehicle_type, VEHICLE_TYPE_VISUALS["car_modern"])
+    loc_visual = LOCATION_VISUALS.get(location, LOCATION_VISUALS["factory"])
 
     stage_name = scene.get("name", "construction stage")
     stage_name_en = scene.get("name_en", "construction stage")
@@ -287,11 +353,11 @@ def _build_video_prompt(
     CRITICAL: Show REAL CONSTRUCTION PROCESS with workers and machinery.
     NOT magical transformation - actual building actions.
     """
-    house_style = scenario.get("house_style", "modern")
-    location = scenario.get("location", "suburbs")
+    vehicle_type = scenario.get("vehicle_type", "car_modern")
+    location = scenario.get("location", "factory")
 
-    style_visual = HOUSE_STYLE_VISUALS.get(house_style, HOUSE_STYLE_VISUALS["modern"])
-    loc_visual = LOCATION_VISUALS.get(location, LOCATION_VISUALS["suburbs"])
+    style_visual = VEHICLE_TYPE_VISUALS.get(vehicle_type, VEHICLE_TYPE_VISUALS["car_modern"])
+    loc_visual = LOCATION_VISUALS.get(location, LOCATION_VISUALS["factory"])
 
     start_state = scene.get("start_state", "previous stage")
     end_state = scene.get("end_state", "next stage")
@@ -510,11 +576,11 @@ def _build_keyframe_video_prompt(
     - Temporal: time_lapse (compressed time)
     - Environment: outdoor construction site
     """
-    house_style = scenario.get("house_style", "modern")
-    location = scenario.get("location", "suburbs")
+    vehicle_type = scenario.get("vehicle_type", "car_modern")
+    location = scenario.get("location", "factory")
 
-    style_visual = HOUSE_STYLE_VISUALS.get(house_style, HOUSE_STYLE_VISUALS["modern"])
-    loc_visual = LOCATION_VISUALS.get(location, LOCATION_VISUALS["suburbs"])
+    style_visual = VEHICLE_TYPE_VISUALS.get(vehicle_type, VEHICLE_TYPE_VISUALS["car_modern"])
+    loc_visual = LOCATION_VISUALS.get(location, LOCATION_VISUALS["factory"])
 
     start_state = scene.get("start_state", "previous stage")
     end_state = scene.get("end_state", "next stage")
@@ -587,7 +653,7 @@ async def _generate_single_image_with_ref(
         return None
 
     except Exception as e:
-        logger.error(f"[Mode8] Image generation failed for stage {index}: {e}")
+        logger.error(f"[Mode9] Image generation failed for stage {index}: {e}")
         return None
 
 
@@ -611,14 +677,14 @@ async def _generate_single_video(
         )
 
         if result and Path(result).exists():
-            logger.success(f"[Mode8] Stage {index + 1} video saved: {Path(result).name}")
+            logger.success(f"[Mode9] Stage {index + 1} video saved: {Path(result).name}")
             return result
         else:
-            logger.error(f"[Mode8] Stage {index + 1}: Video generation returned no result")
+            logger.error(f"[Mode9] Stage {index + 1}: Video generation returned no result")
             return None
 
     except Exception as e:
-        logger.error(f"[Mode8] Stage {index + 1} video generation failed: {e}")
+        logger.error(f"[Mode9] Stage {index + 1} video generation failed: {e}")
         return None
 
 
@@ -643,14 +709,14 @@ async def _generate_keyframe_video(
         )
 
         if result and Path(result).exists():
-            logger.success(f"[Mode8] Keyframe video {index + 1} saved: {Path(result).name}")
+            logger.success(f"[Mode9] Keyframe video {index + 1} saved: {Path(result).name}")
             return result
         else:
-            logger.error(f"[Mode8] Keyframe video {index + 1}: Generation returned no result")
+            logger.error(f"[Mode9] Keyframe video {index + 1}: Generation returned no result")
             return None
 
     except Exception as e:
-        logger.error(f"[Mode8] Keyframe video {index + 1} generation failed: {e}")
+        logger.error(f"[Mode9] Keyframe video {index + 1} generation failed: {e}")
         return None
 
 
@@ -658,14 +724,14 @@ async def _generate_keyframe_video(
 # MAIN GENERATION FUNCTION
 # ═══════════════════════════════════════════════════════════════════════════
 
-async def generate_house_videos(
+async def generate_vehicle_videos(
     scenario: dict[str, Any],
     output_dir: Path,
     session_id: str,
     language: str = "ru",
 ) -> tuple[list[Path | None], dict[str, Any]]:
     """
-    Generate house building timelapse video clips via FastGen.
+    Generate vehicle assembly timelapse video clips via FastGen.
 
     WORKFLOW (KEYFRAME APPROACH):
     1. SEQUENTIAL image generation with reference chaining:
@@ -686,11 +752,11 @@ async def generate_house_videos(
     scenes = scenario.get("scenes", [])
 
     if not scenes:
-        raise ValueError("[Mode8] No scenes to generate")
+        raise ValueError("[Mode9] No scenes to generate")
 
     fastgen_key = getattr(settings, "fastgen_api_key", "") or ""
     if not fastgen_key:
-        raise RuntimeError("FASTGEN_API_KEY not set — required for Mode 8")
+        raise RuntimeError("FASTGEN_API_KEY not set — required for Mode 9")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     images_dir = output_dir / "reference_images"
@@ -700,7 +766,7 @@ async def generate_house_videos(
     # STEP 1: SEQUENTIAL image generation with reference chaining
     # ═══════════════════════════════════════════════════════════════════════
 
-    logger.info(f"[Mode8] STEP 1: Generating {len(scenes)} reference images SEQUENTIALLY (chaining)...")
+    logger.info(f"[Mode9] STEP 1: Generating {len(scenes)} reference images SEQUENTIALLY (chaining)...")
 
     ref_image_paths: list[Path | None] = []
     previous_image: Path | None = None
@@ -715,7 +781,7 @@ async def generate_house_videos(
 
         # Generate ONE image (sequential, not parallel) WITH RETRY
         logger.info(
-            f"[Mode8] Generating image {i + 1}/{len(scenes)}: {scene.get('stage_key', 'stage')} "
+            f"[Mode9] Generating image {i + 1}/{len(scenes)}: {scene.get('stage_key', 'stage')} "
             f"(with {len(refs)} reference(s))"
         )
 
@@ -730,18 +796,18 @@ async def generate_house_videos(
             if image_path and Path(image_path).exists():
                 break
             if retry < image_retries:
-                logger.warning(f"[Mode8] Image {i + 1} failed, retry {retry + 2}/{image_retries + 1} ...")
+                logger.warning(f"[Mode9] Image {i + 1} failed, retry {retry + 2}/{image_retries + 1} ...")
 
         if image_path:
             ref_image_paths.append(image_path)
             previous_image = image_path  # Chain to next stage
-            logger.success(f"[Mode8] Stage {i + 1} reference image: {image_path.name}")
+            logger.success(f"[Mode9] Stage {i + 1} reference image: {image_path.name}")
         else:
             ref_image_paths.append(None)
-            logger.error(f"[Mode8] Stage {i + 1}: Failed to generate reference image after {image_retries + 1} attempts")
+            logger.error(f"[Mode9] Stage {i + 1}: Failed to generate reference image after {image_retries + 1} attempts")
             # Don't break — continue with None, but warn
             if i < len(scenes) - 1:
-                logger.warning(f"[Mode8] Stage {i + 2} will have no reference image!")
+                logger.warning(f"[Mode9] Stage {i + 2} will have no reference image!")
 
     # ═══════════════════════════════════════════════════════════════════════
     # STEP 2: KEYFRAME video generation (transition between stages)
@@ -752,9 +818,9 @@ async def generate_house_videos(
     num_videos = len(scenes) - 1  # Transitions between stages
     
     if num_videos < 1:
-        raise ValueError("[Mode8] Need at least 2 stages for keyframe video generation")
+        raise ValueError("[Mode9] Need at least 2 stages for keyframe video generation")
     
-    logger.info(f"[Mode8] STEP 2: Generating {num_videos} KEYFRAME videos (transitions between stages)...")
+    logger.info(f"[Mode9] STEP 2: Generating {num_videos} KEYFRAME videos (transitions between stages)...")
 
     video_tasks = []
     for i in range(num_videos):
@@ -764,12 +830,12 @@ async def generate_house_videos(
 
         # Both frames must exist for keyframe generation
         if not start_frame or not end_frame:
-            logger.warning(f"[Mode8] Skipping video {i}: missing frames")
+            logger.warning(f"[Mode9] Skipping video {i}: missing frames")
             video_tasks.append(asyncio.create_task(asyncio.sleep(0)))  # Placeholder
             continue
         
         if not Path(start_frame).exists() or not Path(end_frame).exists():
-            logger.warning(f"[Mode8] Skipping video {i}: frame files not found")
+            logger.warning(f"[Mode9] Skipping video {i}: frame files not found")
             video_tasks.append(asyncio.create_task(asyncio.sleep(0)))  # Placeholder
             continue
 
@@ -798,7 +864,7 @@ async def generate_house_videos(
     valid_paths: list[Path | None] = []
     for i, result in enumerate(video_paths):
         if isinstance(result, Exception):
-            logger.error(f"[Mode8] Keyframe video {i + 1} failed: {result}")
+            logger.error(f"[Mode9] Keyframe video {i + 1} failed: {result}")
             valid_paths.append(None)
         elif result is None:
             # Placeholder task (skipped)
@@ -823,7 +889,7 @@ async def generate_house_videos(
     valid_count = sum(1 for p in valid_paths if p and Path(p).exists())
     ref_count = sum(1 for p in ref_image_paths if p and Path(p).exists())
     logger.success(
-        f"[Mode8] Generated {ref_count}/{len(scenes)} reference images "
+        f"[Mode9] Generated {ref_count}/{len(scenes)} reference images "
         f"and {valid_count}/{num_videos} keyframe videos"
     )
 
