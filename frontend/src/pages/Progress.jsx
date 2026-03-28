@@ -43,12 +43,26 @@ export default function Progress() {
   // Video URL(s) from result — один файл или несколько (Mode 4 bilingual)
   const videoUrls = useMemo(() => {
     if (!done) return [];
+    
+    // Debug logging for troubleshooting
+    console.log('[Progress] done result:', {
+      video_path: done.video_path,
+      video_paths: done.video_paths,
+      session_id: done.session_id,
+      publishing: done.publishing,
+    });
+    
     const base = done.session_id || sid;
     const paths = done.video_paths && done.video_paths.length > 0
       ? done.video_paths
       : done.video_path
         ? [done.video_path]
         : [];
+    
+    if (paths.length === 0) {
+      console.warn('[Progress] No video paths found in result:', done);
+    }
+    
     const prefix = import.meta.env.VITE_API_URL || '';
     return paths.map(p => {
       const fname = (p || "").split(/[/\\]/).pop();

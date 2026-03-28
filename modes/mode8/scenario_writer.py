@@ -560,11 +560,19 @@ class BuildingScenario(BaseModel):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def select_house_style(preferred: str | None = None) -> str:
-    """Select a house style."""
-    if preferred and preferred in HOUSE_STYLES:
-        return preferred
-    if preferred == "random" or preferred is None:
+    """Select a house style, with support for fuzzy matching."""
+    if not preferred or preferred == "random":
         return random.choice(list(HOUSE_STYLES.keys()))
+    
+    # 1. Exact match
+    if preferred in HOUSE_STYLES:
+        return preferred
+        
+    # 2. Fuzzy prefix / substring match
+    matches = [k for k in HOUSE_STYLES.keys() if preferred.lower() in k.lower()]
+    if matches:
+        return random.choice(matches)
+
     return "modern"
 
 

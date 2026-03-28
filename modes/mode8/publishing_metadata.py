@@ -152,47 +152,58 @@ async def generate_publishing_metadata(
         stages: List of building stages
         title: Video title from scenario
         language: Output language ("ru" or "en")
-    
+
     Returns:
         dict with title, description, hashtags, tags
     """
-    # Build stages description
-    stages_desc = ""
-    if stages:
-        stage_names = [s.get("name_en" if language == "en" else "name", f"Stage {i+1}") for i, s in enumerate(stages)]
-        stages_desc = " → ".join(stage_names[:6])  # First 6 stages
-    
-    prompt = PUBLISHING_PROMPT.format(
-        house_style=house_style.replace("_", " ").title() if house_style else "House",
-        location=location.replace("_", " ").title() if location else "Suburbs",
-        stages_description=stages_desc or "Construction stages",
-        title=title or "House Building",
-        language=language,
-    )
-    
+    # Ensure we always return valid metadata - wrap everything in try-except
     try:
-        llm = make_llm(temperature=0.8)
-        messages = [
-            SystemMessage(content="You are a YouTube Shorts SEO expert. Generate viral, clickable metadata optimized for the algorithm."),
-            HumanMessage(content=prompt),
-        ]
-        response = await llm.ainvoke(messages)
-        raw = response.content.strip() if hasattr(response, 'content') else str(response)
+        # Build stages description
+        stages_desc = ""
+        if stages:
+            stage_names = [s.get("name_en" if language == "en" else "name", f"Stage {i+1}") for i, s in enumerate(stages)]
+            stages_desc = " → ".join(stage_names[:6])  # First 6 stages
         
-        # Strip markdown code fences if present
-        if raw.startswith("```"):
-            lines = raw.splitlines()
-            raw = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+        prompt = PUBLISHING_PROMPT.format(
+            house_style=house_style.replace("_", " ").title() if house_style else "House",
+            location=location.replace("_", " ").title() if location else "Suburbs",
+            stages_description=stages_desc or "Construction stages",
+            title=title or "House Building",
+            language=language,
+        )
         
-        # Try to extract JSON
-        json_match = re.search(r"\{[\s\S]*\}", raw)
-        if json_match:
-            result = json.loads(json_match.group())
-            if result:
-                logger.success(f"[Mode8 Publishing] Generated metadata: {result.get('title', 'N/A')}")
-                return result
+        try:
+            llm = make_llm(temperature=0.8)
+            messages = [
+                SystemMessage(content="You are a YouTube Shorts SEO expert. Generate viral, clickable metadata optimized for the algorithm."),
+                HumanMessage(content=prompt),
+            ]
+            response = await llm.ainvoke(messages)
+            raw = response.content.strip() if hasattr(response, 'content') else str(response)
+            
+            # Strip markdown code fences if present
+            if raw.startswith("```"):
+                lines = raw.splitlines()
+                raw = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+            
+            # Try to extract JSON
+            json_match = re.search(r"\{[\s\S]*\}", raw)
+            if json_match:
+                result = json.loads(json_match.group())
+                if result:
+                    logger.success(f"[Mode8 Publishing] Generated metadata: {result.get('title', 'N/A')}")
+                    return result
+        except Exception as e:
+            logger.warning(f"[Mode8 Publishing] LLM failed, using fallback: {e}")
+        
+        # Fallback
+        return _generate_fallback_metadata(house_style, location, stages, title, language)
     except Exception as e:
-        logger.warning(f"[Mode8 Publishing] LLM failed, using fallback: {e}")
-    
-    # Fallback
-    return _generate_fallback_metadata(house_style, location, stages, title, language)
+        # Ultimate fallback if anything fails
+        logger.error(f"[Mode8 Publishing] All methods failed: {e}")
+        return {
+            "title": f"House Building Timelapse {house_style or ''} {location or ''}".strip(),
+            "description": "Watch the complete house building process in this satisfying timelapse.",
+            "hashtags": ["#construction", "#timelapse", "#housebuild", "#satisfying"],
+            "tags": ["house construction", "timelapse", "building", "satisfying"],
+        }

@@ -639,31 +639,31 @@ ASSEMBLY_STAGES: dict[str, dict[str, Any]] = {
 # 5 этапов: сокращённая версия
 DEFAULT_STAGE_SEQUENCE = [
     "empty_space", 
-    "base_structure", 
-    "main_components", 
-    "body_shell", 
-    "paint_completion"
+    "frame_chassis", 
+    "engine", 
+    "body_panels", 
+    "paint_finish"
 ]
 
 # 6 этапов: стандартная версия
 EXTENDED_STAGE_SEQUENCE = [
     "empty_space", 
-    "base_structure", 
-    "main_components", 
-    "body_shell", 
-    "systems_equipment", 
-    "paint_completion"
+    "frame_chassis", 
+    "engine", 
+    "body_panels", 
+    "wheels", 
+    "paint_finish"
 ]
 
 # 7 этапов: полная версия
 FULL_STAGE_SEQUENCE = [
     "empty_space", 
-    "base_structure", 
-    "main_components", 
-    "body_shell", 
-    "systems_equipment", 
-    "interior_finish", 
-    "paint_completion"
+    "frame_chassis", 
+    "engine", 
+    "body_panels", 
+    "wheels", 
+    "interior", 
+    "paint_finish"
 ]
 
 
@@ -713,12 +713,25 @@ class VehicleScenario(BaseModel):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def select_vehicle_type(preferred: str | None = None) -> str:
-    """Select a vehicle type."""
-    if preferred and preferred in VEHICLE_TYPES:
-        return preferred
-    if preferred == "random" or preferred is None:
+    """Select a vehicle type, with support for categories."""
+    if not preferred or preferred == "random":
         return random.choice(list(VEHICLE_TYPES.keys()))
-    return "car"
+    
+    # 1. Exact match
+    if preferred in VEHICLE_TYPES:
+        return preferred
+        
+    # 2. Category match (e.g. "car" -> "car_modern", "airplane" -> "airplane_passenger")
+    category_matches = [k for k in VEHICLE_TYPES.keys() if k.startswith(f"{preferred}_")]
+    if category_matches:
+        return random.choice(category_matches)
+        
+    # 3. Fuzzy prefix match
+    fuzzy_matches = [k for k in VEHICLE_TYPES.keys() if preferred.lower() in k.lower()]
+    if fuzzy_matches:
+        return random.choice(fuzzy_matches)
+
+    return "car_modern"
 
 
 def select_location(preferred: str | None = None) -> str:
@@ -747,7 +760,7 @@ def build_visual_prompt(
 ) -> str:
     """Build detailed visual prompt for an assembly stage (ALWAYS in English)."""
     stage = ASSEMBLY_STAGES.get(stage_key)
-    vehicle = VEHICLE_TYPES.get(vehicle_type, VEHICLE_TYPES["car"])
+    vehicle = VEHICLE_TYPES.get(vehicle_type, VEHICLE_TYPES["car_modern"])
     loc = LOCATIONS.get(location, LOCATIONS["factory"])
 
     workers_en = stage.get("workers_en") if stage else None

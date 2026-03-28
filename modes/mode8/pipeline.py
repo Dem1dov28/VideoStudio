@@ -66,7 +66,7 @@ async def run_mode8_pipeline(
 
     # Step 1: Generate scenario (building stages)
     await checkpoint(control)
-    logger.info("Step 1/3 - Generating Building Scenario...")
+    logger.info("Step 1/4 - Generating Building Scenario...")
 
     scenario = await run_mode8_scenario_writer(
         house_style=house_style,
@@ -87,7 +87,7 @@ async def run_mode8_pipeline(
 
     # Step 2: Generate video clips via FastGen (sequential images + KEYFRAME videos)
     await checkpoint(control)
-    logger.info("Step 2/3 - House Video Generator (Sequential Images + Keyframe Videos)")
+    logger.info("Step 2/4 - House Video Generator (Sequential Images + Keyframe Videos)")
 
     video_paths, enriched_scenario = await generate_house_videos(
         scenario=scenario,
@@ -106,7 +106,7 @@ async def run_mode8_pipeline(
 
     # Step 3: Assemble final video
     await checkpoint(control)
-    logger.info("Step 3/3 - Video Assembly")
+    logger.info("Step 3/4 - Video Assembly")
 
     output_path = videos_dir / f"video_{session_id}.mp4"
 
@@ -121,16 +121,6 @@ async def run_mode8_pipeline(
         ),
     )
 
-    # Record in history
-    from agents.topics_history import mark_topic_used
-    mark_topic_used(
-        topic=f"[Timelapse] {title}",
-        session_id=session_id,
-        video_path=str(output_path),
-        video_angle=f"style={house_style_name},location={location_name},stages={len(stages)}",
-        publishing=publishing,
-    )
-
     video_path = str(output_path.resolve())
 
     # Step 4: Generate publishing metadata (Title, Description, Hashtags, Tags)
@@ -141,6 +131,16 @@ async def run_mode8_pipeline(
         stages=stages,
         title=title,
         language=language,
+    )
+
+    # Record in history
+    from agents.topics_history import mark_topic_used
+    mark_topic_used(
+        topic=f"[Timelapse] {title}",
+        session_id=session_id,
+        video_path=str(output_path),
+        video_angle=f"style={house_style_name},location={location_name},stages={len(stages)}",
+        publishing=publishing,
     )
 
     logger.success(f"=== Mode 8 Pipeline DONE | video={video_path} ===")

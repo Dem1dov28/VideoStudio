@@ -19,6 +19,7 @@ STYLE: Photorealistic timelapse with workers and machinery.
 from __future__ import annotations
 
 import asyncio
+import random
 from pathlib import Path
 from typing import Any
 
@@ -544,6 +545,99 @@ SAFETY: Generic content ONLY. NO brands, logos, copyrighted material. Generic eq
 TECHNICAL: Vertical 9:16, 1080x1920, cinematic, photorealistic."""
 
     return prompt
+
+
+def _build_final_drone_video_prompt(
+    scenario: dict[str, Any],
+    language: str = "ru",
+) -> str:
+    """
+    Build a video prompt for the FINAL SHOWCASE shot.
+    
+    PURPOSE: Emotional payoff, show full result clearly, increase retention.
+    
+    KEY PRINCIPLE: NO MORE BUILDING — ONLY PRESENTATION
+    
+    DRONE SHOT STYLE (randomly selected):
+    - Slow pull-back (отдаление)
+    - Orbit (облет вокруг дома)
+    - Rise-up (подъём вверх)
+    - Diagonal fly-by (плавный пролёт сбоку)
+    """
+    house_style = scenario.get("house_style", "modern")
+    location = scenario.get("location", "suburbs")
+
+    style_visual = HOUSE_STYLE_VISUALS.get(house_style, HOUSE_STYLE_VISUALS["modern"])
+    loc_visual = LOCATION_VISUALS.get(location, LOCATION_VISUALS["suburbs"])
+
+    # Random movement selection for variety
+    movements = [
+        "slow pull-back: camera starts close to house, gently moves backward and upward, revealing the full property",
+        "smooth orbit: camera circles around the house at medium height, showing all angles",
+        "rise-up reveal: camera starts low near ground, slowly rises upward while pulling back",
+        "diagonal fly-by: camera passes alongside the house diagonally, showing front and side views",
+    ]
+    selected_movement = random.choice(movements)
+    
+    # Time of day for cinematic lighting
+    times_of_day = [
+        "golden hour sunset, warm orange glow, long dramatic shadows",
+        "golden hour sunrise, soft pink-orange light, peaceful morning atmosphere",
+        "soft overcast daylight, even illumination, professional real estate look",
+    ]
+    selected_time = random.choice(times_of_day)
+
+    # FINAL SHOWCASE PROMPT - premium cinematic presentation
+    prompt = f"""A cinematic drone showcase of the COMPLETED house. This is the FINAL RESULT — NO construction, NO workers, NO machinery.
+
+SUBJECT: {style_visual['visual']}
+LOCATION: {loc_visual['visual']}
+
+━━━ CRITICAL: THIS IS A SHOWCASE, NOT CONSTRUCTION ━━━
+The house is FULLY BUILT and must remain UNCHANGED throughout.
+NO building activities.
+NO workers.
+NO machinery.
+NO transformation.
+ONLY the finished, beautiful result.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CAMERA MOVEMENT: {selected_movement}
+- Smooth, continuous drone motion
+- No sudden movements, no cuts
+- Natural camera drift
+- Subtle parallax effect between foreground and background
+
+FRAMING:
+- House is always the main focus
+- Environment fully visible (landscape, garden, surroundings)
+- Cinematic wide shot composition
+- Rule of thirds for premium look
+
+LIGHTING: {selected_time}
+- Realistic shadows consistent with scene
+- Warm cinematic glow
+- Professional real estate photography quality
+
+ENVIRONMENT MOTION:
+- Slight breeze in trees
+- Gentle grass movement
+- Natural environmental life
+
+STYLE:
+- Ultra realistic
+- Cinematic
+- Calm and satisfying
+- Premium real estate showcase quality
+- Emotional payoff for viewer
+
+TECHNICAL: Vertical 9:16, 1080x1920, cinematic drone footage, smooth motion.
+
+SAFETY: Generic content ONLY. NO brands, logos, copyrighted material.
+
+GOAL: Showcase the final result in a premium, beautiful, cinematic way as if filmed by a professional drone operator."""
+
+    return prompt
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def _generate_single_image_with_ref(
@@ -752,42 +846,45 @@ async def generate_house_videos(
     # ═══════════════════════════════════════════════════════════════════════
     # STEP 2: KEYFRAME video generation (transition between stages)
     # ═══════════════════════════════════════════════════════════════════════
-
-    # Number of videos = number of transitions = N-1 (if we have N stages)
-    # But we can also generate N videos where each shows progress to that stage
-    num_videos = len(scenes) - 1  # Transitions between stages
     
-    if num_videos < 1:
-        raise ValueError("[Mode8] Need at least 2 stages for keyframe video generation")
+    # CORRECTED: Generate ALL N-1 keyframe videos (all construction stages)
+    # PLUS 1 bonus drone shot at the end
+    num_keyframe_videos = len(scenes) - 1  # ALL transitions (N-1)
+    num_total_videos = len(scenes)  # N-1 keyframe + 1 bonus drone
+        
+    if num_keyframe_videos < 1:
+        raise ValueError("[Mode8] Need at least 2 stages for video generation")
+        
+    logger.info(f"[Mode8] STEP 2: Generating {num_keyframe_videos} KEYFRAME videos + 1 BONUS DRONE SHOT...")
     
-    logger.info(f"[Mode8] STEP 2: Generating {num_videos} KEYFRAME videos (transitions between stages)...")
-
     video_tasks = []
-    for i in range(num_videos):
+        
+    # 2a: Generate ALL keyframe videos (ALL transitions between stages)
+    for i in range(num_keyframe_videos):
         # Get start and end frames for this transition
         start_frame = ref_image_paths[i] if i < len(ref_image_paths) else None
         end_frame = ref_image_paths[i + 1] if i + 1 < len(ref_image_paths) else None
-
+    
         # Both frames must exist for keyframe generation
         if not start_frame or not end_frame:
             logger.warning(f"[Mode8] Skipping video {i}: missing frames")
             video_tasks.append(asyncio.create_task(asyncio.sleep(0)))  # Placeholder
             continue
-        
+            
         if not Path(start_frame).exists() or not Path(end_frame).exists():
             logger.warning(f"[Mode8] Skipping video {i}: frame files not found")
             video_tasks.append(asyncio.create_task(asyncio.sleep(0)))  # Placeholder
             continue
-
+    
         # Build SHORT video prompt for FastGen (limited input capacity)
         scene = scenes[i]  # Current stage
-        
+            
         video_prompt = _build_keyframe_video_prompt(
             scene,
             scenario,
             language,
         )
-
+    
         task = _generate_keyframe_video(
             index=i,
             prompt=video_prompt,
@@ -796,6 +893,28 @@ async def generate_house_videos(
             output_dir=output_dir,
         )
         video_tasks.append(task)
+    
+    # 2b: Generate BONUS DRONE SHOT video (uses only last frame as reference)
+    # This is ADDITIONAL final showcase, NOT a replacement for construction video
+    final_frame_index = len(scenes) - 1
+    final_frame = ref_image_paths[final_frame_index] if final_frame_index < len(ref_image_paths) else None
+    
+    if final_frame and Path(final_frame).exists():
+        logger.info(f"[Mode8] Generating BONUS DRONE SHOT video (index {num_keyframe_videos})...")
+        
+        drone_prompt = _build_final_drone_video_prompt(scenario, language)
+        
+        # Use single reference image (final frame) for drone shot
+        drone_task = _generate_single_video(
+            index=num_keyframe_videos,
+            prompt=drone_prompt,
+            reference_image_paths=[Path(final_frame)],
+            output_dir=output_dir,
+        )
+        video_tasks.append(drone_task)
+    else:
+        logger.warning(f"[Mode8] Skipping BONUS DRONE SHOT: final frame not available")
+        video_tasks.append(asyncio.create_task(asyncio.sleep(0)))  # Placeholder
 
     # Generate ALL videos in parallel
     video_paths = await asyncio.gather(*video_tasks, return_exceptions=True)

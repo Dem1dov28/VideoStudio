@@ -161,30 +161,23 @@ def assemble_mode8_video(
         final = final.with_effects([vfx.MultiplySpeed(speed_multiplier)])
         logger.info(f"[Mode8 Assembler] Applied {speed_multiplier}x speed for viral dynamics")
 
-    # ===== SPEED RAMPING: Cinematic variation =====
-    if use_speed_ramping:
-        try:
-            from moviepy import vfx
-            total_dur = final.duration
-            # Slow start (10%), Fast middle (70%), Slow end (20%)
-            phase1_end = total_dur * 0.1
-            phase2_end = total_dur * 0.8
-            
-            def speed_ramp(t):
-                if t < phase1_end:
-                    # Slow start: 1.0x
-                    return 1.0
-                elif t < phase2_end:
-                    # Fast middle: 1.8x
-                    return 1.8
-                else:
-                    # Slow end: 0.8x
-                    return 0.8
-            
-            final = final.with_effects([vfx.TimeMirror(speed_ramp)])  # Apply variable speed
-            logger.info("[Mode8 Assembler] Applied SPEED RAMPING: slow start → fast middle → slow end")
-        except Exception as e:
-            logger.warning(f"[Mode8 Assembler] Speed ramping failed, using constant speed: {e}")
+    # ===== SPEED RAMPING (Commented out: TimeMirror is incorrect for ramping) =====
+    # if use_speed_ramping:
+    #     try:
+    #         from moviepy import vfx
+    #         total_dur = final.duration
+    #         phase1_end = total_dur * 0.1
+    #         phase2_end = total_dur * 0.8
+    #
+    #         def speed_ramp(t):
+    #             if t < phase1_end: return 1.0
+    #             elif t < phase2_end: return 1.8
+    #             else: return 0.8
+    #
+    #         # TimeMirror is not for speed ramping in MoviePy 2.x
+    #         # final = final.with_effects([vfx.MultiplySpeed(speed_ramp)])
+    #     except Exception as e:
+    #         logger.warning(f"[Mode8 Assembler] Speed ramping failed: {e}")
 
     # ===== FINAL HOLD: Increase retention =====
     if final_hold_duration > 0:
