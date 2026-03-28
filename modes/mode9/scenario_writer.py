@@ -431,10 +431,13 @@ ASSEMBLY_STAGES: dict[str, dict[str, Any]] = {
         "name_en": "empty space",
         "visual": "пустая сборочная площадка, чистый бетонный пол, инструменты и оборудование на заднем плане",
         "start_state": "пустое пространство",
+        "start_state_en": "empty space",
         "end_state": "подготовленная площадка",
+        "end_state_en": "prepared assembly area",
         "action": "вид площадки до начала сборки",
+        "action_en": "view of the area before assembly starts",
         "workers": None,
-        "machinery": None,
+        "workers_en": None,
         "micro_actions": [],
         "micro_actions_en": [],
         "build_intensity": "low",
@@ -447,8 +450,11 @@ ASSEMBLY_STAGES: dict[str, dict[str, Any]] = {
         "name_en": "frame and chassis",
         "visual": "металлический каркас, шасси на подъёмниках, видны несущие балки, нет кузова",
         "start_state": "пустая площадка",
+        "start_state_en": "empty area",
         "end_state": "собранное шасси и рама",
+        "end_state_en": "assembled chassis and frame",
         "action": "сборка несущей рамы и шасси",
+        "action_en": "assembling the main frame and chassis",
         "workers": "сварщики работают с рамой, слесари собирают шасси, рабочие устанавливают подвеску",
         "workers_en": "welders working on frame, mechanics assembling chassis, workers installing suspension",
         "machinery": "подъёмники держат раму, сварочные аппараты, гайковерты",
@@ -475,8 +481,11 @@ ASSEMBLY_STAGES: dict[str, dict[str, Any]] = {
         "name_en": "engine",
         "visual": "установленный двигатель в отсеке, видны провода и трубки, рама вокруг",
         "start_state": "рамка без двигателя",
+        "start_state_en": "frame without engine",
         "end_state": "двигатель установлен",
+        "end_state_en": "engine installed",
         "action": "установка двигателя в отсек",
+        "action_en": "installing the engine into the bay",
         "workers": "механики устанавливают двигатель, инженеры подключают проводку, техники проверяют крепления",
         "workers_en": "mechanics installing engine, engineers connecting wiring, technicians checking mounts",
         "machinery": "кран поднимает двигатель, подъёмная платформа, диагностическое оборудование",
@@ -503,8 +512,11 @@ ASSEMBLY_STAGES: dict[str, dict[str, Any]] = {
         "name_en": "body panels",
         "visual": "кузовные панели на месте, двери, крылья, крыша — всё ещё без покраски, видны швы",
         "start_state": "шасси с двигателем",
+        "start_state_en": "chassis with engine",
         "end_state": "собранный кузов без покраски",
+        "end_state_en": "assembled body without paint",
         "action": "установка кузовных панелей",
+        "action_en": "installing body panels",
         "workers": "сборщики крепят панели, сварщики обрабатывают швы, рабочие устанавливают двери",
         "workers_en": "assemblers attaching panels, welders working on seams, workers installing doors",
         "machinery": "пневматические инструменты, сварочные аппараты, подъёмники для панелей",
@@ -531,8 +543,11 @@ ASSEMBLY_STAGES: dict[str, dict[str, Any]] = {
         "name_en": "wheels",
         "visual": "колёса установлены на шасси, видны диски и шины, машина стоит на земле",
         "start_state": "кузов на опорах",
+        "start_state_en": "body on supports",
         "end_state": "колёса установлены",
+        "end_state_en": "wheels installed",
         "action": "установка колёс",
+        "action_en": "mounting wheels",
         "workers": "шиномонтажники устанавливают колёса, рабочие затягивают болты, техники проверяют давление",
         "workers_en": "tire fitters installing wheels, workers tightening lug nuts, technicians checking pressure",
         "machinery": "гайковерты, домкраты, подъёмники",
@@ -559,8 +574,11 @@ ASSEMBLY_STAGES: dict[str, dict[str, Any]] = {
         "name_en": "interior",
         "visual": "собранный салон, сиденья установлены, руль на месте, приборная панель, видны детали интерьера",
         "start_state": "пустой салон",
+        "start_state_en": "empty interior",
         "end_state": "полностью собранный интерьер",
+        "end_state_en": "fully assembled interior",
         "action": "сборка салона и установка сидений",
+        "action_en": "assembling interior and seats",
         "workers": "сборщики устанавливают сиденья, электрики подключают панель, рабочие монтируют обивку",
         "workers_en": "assemblers installing seats, electricians connecting dashboard, workers mounting upholstery",
         "machinery": "пневматические отвёртки, подъёмники для сидений, тестеры",
@@ -587,8 +605,11 @@ ASSEMBLY_STAGES: dict[str, dict[str, Any]] = {
         "name_en": "paint and finish",
         "visual": "полностью готовый транспорт, блестящая окраска, все детали на месте, чистый и отполированный",
         "start_state": "некрашеный корпус",
+        "start_state_en": "unpainted body",
         "end_state": "полностью готовый продукт",
+        "end_state_en": "fully completed product",
         "action": "окраска и финальная сборка",
+        "action_en": "painting and final assembly",
         "workers": "маляры наносят краску, полировщики шлифуют поверхность, техники проводят финальную проверку",
         "workers_en": "painters applying paint, polishers buffing surface, technicians doing final inspection",
         "machinery": "окрасочные камеры, полировальные машины, диагностическое оборудование",
@@ -657,9 +678,12 @@ class AssemblyStage(BaseModel):
     name: str
     name_en: str
     start_state: str
+    start_state_en: str
     end_state: str
+    end_state_en: str
     visual_prompt: str
     action: str
+    action_en: str
     duration: int = 6
     workers: str | None = None
     workers_en: str | None = None
@@ -720,39 +744,24 @@ def build_visual_prompt(
     stage_key: str,
     vehicle_type: str,
     location: str,
-    language: str = "ru",
 ) -> str:
-    """Build detailed visual prompt for an assembly stage."""
+    """Build detailed visual prompt for an assembly stage (ALWAYS in English)."""
     stage = ASSEMBLY_STAGES.get(stage_key)
     vehicle = VEHICLE_TYPES.get(vehicle_type, VEHICLE_TYPES["car"])
     loc = LOCATIONS.get(location, LOCATIONS["factory"])
 
-    workers = stage.get("workers") if stage else None
     workers_en = stage.get("workers_en") if stage else None
-    machinery = stage.get("machinery") if stage else None
     machinery_en = stage.get("machinery_en") if stage else None
 
-    if language == "en":
-        result = f"""{stage['name_en'].capitalize()} stage. {stage['visual']}.
+    result = f"""{stage['name_en'].capitalize()} stage. {stage['visual']}.
 Vehicle: {vehicle['name_en']} — {vehicle['visual']}.
 Setting: {loc['name_en']} — {loc['visual']}.
 Materials: {vehicle['materials']}.
 Background: {loc['background_en']}."""
-        if workers_en:
-            result += f"\nWorkers: {workers_en}."
-        if machinery_en:
-            result += f"\nMachinery: {machinery_en}."
-        return result
-
-    result = f"""Стадия: {stage['name']}. {stage['visual']}.
-Транспорт: {vehicle['name']} — {vehicle['visual']}.
-Место: {loc['name']} — {loc['visual']}.
-Материалы: {vehicle['materials']}.
-Фон: {loc['background']}."""
-    if workers:
-        result += f"\nРабочие: {workers}."
-    if machinery:
-        result += f"\nОборудование: {machinery}."
+    if workers_en:
+        result += f"\nWorkers: {workers_en}."
+    if machinery_en:
+        result += f"\nMachinery: {machinery_en}."
     return result
 
 
@@ -800,7 +809,6 @@ def generate_scenario(
             stage_key,
             vehicle_key,
             loc_key,
-            language,
         )
 
         stage = AssemblyStage(
@@ -809,9 +817,12 @@ def generate_scenario(
             name=stage_data["name"],
             name_en=stage_data["name_en"],
             start_state=stage_data["start_state"],
+            start_state_en=stage_data["start_state_en"],
             end_state=stage_data["end_state"],
+            end_state_en=stage_data["end_state_en"],
             visual_prompt=visual_prompt,
             action=stage_data["action"],
+            action_en=stage_data["action_en"],
             duration=6,
             workers=stage_data.get("workers"),
             workers_en=stage_data.get("workers_en"),
@@ -899,9 +910,12 @@ async def run_mode9_scenario_writer(
                 "name": s.name,
                 "name_en": s.name_en,
                 "start_state": s.start_state,
+                "start_state_en": s.start_state_en,
                 "end_state": s.end_state,
+                "end_state_en": s.end_state_en,
                 "visual_prompt": s.visual_prompt,
                 "action": s.action,
+                "action_en": s.action_en,
                 "duration": s.duration,
                 "workers": s.workers,
                 "workers_en": s.workers_en,

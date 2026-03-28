@@ -112,15 +112,15 @@ export default function Generate() {
   const [mode7Keyboards, setMode7Keyboards] = useState(['honey', 'caramel', 'jelly']); // Default: 3 keyboards
   const [mode7NumKeyboards, setMode7NumKeyboards] = useState(4); // 3-4 keyboards
   // Mode 8: House Building Timelapse
-  const [mode8HouseStyle, setMode8HouseStyle] = useState('modern');
-  const [mode8Location, setMode8Location] = useState('suburbs');
+  const [mode8HouseStyle, setMode8HouseStyle] = useState('random');
+  const [mode8Location, setMode8Location] = useState('random');
   const [mode8NumStages, setMode8NumStages] = useState(5);
   const [mode8UseKeyframes, setMode8UseKeyframes] = useState(false);
   const [mode8StartFrame, setMode8StartFrame] = useState(null);
   const [mode8EndFrame, setMode8EndFrame] = useState(null);
   // Mode 9: Vehicle Assembly Timelapse
-  const [mode9VehicleType, setMode9VehicleType] = useState('car_modern'); // 'airplane_passenger', 'car_modern', 'tractor', etc.
-  const [mode9Location, setMode9Location] = useState('factory'); // 'construction_site', 'factory', 'shipyard', etc.
+  const [mode9VehicleType, setMode9VehicleType] = useState('random'); // 'random', 'airplane_passenger', 'car_modern', 'tractor', etc.
+  const [mode9Location, setMode9Location] = useState('random'); // 'random', 'construction_site', 'factory', 'shipyard', etc.
   const [mode9NumStages, setMode9NumStages] = useState(5);
 
   /* scenario editing state */
@@ -810,7 +810,22 @@ export default function Generate() {
                       <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
                         Стиль дома
                       </label>
-                      
+
+                      {/* 🎲 СЛУЧАЙНЫЙ */}
+                      <div className="mb-4">
+                        <button
+                          type="button"
+                          onClick={() => setMode8HouseStyle('random')}
+                          className={`w-full py-2.5 rounded-lg text-xs font-medium transition-all ${
+                            mode8HouseStyle === 'random'
+                              ? 'bg-purple-600/20 text-purple-400 border border-purple-600/40'
+                              : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                          }`}
+                        >
+                          🎲 Случайный стиль
+                        </button>
+                      </div>
+
                       {/* 🏙️ СОВРЕМЕННЫЕ */}
                       <div className="mb-4">
                         <div className="text-xs font-semibold text-brand-400 mb-2 uppercase">🏙️ Современные</div>
@@ -917,11 +932,26 @@ export default function Generate() {
                     </div>
 
                     {/* Location selection */}
-                    <div className="card p-5">
+                    <div className= "card p-5">
                       <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
                         Локация
                       </label>
-                      
+
+                      {/* 🎲 СЛУЧАЙНАЯ */}
+                      <div className="mb-4">
+                        <button
+                          type="button"
+                          onClick={() => setMode8Location('random')}
+                          className={`w-full py-2.5 rounded-lg text-xs font-medium transition-all ${
+                            mode8Location === 'random'
+                              ? 'bg-purple-600/20 text-purple-400 border border-purple-600/40'
+                              : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                          }`}
+                        >
+                          🎲 Случайная локация
+                        </button>
+                      </div>
+
                       {/* 🏙️ ПРИГОРОДНЫЕ */}
                       <div className="mb-4">
                         <div className="text-xs font-semibold text-blue-400 mb-2 uppercase">🏙️ Пригородные</div>
@@ -1074,7 +1104,22 @@ export default function Generate() {
                   <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
                     Тип транспорта
                   </label>
-                  
+
+                  {/* 🎲 СЛУЧАЙНЫЙ */}
+                  <div className="mb-4">
+                    <button
+                      type="button"
+                      onClick={() => setMode9VehicleType('random')}
+                      className={`w-full py-2.5 rounded-lg text-xs font-medium transition-all ${
+                        mode9VehicleType === 'random'
+                          ? 'bg-purple-600/20 text-purple-400 border border-purple-600/40'
+                          : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                      }`}
+                    >
+                      🎲 Случайный транспорт
+                    </button>
+                  </div>
+
                   {/* ✈️ АВИАЦИЯ */}
                   <div className="mb-4">
                     <div className="text-xs font-semibold text-blue-400 mb-2 uppercase">✈️ Авиация</div>
@@ -1222,7 +1267,22 @@ export default function Generate() {
                   <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
                     Место сборки
                   </label>
-                  
+
+                  {/* 🎲 СЛУЧАЙНОЕ */}
+                  <div className="mb-4">
+                    <button
+                      type="button"
+                      onClick={() => setMode9Location('random')}
+                      className={`w-full py-2.5 rounded-lg text-xs font-medium transition-all ${
+                        mode9Location === 'random'
+                          ? 'bg-purple-600/20 text-purple-400 border border-purple-600/40'
+                          : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                      }`}
+                    >
+                      🎲 Случайное место
+                    </button>
+                  </div>
+
                   {/* 🏗️ ИНДУСТРИАЛЬНЫЕ */}
                   <div className="mb-4">
                     <div className="text-xs font-semibold text-red-400 mb-2 uppercase">🏗️ Индустриальные</div>

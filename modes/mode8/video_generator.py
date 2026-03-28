@@ -207,16 +207,14 @@ def _build_image_prompt(
     style_visual = HOUSE_STYLE_VISUALS.get(house_style, HOUSE_STYLE_VISUALS["modern"])
     loc_visual = LOCATION_VISUALS.get(location, LOCATION_VISUALS["suburbs"])
 
-    stage_name = scene.get("name", "construction stage")
     stage_name_en = scene.get("name_en", "construction stage")
     visual_prompt = scene.get("visual_prompt", "")
 
-    if language == "en":
-        title_line = f"STAGE: {stage_name_en.upper()} — construction stage {index + 1}"
-    else:
-        title_line = f"STAGE: {stage_name.upper()} — стадия строительства {index + 1}"
+    title_line = f"STAGE: {stage_name_en.upper()} — construction stage {index + 1}"
 
     prompt = f"""Create a photorealistic still image for a house construction timelapse video.
+
+{title_line}
 
 ━━━ CRITICAL: BACKGROUND STAYS THE SAME! ━━━
 The BACKGROUND (sky, trees, neighboring houses, street, landscape) MUST REMAIN EXACTLY THE SAME across all stages!
@@ -293,26 +291,22 @@ def _build_video_prompt(
     style_visual = HOUSE_STYLE_VISUALS.get(house_style, HOUSE_STYLE_VISUALS["modern"])
     loc_visual = LOCATION_VISUALS.get(location, LOCATION_VISUALS["suburbs"])
 
-    start_state = scene.get("start_state", "previous stage")
-    end_state = scene.get("end_state", "next stage")
-    action = scene.get("action", "construction work")
-    stage_name = scene.get("name", "construction stage")
+    start_state = scene.get("start_state_en", "previous stage")
+    end_state = scene.get("end_state_en", "next stage")
+    action = scene.get("action_en", "construction work")
     stage_name_en = scene.get("name_en", "construction stage")
 
-    # Stage-specific workers and machinery
-    workers = scene.get("workers") if language == "ru" else scene.get("workers_en")
-    machinery = scene.get("machinery") if language == "ru" else scene.get("machinery_en")
-    micro_actions = scene.get("micro_actions") if language == "ru" else scene.get("micro_actions_en")
+    # Stage-specific workers and machinery (always English)
+    workers = scene.get("workers_en")
+    machinery = scene.get("machinery_en")
+    micro_actions = scene.get("micro_actions_en")
     
     # NEW: Intensity, temporal, peak moment
     build_intensity = scene.get("build_intensity", "medium")
     time_of_day = scene.get("time_of_day", "midday")
     is_peak_moment = scene.get("is_peak_moment", False)
 
-    if language == "en":
-        transformation_title = f"CONSTRUCTION STAGE: {stage_name_en.upper()}"
-    else:
-        transformation_title = f"CONSTRUCTION STAGE: {stage_name.upper()}"
+    transformation_title = f"CONSTRUCTION STAGE: {stage_name_en.upper()}"
 
     # ===== BUILD INTENSITY SECTION =====
     intensity_section = {
@@ -476,7 +470,7 @@ FRAMING: Vertical 9:16. Wide shot of construction site.
 
 AUDIO: Construction site ambience — machinery sounds, tools, footsteps, activity. NO MUSIC. NO VOICE.
 
-STYLE: Photorealistic, cinematic, ultra detailed, smooth motion. 4K quality.
+STYLE: Photorealistic, cinematic, ultra detailed, smooth motion.
 
 ━━━ KEYFRAME RULES ━━━
 The transition must strictly follow the change from the start frame to the end frame.
@@ -516,14 +510,14 @@ def _build_keyframe_video_prompt(
     style_visual = HOUSE_STYLE_VISUALS.get(house_style, HOUSE_STYLE_VISUALS["modern"])
     loc_visual = LOCATION_VISUALS.get(location, LOCATION_VISUALS["suburbs"])
 
-    start_state = scene.get("start_state", "previous stage")
-    end_state = scene.get("end_state", "next stage")
-    action = scene.get("action", "construction work")
+    start_state = scene.get("start_state_en", "previous stage")
+    end_state = scene.get("end_state_en", "next stage")
+    action = scene.get("action_en", "construction work")
     stage_name_en = scene.get("name_en", "construction stage")
 
-    # Stage-specific workers and machinery (short version)
-    workers = scene.get("workers") if language == "ru" else scene.get("workers_en")
-    machinery = scene.get("machinery") if language == "ru" else scene.get("machinery_en")
+    # Stage-specific workers and machinery (always English)
+    workers = scene.get("workers_en")
+    machinery = scene.get("machinery_en")
     
     # Truncate long workers/machinery text
     workers_short = (workers[:80] + "...") if workers and len(workers) > 80 else (workers or "workers active")
@@ -547,7 +541,7 @@ BACKGROUND: Sky, trees, street stay SAME. Only house evolves.
 
 SAFETY: Generic content ONLY. NO brands, logos, copyrighted material. Generic equipment.
 
-TECHNICAL: Vertical 9:16, 1080x1920, cinematic, photorealistic 4K."""
+TECHNICAL: Vertical 9:16, 1080x1920, cinematic, photorealistic."""
 
     return prompt
 # ═══════════════════════════════════════════════════════════════════════════
@@ -602,24 +596,30 @@ async def _generate_single_video(
     output_dir: Path,
 ) -> Path | None:
     """Generate a single timelapse video with reference image."""
-    try:
-        result = await generate_single_video_multi_ref(
-            index=index,
-            prompt=prompt,
-            output_dir=output_dir,
-            reference_image_paths=reference_image_paths,
-        )
+    clip_retries = 2
+    for retry in range(clip_retries + 1):
+        try:
+            result = await generate_single_video_multi_ref(
+                index=index,
+                prompt=prompt,
+                output_dir=output_dir,
+                reference_image_paths=reference_image_paths,
+            )
 
-        if result and Path(result).exists():
-            logger.success(f"[Mode8] Stage {index + 1} video saved: {Path(result).name}")
-            return result
-        else:
-            logger.error(f"[Mode8] Stage {index + 1}: Video generation returned no result")
-            return None
+            if result and Path(result).exists():
+                logger.success(f"[Mode8] Stage {index + 1} video saved: {Path(result).name}")
+                return result
+            else:
+                if retry < clip_retries:
+                    logger.warning(f"[Mode8] Stage {index + 1} video generation failed, retry {retry + 2}/{clip_retries + 1} ...")
 
-    except Exception as e:
-        logger.error(f"[Mode8] Stage {index + 1} video generation failed: {e}")
-        return None
+        except Exception as e:
+            logger.error(f"[Mode8] Stage {index + 1} video generation failed on attempt {retry + 1}: {e}")
+            if retry < clip_retries:
+                logger.warning(f"[Mode8] Retrying video {index + 1} ...")
+
+    logger.error(f"[Mode8] Stage {index + 1} video generation failed after all attempts.")
+    return None
 
 
 async def _generate_keyframe_video(
@@ -633,25 +633,31 @@ async def _generate_keyframe_video(
     Generate a video transitioning from start_frame to end_frame using keyframes.
     This is the PREFERRED method for smooth transitions between construction stages.
     """
-    try:
-        result = await generate_video_from_keyframes(
-            prompt=prompt,
-            output_dir=output_dir,
-            start_frame_path=start_frame,
-            end_frame_path=end_frame,
-            index=index,
-        )
+    clip_retries = 2
+    for retry in range(clip_retries + 1):
+        try:
+            result = await generate_video_from_keyframes(
+                prompt=prompt,
+                output_dir=output_dir,
+                start_frame_path=start_frame,
+                end_frame_path=end_frame,
+                index=index,
+            )
 
-        if result and Path(result).exists():
-            logger.success(f"[Mode8] Keyframe video {index + 1} saved: {Path(result).name}")
-            return result
-        else:
-            logger.error(f"[Mode8] Keyframe video {index + 1}: Generation returned no result")
-            return None
+            if result and Path(result).exists():
+                logger.success(f"[Mode8] Keyframe video {index + 1} saved: {Path(result).name}")
+                return result
+            else:
+                if retry < clip_retries:
+                    logger.warning(f"[Mode8] Keyframe video {index + 1} failed, retry {retry + 2}/{clip_retries + 1} ...")
 
-    except Exception as e:
-        logger.error(f"[Mode8] Keyframe video {index + 1} generation failed: {e}")
-        return None
+        except Exception as e:
+            logger.error(f"[Mode8] Keyframe video {index + 1} generation failed on attempt {retry + 1}: {e}")
+            if retry < clip_retries:
+                logger.warning(f"[Mode8] Retrying video {index + 1} ...")
+
+    logger.error(f"[Mode8] Keyframe video {index + 1} generation failed after all attempts.")
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════

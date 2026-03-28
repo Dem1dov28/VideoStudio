@@ -251,10 +251,13 @@ BUILDING_STAGES: dict[str, dict[str, Any]] = {
         "name_en": "empty land",
         "visual": "пустой земельный участок с травой, деревья на заднем плане, солнечный день",
         "start_state": "нетронутый земельный участок",
+        "start_state_en": "untouched land plot",
         "end_state": "пустой участок, готовый к строительству",
+        "end_state_en": "empty plot ready for construction",
         "action": "вид участка до начала работ",
-        "workers": None,  # No workers yet - empty land
-        "machinery": None,  # No machinery yet
+        "action_en": "view of the site before start",
+        "workers": None,
+        "workers_en": None,
         "micro_actions": [],
         "build_intensity": "low",  # low | medium | high
         "time_of_day": "morning",  # morning | midday | afternoon | golden_hour
@@ -266,8 +269,11 @@ BUILDING_STAGES: dict[str, dict[str, Any]] = {
         "name_en": "land preparation",
         "visual": "разметка участка, вырытые траншеи, выровненная земля, столбики разметки",
         "start_state": "пустой участок",
+        "start_state_en": "empty land plot",
         "end_state": "подготовленная площадка с разметкой",
+        "end_state_en": "prepared site with markings",
         "action": "земляные работы и разметка",
+        "action_en": "earthworks and site marking",
         "workers": "землекопы копают траншеи, разметчики устанавливают колышки, рабочие ровняют грунт",
         "workers_en": "diggers excavating trenches, surveyors placing stakes, workers leveling ground",
         "machinery": "экскаватор копает, бульдозер выравнивает, грузовик вывозит грунт",
@@ -294,8 +300,11 @@ BUILDING_STAGES: dict[str, dict[str, Any]] = {
         "name_en": "foundation",
         "visual": "залитый бетонный фундамент, арматура торчит, опалубка, серый бетон",
         "start_state": "подготовленная площадка",
+        "start_state_en": "prepared site",
         "end_state": "готовый бетонный фундамент",
+        "end_state_en": "completed concrete foundation",
         "action": "заливка фундамента бетоном",
+        "action_en": "pouring concrete foundation",
         "workers": "бетонщики заливают смесь, арматурщики связывают прутья, рабочие вибрируют бетон",
         "workers_en": "concrete workers pouring mix, rebar fitters tying rods, workers vibrating concrete",
         "machinery": "бетономешалка крутится, бетононасос подаёт смесь, вибратор уплотняет",
@@ -324,8 +333,11 @@ BUILDING_STAGES: dict[str, dict[str, Any]] = {
         "name_en": "walls",
         "visual": "возведённые стены из кирпича или блоков, оконные проёмы без стёкол, крыши нет",
         "start_state": "фундамент",
+        "start_state_en": "foundation",
         "end_state": "стены возведены, оконные проёмы",
+        "end_state_en": "walls erected with window openings",
         "action": "кладка стен из кирпича/блоков",
+        "action_en": "laying brick or block walls",
         "workers": "каменщики кладут кирпич, помощники подносят раствор, крановщик управляет подачей",
         "workers_en": "masons laying bricks, helpers carrying mortar, crane operator controlling delivery",
         "machinery": "кран поднимает поддон с блоками, подъёмник везёт раствор",
@@ -354,8 +366,11 @@ BUILDING_STAGES: dict[str, dict[str, Any]] = {
         "name_en": "roof",
         "visual": "установленная крыша, стропильная система, черепица или шифер, без отделки фасада",
         "start_state": "стены без крыши",
+        "start_state_en": "walls without roof",
         "end_state": "крыша установлена",
+        "end_state_en": "roof installed",
         "action": "монтаж крыши и кровли",
+        "action_en": "roofing and framework installation",
         "workers": "кровельщики укладывают черепицу, плотники ставят стропила, рабочие на лесах",
         "workers_en": "roofers laying tiles, carpenters installing rafters, workers on scaffolding",
         "machinery": "кран поднимает балки, подъёмник доставляет материалы на крышу",
@@ -384,11 +399,14 @@ BUILDING_STAGES: dict[str, dict[str, Any]] = {
         "name_en": "windows and doors",
         "visual": "установленные окна и входная дверь, стёкла блестят, рамы видны",
         "start_state": "стены с проёмами",
+        "start_state_en": "walls with openings",
         "end_state": "окна и двери установлены",
+        "end_state_en": "windows and doors installed",
         "action": "установка окон и дверей",
+        "action_en": "installing windows and doors",
         "workers": "стекольщики вставляют окна, плотники вешают дверь, рабочие герметизируют швы",
         "workers_en": "glaziers installing windows, carpenters hanging door, workers sealing joints",
-        "machinery": None,  # Usually manual work
+        "machinery": None,
         "machinery_en": None,
         "micro_actions": [
             "стекольщик вставляет раму в проём",
@@ -414,8 +432,11 @@ BUILDING_STAGES: dict[str, dict[str, Any]] = {
         "name_en": "facade finishing",
         "visual": "отделанный фасад, штукатурка или облицовка, покрашенные стены",
         "start_state": "стены с окнами",
+        "start_state_en": "walls with windows",
         "end_state": "фасад полностью отделан",
+        "end_state_en": "facade fully finished",
         "action": "внешняя отделка и покраска",
+        "action_en": "exterior finishing and painting",
         "workers": "штукатуры наносят слой, маляры красят фасад, облицовщики крепят панели",
         "workers_en": "plasterers applying coat, painters painting facade, cladding installers fixing panels",
         "machinery": "подъёмник поднимает материалы, компрессор распыляет краску",
@@ -444,8 +465,11 @@ BUILDING_STAGES: dict[str, dict[str, Any]] = {
         "name_en": "landscaping",
         "visual": "готовый дом с газоном, дорожки, посаженные кусты и цветы, забор",
         "start_state": "дом с отделкой",
+        "start_state_en": "finished house",
         "end_state": "полностью готовый дом с участком",
+        "end_state_en": "complete house with landscaped garden",
         "action": "ландшафтный дизайн и благоустройство",
+        "action_en": "landscaping and site improvement",
         "workers": "озеленители сажают кусты, дорожники укладывают плитку, рабочие ставят забор",
         "workers_en": "landscapers planting shrubs, pavers laying tiles, workers installing fence",
         "machinery": "газонокосилка стрижёт траву, тачка возит землю",
@@ -501,9 +525,12 @@ class BuildingStage(BaseModel):
     name: str
     name_en: str
     start_state: str
+    start_state_en: str
     end_state: str
+    end_state_en: str
     visual_prompt: str
     action: str
+    action_en: str
     duration: int = 6
     workers: str | None = None
     workers_en: str | None = None
@@ -564,40 +591,25 @@ def build_visual_prompt(
     stage_key: str,
     house_style: str,
     location: str,
-    language: str = "ru",
 ) -> str:
-    """Build detailed visual prompt for a building stage."""
+    """Build detailed visual prompt for a building stage (ALWAYS in English)."""
     stage = BUILDING_STAGES.get(stage_key)
     style = HOUSE_STYLES.get(house_style, HOUSE_STYLES["modern"])
     loc = LOCATIONS.get(location, LOCATIONS["suburbs"])
 
-    # Get workers and machinery info
-    workers = stage.get("workers") if stage else None
+    # Get workers and machinery info (always English)
     workers_en = stage.get("workers_en") if stage else None
-    machinery = stage.get("machinery") if stage else None
     machinery_en = stage.get("machinery_en") if stage else None
 
-    if language == "en":
-        result = f"""{stage['name_en'].capitalize()} stage. {stage['visual']}.
+    result = f"""{stage['name_en'].capitalize()} stage. {stage['visual']}.
 House style: {style['name_en']} — {style['visual']}.
 Location: {loc['name_en']} — {loc['visual']}.
 Materials: {style['materials']}.
 Background: {loc['background']}."""
-        if workers_en:
-            result += f"\nWorkers: {workers_en}."
-        if machinery_en:
-            result += f"\nMachinery: {machinery_en}."
-        return result
-
-    result = f"""Стадия: {stage['name']}. {stage['visual']}.
-Стиль дома: {style['name']} — {style['visual']}.
-Локация: {loc['name']} — {loc['visual']}.
-Материалы: {style['materials']}.
-Фон: {loc['background']}."""
-    if workers:
-        result += f"\nРабочие: {workers}."
-    if machinery:
-        result += f"\nТехника: {machinery}."
+    if workers_en:
+        result += f"\nWorkers: {workers_en}."
+    if machinery_en:
+        result += f"\nMachinery: {machinery_en}."
     return result
 
 
@@ -645,7 +657,6 @@ def generate_building_scenario(
             stage_key,
             style_key,
             loc_key,
-            language,
         )
 
         stage = BuildingStage(
@@ -654,9 +665,12 @@ def generate_building_scenario(
             name=stage_data["name"],
             name_en=stage_data["name_en"],
             start_state=stage_data["start_state"],
+            start_state_en=stage_data["start_state_en"],
             end_state=stage_data["end_state"],
+            end_state_en=stage_data["end_state_en"],
             visual_prompt=visual_prompt,
             action=stage_data["action"],
+            action_en=stage_data["action_en"],
             duration=6,
             workers=stage_data.get("workers"),
             workers_en=stage_data.get("workers_en"),
@@ -744,9 +758,12 @@ async def run_mode8_scenario_writer(
                 "name": s.name,
                 "name_en": s.name_en,
                 "start_state": s.start_state,
+                "start_state_en": s.start_state_en,
                 "end_state": s.end_state,
+                "end_state_en": s.end_state_en,
                 "visual_prompt": s.visual_prompt,
                 "action": s.action,
+                "action_en": s.action_en,
                 "duration": s.duration,
                 "workers": s.workers,
                 "workers_en": s.workers_en,
