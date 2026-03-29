@@ -1,13 +1,14 @@
 """
-Mode 8 Pipeline — House Building Timelapse Video Generator.
+Mode 9 Pipeline — Vehicle Assembly Timelapse Video Generator.
 
-Generates satisfying timelapse videos showing house construction progress.
+Generates satisfying timelapse videos showing vehicle assembly progress.
 Uses KEYFRAME approach for smooth transitions between stages.
 
 Flow:
-  1. Scenario Writer — Generate building stages (empty land -> finished house)
+  1. Scenario Writer — Generate assembly stages (empty space -> finished vehicle)
   2. Video Generator — Sequential images + KEYFRAME videos (transitions between stages)
-  3. Video Assembler — Combine into final timelapse with construction sounds
+  3. Video Assembler — Combine into final timelapse with workshop sounds
+  4. Publishing Metadata — Generate title, description, hashtags, tags
 """
 
 from __future__ import annotations
@@ -20,35 +21,35 @@ from typing import Any
 from loguru import logger
 
 from config import settings
-from modes.mode8.scenario_writer import run_mode8_scenario_writer
-from modes.mode8.video_generator import generate_house_videos
-from modes.mode8.video_assembler import assemble_mode8_video
-from modes.mode8.publishing_metadata import generate_publishing_metadata
+from modes.mode9.scenario_writer import run_mode9_scenario_writer
+from modes.mode9.video_generator import generate_vehicle_videos
+from modes.mode9.video_assembler import assemble_mode9_video
+from modes.mode9.publishing_metadata import generate_publishing_metadata
 
 
-async def run_mode8_pipeline(
+async def run_mode9_pipeline(
     session_id: str | None = None,
     local_only: bool = True,
-    house_style: str | None = None,
+    vehicle_type: str | None = None,
     location: str | None = None,
     num_stages: int = 5,
     language: str = "ru",
     control: dict | None = None,
 ) -> dict[str, Any]:
     """
-    Run the House Building Timelapse video pipeline.
+    Run the Vehicle Assembly Timelapse video pipeline.
 
     Args:
         session_id: Unique run identifier.
         local_only: If True, skip publishing.
-        house_style: House style preference (modern, cottage, villa, cabin, farmhouse, random).
-        location: Location preference (suburbs, forest, seaside, countryside, mountains, random).
-        num_stages: Number of building stages (5-8).
+        vehicle_type: Vehicle type preference (airplane, car, tractor, random).
+        location: Location preference (hangar, factory, workshop, outdoor, random).
+        num_stages: Number of assembly stages (5-7).
         language: Output language ("ru" or "en").
         control: Pause/cancel control dict.
 
     Returns:
-        dict with video_path, session_id, scenario, etc.
+        dict with video_path, session_id, scenario, publishing metadata, etc.
     """
     import asyncio
     from pipeline_control import checkpoint
@@ -59,37 +60,37 @@ async def run_mode8_pipeline(
     clips_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info(
-        f"=== Mode 8 Pipeline | House Building Timelapse | "
-        f"session={session_id} | style={house_style or 'random'} | "
+        f"=== Mode 9 Pipeline | Vehicle Assembly Timelapse | "
+        f"session={session_id} | vehicle={vehicle_type or 'random'} | "
         f"location={location or 'random'} | stages={num_stages} ==="
     )
 
-    # Step 1: Generate scenario (building stages)
+    # Step 1: Generate scenario (assembly stages)
     await checkpoint(control)
-    logger.info("Step 1/4 - Generating Building Scenario...")
+    logger.info("Step 1/4 - Generating Assembly Scenario...")
 
-    scenario = await run_mode8_scenario_writer(
-        house_style=house_style,
+    scenario = await run_mode9_scenario_writer(
+        vehicle_type=vehicle_type,
         location=location,
         num_stages=num_stages,
         language=language,
         control=control,
     )
 
-    title = scenario.get("title", "House Building Timelapse")
-    house_style_name = scenario.get("house_style_name", "house")
+    title = scenario.get("title", "Vehicle Assembly Timelapse")
+    vehicle_type_name = scenario.get("vehicle_type_name", "vehicle")
     location_name = scenario.get("location_name", "location")
     stages = scenario.get("scenes", [])
     logger.success(
-        f"[Mode8] Scenario: {title} | {house_style_name} | {location_name} | "
+        f"[Mode9] Scenario: {title} | {vehicle_type_name} | {location_name} | "
         f"{len(stages)} stages"
     )
 
     # Step 2: Generate video clips via FastGen (sequential images + KEYFRAME videos)
     await checkpoint(control)
-    logger.info("Step 2/4 - House Video Generator (Sequential Images + Keyframe Videos)")
+    logger.info("Step 2/4 - Vehicle Video Generator (Sequential Images + Keyframe Videos)")
 
-    video_paths, enriched_scenario = await generate_house_videos(
+    video_paths, enriched_scenario = await generate_vehicle_videos(
         scenario=scenario,
         output_dir=clips_dir,
         session_id=session_id,
@@ -98,11 +99,10 @@ async def run_mode8_pipeline(
 
     valid_paths = [p for p in video_paths if p and Path(p).exists()]
     if not valid_paths:
-        raise RuntimeError("[Mode8] No keyframe video clips generated")
+        raise RuntimeError("[Mode9] No keyframe video clips generated")
 
-    # Keyframe: N images produce N-1 videos (transitions between stages)
     expected_videos = len(stages) - 1 if len(stages) > 1 else 1
-    logger.success(f"[Mode8] Generated {len(valid_paths)}/{expected_videos} keyframe video clips")
+    logger.success(f"[Mode9] Generated {len(valid_paths)}/{expected_videos} keyframe video clips")
 
     # Step 3: Assemble final video
     await checkpoint(control)
@@ -114,7 +114,7 @@ async def run_mode8_pipeline(
     await loop.run_in_executor(
         None,
         functools.partial(
-            assemble_mode8_video,
+            assemble_mode9_video,
             valid_paths,
             output_path,
             title=title,
@@ -123,10 +123,10 @@ async def run_mode8_pipeline(
 
     video_path = str(output_path.resolve())
 
-    # Step 4: Generate publishing metadata (Title, Description, Hashtags, Tags)
+    # Step 4: Generate publishing metadata
     logger.info("Step 4/4 - Generating Publishing Metadata...")
     publishing = await generate_publishing_metadata(
-        house_style=house_style_name,
+        vehicle_type=vehicle_type_name,
         location=location_name,
         stages=stages,
         title=title,
@@ -136,21 +136,21 @@ async def run_mode8_pipeline(
     # Record in history
     from agents.topics_history import mark_topic_used
     mark_topic_used(
-        topic=f"[Timelapse] {title}",
+        topic=f"[Assembly] {title}",
         session_id=session_id,
         video_path=str(output_path),
-        video_angle=f"style={house_style_name},location={location_name},stages={len(stages)}",
+        video_angle=f"vehicle={vehicle_type_name},location={location_name},stages={len(stages)}",
         publishing=publishing,
     )
 
-    logger.success(f"=== Mode 8 Pipeline DONE | video={video_path} ===")
+    logger.success(f"=== Mode 9 Pipeline DONE | video={video_path} ===")
 
     return {
         "session_id": session_id,
         "video_path": video_path,
         "topic": title,
         "scenario": enriched_scenario,
-        "house_style": house_style_name,
+        "vehicle_type": vehicle_type_name,
         "location": location_name,
         "stages": len(stages),
         "trend": None,

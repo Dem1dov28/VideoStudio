@@ -1,11 +1,11 @@
 """
-Mode 8 Video Assembler — Assemble house building timelapse videos.
+Mode 9 Video Assembler — Assemble vehicle assembly timelapse videos.
 
 Features:
 - Quick crossfades (0.5-1s) between stages
-- Construction site ambient audio
+- Workshop/industrial ambient audio
 - No TTS, no subtitles (pure visual satisfaction)
-- Preserves FastGen-generated construction sounds
+- Preserves FastGen-generated assembly sounds
 """
 
 from __future__ import annotations
@@ -92,7 +92,7 @@ def _assemble_with_crossfades(clips: list, T: float, fps: int):
     return concatenate_videoclips(parts, method="compose")
 
 
-def assemble_mode8_video(
+def assemble_mode9_video(
     video_paths: list[Path | str],
     output_path: Path,
     title: str | None = None,
@@ -102,7 +102,7 @@ def assemble_mode8_video(
     final_hold_duration: float = 1.5,  # Hold last frame for retention
 ) -> Path:
     """
-    Assemble final house building timelapse video.
+    Assemble final vehicle assembly timelapse video.
 
     FastGen videos already contain AI-generated construction ambient audio.
     We PRESERVE that audio at 100% volume and ADD quiet background music at 10%.
@@ -131,7 +131,7 @@ def assemble_mode8_video(
     for p in video_paths:
         path = Path(p)
         if not path.exists():
-            logger.warning(f"[Mode8 Assembler] Skip missing: {path}")
+            logger.warning(f"[Mode9 Assembler] Skip missing: {path}")
             continue
         vc = VideoFileClip(str(path))
         original_vcs.append(vc)
@@ -148,9 +148,9 @@ def assemble_mode8_video(
         clips.append(clip)
 
     if not clips:
-        raise ValueError("[Mode8 Assembler] No valid video clips to assemble")
+        raise ValueError("[Mode9 Assembler] No valid video clips to assemble")
 
-    logger.info(f"[Mode8 Assembler] Assembling {len(clips)} clips (T={T}s)")
+    logger.info(f"[Mode9 Assembler] Assembling {len(clips)} clips (T={T}s)")
 
     # Assemble video (visual only — crossfades strip audio)
     final = _assemble_with_crossfades(clips, T, fps)
@@ -159,7 +159,7 @@ def assemble_mode8_video(
     if speed_multiplier != 1.0:
         from moviepy import vfx
         final = final.with_effects([vfx.MultiplySpeed(speed_multiplier)])
-        logger.info(f"[Mode8 Assembler] Applied {speed_multiplier}x speed for viral dynamics")
+        logger.info(f"[Mode9 Assembler] Applied {speed_multiplier}x speed for viral dynamics")
 
     # ===== SPEED RAMPING (Commented out: TimeMirror is incorrect for ramping) =====
     # if use_speed_ramping:
@@ -177,7 +177,7 @@ def assemble_mode8_video(
     #         # TimeMirror is not for speed ramping in MoviePy 2.x
     #         # final = final.with_effects([vfx.MultiplySpeed(speed_ramp)])
     #     except Exception as e:
-    #         logger.warning(f"[Mode8 Assembler] Speed ramping failed: {e}")
+    #         logger.warning(f"[Mode9 Assembler] Speed ramping failed: {e}")
 
     # ===== FINAL HOLD: Increase retention =====
     if final_hold_duration > 0:
@@ -193,9 +193,9 @@ def assemble_mode8_video(
             
             # Append freeze frame
             final = concatenate_videoclips([final, freeze_frame], method="compose")
-            logger.info(f"[Mode8 Assembler] Added FINAL HOLD: {final_hold_duration}s freeze frame for retention")
+            logger.info(f"[Mode9 Assembler] Added FINAL HOLD: {final_hold_duration}s freeze frame for retention")
         except Exception as e:
-            logger.warning(f"[Mode8 Assembler] Final hold failed: {e}")
+            logger.warning(f"[Mode9 Assembler] Final hold failed: {e}")
 
     # Build combined audio from original FastGen clips
     valid_audios = [a for a in original_audios if a is not None]
@@ -211,9 +211,9 @@ def assemble_mode8_video(
                 ])
             max_dur = min(final.duration, combined_video_audio.duration) - 0.05
             combined_video_audio = combined_video_audio.subclipped(0, max(0.1, max_dur))
-            logger.info(f"[Mode8 Assembler] Preserved FastGen audio from {len(valid_audios)} clips (speed: {speed_multiplier}x)")
+            logger.info(f"[Mode9 Assembler] Preserved FastGen audio from {len(valid_audios)} clips (speed: {speed_multiplier}x)")
         except Exception as e:
-            logger.warning(f"[Mode8 Assembler] Could not combine video audios: {e}")
+            logger.warning(f"[Mode9 Assembler] Could not combine video audios: {e}")
             combined_video_audio = None
 
     # Background music at 10% volume (ambient, construction-friendly)
@@ -237,26 +237,26 @@ def assemble_mode8_video(
                 afx.AudioFadeOut(fade_dur),
             ])
             bg_audio = bg
-            logger.info(f"[Mode8 Assembler] Added background music at 10%: {music_path.name}")
+            logger.info(f"[Mode9 Assembler] Added background music at 10%: {music_path.name}")
     except Exception as e:
-        logger.warning(f"[Mode8 Assembler] Background music failed: {e}")
+        logger.warning(f"[Mode9 Assembler] Background music failed: {e}")
 
     # Mix: FastGen construction audio (100%) + background music (10%)
     if combined_video_audio and bg_audio:
         final_audio = CompositeAudioClip([combined_video_audio, bg_audio])
         final = final.with_audio(final_audio)
-        logger.info("[Mode8 Assembler] Audio: FastGen construction 100% + music 10%")
+        logger.info("[Mode9 Assembler] Audio: FastGen construction 100% + music 10%")
     elif combined_video_audio:
         final = final.with_audio(combined_video_audio)
-        logger.info("[Mode8 Assembler] Audio: FastGen construction only (no music)")
+        logger.info("[Mode9 Assembler] Audio: FastGen construction only (no music)")
     elif bg_audio:
         final = final.with_audio(bg_audio)
-        logger.warning("[Mode8 Assembler] Audio: music only (FastGen audio was missing)")
+        logger.warning("[Mode9 Assembler] Audio: music only (FastGen audio was missing)")
     else:
-        logger.warning("[Mode8 Assembler] No audio available")
+        logger.warning("[Mode9 Assembler] No audio available")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    logger.info(f"[Mode8 Assembler] Rendering -> {output_path}")
+    logger.info(f"[Mode9 Assembler] Rendering -> {output_path}")
 
     try:
         final.write_videofile(
@@ -281,5 +281,5 @@ def assemble_mode8_video(
             except Exception:
                 pass
 
-    logger.success(f"[Mode8 Assembler] Done -> {output_path}")
+    logger.success(f"[Mode9 Assembler] Done -> {output_path}")
     return output_path

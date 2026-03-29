@@ -166,6 +166,111 @@ export default function History() {
                   </div>
                 );
               })()}
+
+              {selected?.publishing && (
+                <div className="p-4 space-y-3 border-t border-[#27272f] bg-[#0d0d14]">
+                  {/* Title */}
+                  <div>
+                    <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
+                      Название
+                    </label>
+                    <div className="flex gap-1.5">
+                      <input
+                        type="text"
+                        value={selected.publishing.title || ''}
+                        readOnly
+                        className="flex-1 bg-[#1a1a2e] border border-[#27272f] rounded px-2 py-1.5 text-xs text-white"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(selected.publishing.title || '');
+                          alert('Название скопировано!');
+                        }}
+                        className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2.5 py-1.5 rounded transition-colors whitespace-nowrap"
+                      >
+                        Копия
+                      </button>
+                    </div>
+                  </div>
+                  
+                  {/* Hashtags */}
+                  <div>
+                    <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
+                      Хештеги
+                    </label>
+                    <div className="flex gap-1.5">
+                      <input
+                        type="text"
+                        value={(selected.publishing.hashtags || []).join(' ')}
+                        readOnly
+                        className="flex-1 bg-[#1a1a2e] border border-[#27272f] rounded px-2 py-1.5 text-xs text-white"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText((selected.publishing.hashtags || []).join(' '));
+                          alert('Хештеги скопированы!');
+                        }}
+                        className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2.5 py-1.5 rounded transition-colors whitespace-nowrap"
+                      >
+                        Копия
+                      </button>
+                    </div>
+                  </div>
+                  
+                  {/* Description */}
+                  <div>
+                    <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
+                      Описание
+                    </label>
+                    <div className="flex gap-1.5">
+                      <textarea
+                        value={selected.publishing.description || ''}
+                        readOnly
+                        rows={3}
+                        className="flex-1 bg-[#1a1a2e] border border-[#27272f] rounded px-2 py-1.5 text-xs text-white resize-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(selected.publishing.description || '');
+                          alert('Описание скопировано!');
+                        }}
+                        className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2.5 py-1.5 rounded transition-colors whitespace-nowrap self-start mt-0.5"
+                      >
+                        Копия
+                      </button>
+                    </div>
+                  </div>
+                  
+                  {/* Tags */}
+                  <div>
+                    <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
+                      Теги
+                    </label>
+                    <div className="flex gap-1.5">
+                      <input
+                        type="text"
+                        value={(selected.publishing.tags || []).join(', ')}
+                        readOnly
+                        className="flex-1 bg-[#1a1a2e] border border-[#27272f] rounded px-2 py-1.5 text-xs text-white"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText((selected.publishing.tags || []).join(', '));
+                          alert('Теги скопированы!');
+                        }}
+                        className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2.5 py-1.5 rounded transition-colors whitespace-nowrap"
+                      >
+                        Копия
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div className="p-4 flex flex-col gap-2">
                 <div className="flex gap-2">
                   <a

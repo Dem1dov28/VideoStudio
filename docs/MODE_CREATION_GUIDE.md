@@ -1,10 +1,13 @@
 # Руководство по созданию нового режима генерации видео
 
-Полное руководство по добавлению нового режима в VideoStudio с поддержкой:
-- Параллельной генерации фото через несколько браузеров
-- Прикрепления нескольких референсных изображений (фото персонажей)
-- Двухэтапного workflow: сначала все фото → потом все видео
-- UI для выбора режима на localhost
+Полное руководство по добавлению нового режима в VideoStudio на основе архитектуры Mode 8 (House Building Timelapse).
+
+Mode 8 демонстрирует:
+- **Последовательную генерацию** изображений с цепочкой референсов
+- **Keyframe-подход** для плавных переходов между кадрами
+- **Продвинутую обработку ошибок** с retry-логикой
+- **Детальную структуру промптов** с интенсивностью, временем суток, пиковыми моментами
+- **Publishing metadata** для YouTube Shorts
 
 ---
 
@@ -15,11 +18,12 @@
 ```
 modes/
 ├── modeN/
-│   ├── __init__.py
-│   ├── pipeline.py           # Главный пайплайн режима
-│   ├── scenario_writer.py    # Генерация сценария через LLM
-│   ├── video_generator.py    # Генерация фото + видео через FastGen
-│   └── video_assembler.py    # Сборка финального видео
+│   ├── __init__.py              # Экспорт главной функции пайплайна
+│   ├── pipeline.py              # Главный пайплайн режима
+│   ├── scenario_writer.py       # Генерация сценария с Pydantic моделями
+│   ├── video_generator.py       # Последовательная генерация + keyframe видео
+│   ├── video_assembler.py       # Сборка финального видео
+│   └── publishing_metadata.py   # Метаданные для публикации (опционально)
 ```
 
 ---
@@ -29,7 +33,7 @@ modes/
 ### `modes/modeN/__init__.py`
 
 ```python
-"""Mode N: Название режима."""
+"""Mode N: Название режима — краткое описание."""
 from modes.modeN.pipeline import run_modeN_pipeline
 
 __all__ = ["run_modeN_pipeline"]
@@ -37,20 +41,234 @@ __all__ = ["run_modeN_pipeline"]
 
 ---
 
-## Шаг 2: Video Generator с параллельной генерацией
+## Шаг 2: Scenario Writer с Pydantic моделями
+
+### `modes/modeN/scenario_writer.py`
+
+```python
+"""
+Mode N Scenario Writer — Генерация структурированного сценария.
+
+Использует Pydantic для валидации и типизации данных сценария.
+Каждая сцена содержит детальные параметры для генерации.
+"""
+
+from __future__ import annotations
+
+import random
+from typing import Any
+
+from loguru import logger
+from pydantic import BaseModel
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# КОНФИГУРАЦИЯ СТИЛЕЙ И ЛОКАЦИЙ
+# ═══════════════════════════════════════════════════════════════════════════
+
+STYLE_CONFIGS: dict[str, dict[str, Any]] = {
+    "style1": {
+        "name": "название на русском",
+        "name_en": "english name",
+        "visual": "визуальное описание для промптов",
+        "features": "ключевые особенности",
+    },
+    # ... другие стили
+}
+
+LOCATION_CONFIGS: dict[str, dict[str, Any]] = {
+    "location1": {
+        "name": "название",
+        "name_en": "english name",
+        "visual": "визуальное описание",
+        "background": "описание фона",
+    },
+    # ... другие локации
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PYDANTIC МОДЕЛИ
+# ═══════════════════════════════════════════════════════════════════════════
+
+class SceneStage(BaseModel):
+    """Одна сцена/этап в сценарии."""
+    index: int
+    stage_key: str                    # Уникальный ключ этапа
+    name: str                         # Название на русском
+    name_en: str                      # Название на английском
+    start_state: str                  # Начальное состояние
+    end_state: str                    # Конечное состояние
+    visual_prompt: str                # Визуальный промпт для генерации
+    action: str                       # Действие/активность
+    duration: int = 6                 # Длительность в секундах
+    
+    # Дополнительные параметры для детализации
+    workers: str | None = None        # Описание работников
+    workers_en: str | None = None
+    machinery: str | None = None      # Описание техники
+    machinery_en: str | None = None
+    micro_actions: list[str] = []     # Микро-действия для реализма
+    micro_actions_en: list[str] = []
+    
+    # Параметры для промптов
+    build_intensity: str = "medium"   # low | medium | high
+    time_of_day: str = "midday"       # morning | midday | afternoon | golden_hour
+    is_peak_moment: bool = False      # Пиковый визуальный момент
+
+
+class Scenario(BaseModel):
+    """Полный сценарий."""
+    title: str
+    title_en: str
+    style: str
+    style_name: str
+    location: str
+    location_name: str
+    scenes: list[SceneStage]
+    total_duration: int = 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ГЕНЕРАЦИЯ СЦЕНАРИЯ
+# ═══════════════════════════════════════════════════════════════════════════
+
+def generate_scenario(
+    preferred_style: str | None = None,
+    preferred_location: str | None = None,
+    num_stages: int = 5,
+    language: str = "ru",
+) -> Scenario:
+    """
+    Генерация структурированного сценария.
+    
+    Args:
+        preferred_style: Предпочтительный стиль (или None для случайного)
+        preferred_location: Предпочтительная локация
+        num_stages: Количество этапов (5-8)
+        language: Язык вывода
+    
+    Returns:
+        Scenario с полной структурой
+    """
+    # Выбор стиля и локации
+    style_key = _select_style(preferred_style)
+    loc_key = _select_location(preferred_location)
+    
+    style = STYLE_CONFIGS[style_key]
+    loc = LOCATION_CONFIGS[loc_key]
+    
+    # Получение последовательности этапов
+    stage_keys = _get_stage_sequence(num_stages)
+    
+    # Построение этапов
+    stages = []
+    for i, stage_key in enumerate(stage_keys):
+        stage_data = _get_stage_data(stage_key)
+        
+        visual_prompt = _build_visual_prompt(
+            stage_key, style_key, loc_key, language
+        )
+        
+        stage = SceneStage(
+            index=i,
+            stage_key=stage_key,
+            name=stage_data["name"],
+            name_en=stage_data["name_en"],
+            start_state=stage_data["start_state"],
+            end_state=stage_data["end_state"],
+            visual_prompt=visual_prompt,
+            action=stage_data["action"],
+            duration=6,
+            workers=stage_data.get("workers"),
+            workers_en=stage_data.get("workers_en"),
+            machinery=stage_data.get("machinery"),
+            machinery_en=stage_data.get("machinery_en"),
+            micro_actions=stage_data.get("micro_actions", []),
+            micro_actions_en=stage_data.get("micro_actions_en", []),
+            build_intensity=stage_data.get("build_intensity", "medium"),
+            time_of_day=stage_data.get("time_of_day", "midday"),
+            is_peak_moment=stage_data.get("is_peak_moment", False),
+        )
+        stages.append(stage)
+    
+    # Формирование заголовка
+    if language == "en":
+        title = f"Timelapse: {style['name_en']}"
+        title_en = title
+    else:
+        title = f"Таймлапс: {style['name']}"
+        title_en = f"Timelapse: {style['name_en']}"
+    
+    return Scenario(
+        title=title,
+        title_en=title_en,
+        style=style_key,
+        style_name=style["name"],
+        location=loc_key,
+        location_name=loc["name"],
+        scenes=stages,
+        total_duration=sum(s.duration for s in stages),
+    )
+
+
+async def run_modeN_scenario_writer(
+    preferred_style: str | None = None,
+    preferred_location: str | None = None,
+    num_stages: int = 5,
+    language: str = "ru",
+    control: dict | None = None,
+) -> dict[str, Any]:
+    """Точка входа для пайплайна."""
+    from pipeline_control import checkpoint
+    
+    await checkpoint(control)
+    
+    scenario = generate_scenario(
+        preferred_style=preferred_style,
+        preferred_location=preferred_location,
+        num_stages=num_stages,
+        language=language,
+    )
+    
+    # Конвертация в dict для совместимости с пайплайном
+    return {
+        "title": scenario.title,
+        "title_en": scenario.title_en,
+        "style": scenario.style,
+        "style_name": scenario.style_name,
+        "location": scenario.location,
+        "location_name": scenario.location_name,
+        "scenes": [s.model_dump() for s in scenario.scenes],
+        "total_duration": scenario.total_duration,
+    }
+```
+
+---
+
+## Шаг 3: Video Generator с последовательной генерацией
 
 ### `modes/modeN/video_generator.py`
 
 ```python
 """
-Mode N Video Generator — Двухэтапная генерация:
-1. Параллельная генерация ВСЕХ референсных изображений
-2. Параллельная генерация ВСЕХ видео с референсами
+Mode N Video Generator — Последовательная генерация с keyframe-переходами.
 
-Ключевые особенности:
-- generate_images_with_references_fastgen() — параллельная генерация фото
-- Фото персонажей прикрепляются как референсы при генерации
-- До 3 референсов на одно изображение/видео (лимит FastGen)
+WORKFLOW:
+1. ПОСЛЕДОВАТЕЛЬНАЯ генерация изображений с цепочкой референсов:
+   - Этап 0: генерация БЕЗ референса
+   - Этап 1: генерация с изображением этапа 0 как референс
+   - И так далее...
+
+2. KEYFRAME генерация видео (переходы между этапами):
+   - Видео 0: переход от этапа_0 к этапу_1
+   - Видео 1: переход от этапа_1 к этапу_2
+   - ...
+
+ОСОБЕННОСТИ:
+- Retry-логика для изображений (2 попытки)
+- Проверка существования файлов перед генерацией видео
+- Параллельная генерация видео после подготовки всех кадров
 """
 
 from __future__ import annotations
@@ -62,93 +280,198 @@ from typing import Any
 from loguru import logger
 
 from agents.content_generator.fastgen_scraper import (
-    generate_images_with_references_fastgen,  # ← Параллельная генерация с refs
-    generate_single_video_multi_ref,          # ← Генерация видео с refs
+    generate_single_video_multi_ref,
+    generate_video_from_keyframes,
 )
 from config import settings
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# КОНФИГУРАЦИЯ
+# ПОСТРОИТЕЛИ ПРОМПТОВ
 # ═══════════════════════════════════════════════════════════════════════════
 
-# Путь к фото персонажей (или другим референсам)
-PERSONS_DIR = Path(__file__).resolve().parent.parent.parent / "PEROSNS"
-
-# Визуальные описания персонажей для промптов
-CHARACTER_VISUALS = {
-    "Персонаж1": "описание внешности персонажа 1",
-    "Персонаж2": "описание внешности персонажа 2",
-    # ...
-}
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# ═══════════════════════════════════════════════════════════════════════════
-
-def get_character_image_path(character_name: str) -> Path | None:
-    """Получить путь к фото персонажа по имени."""
-    for ext in [".jpg", ".jpeg", ".png", ".webp"]:
-        path = PERSONS_DIR / f"{character_name}{ext}"
-        if path.exists():
-            return path
-    return None
-
-
-def get_character_image_paths(character_names: list[str]) -> list[Path]:
-    """Получить пути к фото нескольких персонажей."""
-    images = []
-    for name in character_names:
-        path = get_character_image_path(name)
-        if path:
-            images.append(path)
-    return images
-
-
-def _build_image_prompt(scene: dict[str, Any], index: int, language: str = "ru") -> str:
-    """Построить промпт для генерации референсного изображения."""
-    characters = scene.get("characters", [])
-    action = scene.get("action", "")
-    emotion = scene.get("emotion", "neutral")
-    location = scene.get("location", "")
+def _build_image_prompt(
+    scene: dict[str, Any],
+    index: int,
+    scenario: dict[str, Any],
+    language: str = "ru",
+) -> str:
+    """
+    Построить промпт для генерации референсного изображения.
     
-    # Формируем описания персонажей
-    char_descriptions = []
-    for char in characters:
-        visual = CHARACTER_VISUALS.get(char, f"{char} character")
-        char_descriptions.append(f"{char} ({visual})")
-    characters_block = "\n".join(f"{i+1}. {desc}" for i, desc in enumerate(char_descriptions))
+    CRITICAL: Фон должен оставаться НЕИЗМЕННЫМ между этапами!
+    """
+    style = scenario.get("style", "default")
+    location = scenario.get("location", "default")
+    stage_name = scene.get("name", "stage")
+    visual_prompt = scene.get("visual_prompt", "")
     
-    prompt = f"""Create a high-quality still image for a video scene.
+    prompt = f"""Create a photorealistic still image.
 
-STYLE: [Ваш стиль: 3D cartoon, realistic, anime, etc.]
+━━━ CRITICAL: BACKGROUND STAYS THE SAME! ━━━
+The BACKGROUND MUST REMAIN EXACTLY THE SAME across all stages!
+- Same sky, same environment
+- ONLY THE SUBJECT CHANGES — background is FROZEN!
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-CHARACTERS IN SCENE:
-{characters_block}
+━━━ CONTENT SAFETY (MANDATORY) ━━━
+Generate ONLY original, generic content.
+- NO brand names, logos, copyrighted characters
+- All items must be GENERIC
+- NO visible text or logos
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-LOCATION: {location or "neutral setting"}
+STYLE: Photorealistic, natural lighting, authentic look.
+NOT 3D render, NOT CGI, NOT cartoon. Must look REAL.
+
+STAGE: {stage_name}
 
 SCENE DESCRIPTION:
-{action}
-
-EMOTION: {emotion}
+{visual_prompt}
 
 COMPOSITION:
-- Full body visible for all characters
 - Vertical 9:16 aspect ratio
-- Characters positioned clearly
-- Dynamic poses matching the emotion"""
-    
+- Camera positioned at consistent angle
+- Natural daylight
+- Realistic shadows and lighting
+
+CRITICAL:
+- This MUST look like a REAL PHOTO
+- If previous image is provided as reference, match the EXACT camera angle"""
+
     return prompt
 
 
-def _build_video_prompt(scene: dict[str, Any], index: int, total: int, language: str = "ru") -> str:
-    """Построить промпт для генерации видео."""
-    # Аналогично _build_image_prompt, но с дополнительными правилами
-    # для аудио, движения камеры, цензуры и т.д.
-    # ... (см. modes/mode6/video_generator.py для полного примера)
-    pass
+def _build_keyframe_video_prompt(
+    scene: dict[str, Any],
+    scenario: dict[str, Any],
+    language: str = "ru",
+) -> str:
+    """
+    Построить КОРОТКИЙ промпт для FastGen keyframe видео.
+    
+    VIDEO PROMPT FORMULA:
+    [Shot Type] + [Subject Action] + [Camera Motion] + [Environment] + [Temporal] + [Technical]
+    
+    Оптимизирован для FastGen (~700 символов).
+    """
+    style = scenario.get("style", "default")
+    location = scenario.get("location", "default")
+    
+    start_state = scene.get("start_state", "previous")
+    end_state = scene.get("end_state", "next")
+    action = scene.get("action", "transformation")
+    stage_name = scene.get("name_en", "stage")
+    
+    # Дополнительные параметры
+    intensity = scene.get("build_intensity", "medium")
+    time_of_day = scene.get("time_of_day", "midday")
+    is_peak = scene.get("is_peak_moment", False)
+    
+    # Короткие версии workers/machinery
+    workers = scene.get("workers_en", "workers active")
+    machinery = scene.get("machinery_en", "equipment operating")
+    workers_short = (workers[:80] + "...") if len(workers) > 80 else workers
+    machinery_short = (machinery[:80] + "...") if len(machinery) > 80 else machinery
+    
+    peak_section = ""
+    if is_peak:
+        peak_section = "PEAK VISUAL MOMENT — MAXIMUM IMPACT! "
+    
+    prompt = f"""Wide shot (WS), timelapse: {stage_name}. {peak_section}
+
+SUBJECT: {action}. Workers: {workers_short}. Equipment: {machinery_short}.
+
+CAMERA: Locked-off tripod, static frame. CRITICAL: camera must not move.
+TEMPORAL: Time-lapse, forward motion ONLY, step-by-step progress.
+
+TRANSITION: "{start_state}" → "{end_state}".
+MUST strictly follow start frame to end frame. No sudden jumps.
+
+BACKGROUND: Environment stays SAME. Only subject evolves.
+
+SAFETY: Generic content ONLY. NO brands, logos, copyrighted material.
+
+TECHNICAL: Vertical 9:16, 1080x1920, cinematic, photorealistic 4K."""
+
+    return prompt
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ С RETRY
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def _generate_single_image_with_ref(
+    prompt: str,
+    output_dir: Path,
+    index: int,
+    reference_image_paths: list[Path],
+) -> Path | None:
+    """
+    Генерация одного изображения с референсом.
+    Используется для последовательной цепочки.
+    """
+    try:
+        from agents.content_generator.fastgen_scraper import (
+            generate_images_with_references_fastgen,
+        )
+
+        prompts_with_refs = [(prompt, reference_image_paths)]
+
+        image_paths = await generate_images_with_references_fastgen(
+            prompts_with_refs,
+            output_dir,
+            parallel=False,  # Последовательная генерация
+        )
+
+        if image_paths and len(image_paths) > 0:
+            img_path = image_paths[0]
+            if img_path and Path(img_path).exists():
+                new_path = output_dir / f"stage_{index:03d}_ref.png"
+                Path(img_path).rename(new_path)
+                return new_path
+
+        return None
+
+    except Exception as e:
+        logger.error(f"[ModeN] Image generation failed for stage {index}: {e}")
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ГЕНЕРАЦИЯ ВИДЕО
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def _generate_keyframe_video(
+    index: int,
+    prompt: str,
+    start_frame: Path,
+    end_frame: Path,
+    output_dir: Path,
+) -> Path | None:
+    """
+    Генерация видео перехода от start_frame к end_frame.
+    PREFERRED метод для плавных переходов.
+    """
+    try:
+        result = await generate_video_from_keyframes(
+            prompt=prompt,
+            output_dir=output_dir,
+            start_frame_path=start_frame,
+            end_frame_path=end_frame,
+            index=index,
+        )
+
+        if result and Path(result).exists():
+            logger.success(f"[ModeN] Keyframe video {index + 1} saved: {Path(result).name}")
+            return result
+        else:
+            logger.error(f"[ModeN] Keyframe video {index + 1}: No result")
+            return None
+
+    except Exception as e:
+        logger.error(f"[ModeN] Keyframe video {index + 1} failed: {e}")
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -162,16 +485,19 @@ async def generate_videos(
     language: str = "ru",
 ) -> tuple[list[Path | None], dict[str, Any]]:
     """
-    Двухэтапная генерация видео с референсными изображениями.
+    Генерация видео с последовательной подготовкой изображений.
     
-    Workflow:
-    1. Параллельная генерация ВСЕХ референсных изображений (несколько браузеров)
-    2. Параллельная генерация ВСЕХ видео с референсами
+    WORKFLOW:
+    1. ПОСЛЕДОВАТЕЛЬНАЯ генерация изображений с цепочкой референсов
+    2. ПАРАЛЛЕЛЬНАЯ генерация keyframe видео
+    
+    Returns:
+        Tuple of (list of video paths, enriched scenario)
     """
     scenes = scenario.get("scenes", [])
     
     if not scenes:
-        raise ValueError("No scenes to generate")
+        raise ValueError("[ModeN] No scenes to generate")
     
     fastgen_key = getattr(settings, "fastgen_api_key", "") or ""
     if not fastgen_key:
@@ -182,126 +508,534 @@ async def generate_videos(
     images_dir.mkdir(parents=True, exist_ok=True)
     
     # ═══════════════════════════════════════════════════════════════════════
-    # ЭТАП 1: Параллельная генерация ВСЕХ референсных изображений
+    # ЭТАП 1: ПОСЛЕДОВАТЕЛЬНАЯ генерация изображений с цепочкой референсов
     # ═══════════════════════════════════════════════════════════════════════
     
-    logger.info(f"STEP 1: Generating {len(scenes)} reference images in PARALLEL...")
+    logger.info(f"[ModeN] STEP 1: Generating {len(scenes)} images SEQUENTIALLY...")
     
-    # Формируем список (prompt, reference_image_paths) для каждой сцены
-    prompts_with_refs: list[tuple[str, list[Path]]] = []
-    scene_data = []
+    ref_image_paths: list[Path | None] = []
+    previous_image: Path | None = None
+    image_retries = 2  # Количество повторных попыток
     
     for i, scene in enumerate(scenes):
-        # Получаем персонажей для этой сцены (макс 3 для FastGen)
-        scene_characters = scene.get("characters", [])[:3]
-        character_images = get_character_image_paths(scene_characters)
+        image_prompt = _build_image_prompt(scene, i, scenario, language)
         
-        # Fallback если нет фото персонажей
-        if not character_images:
-            fallback = scenario.get("characters", [])
-            if fallback:
-                character_images = get_character_image_paths(fallback[:1])
+        # Референс = предыдущее изображение (для континуитета)
+        refs = [previous_image] if previous_image else []
         
-        # Строим промпты
-        image_prompt = _build_image_prompt(scene, i, language)
-        video_prompt = _build_video_prompt(scene, i, len(scenes), language)
+        logger.info(
+            f"[ModeN] Generating image {i + 1}/{len(scenes)}: {scene.get('stage_key', 'stage')} "
+            f"(with {len(refs)} reference(s))"
+        )
         
-        # Добавляем в список для параллельной генерации
-        prompts_with_refs.append((image_prompt, character_images))
+        # Генерация С RETRY
+        image_path = None
+        for retry in range(image_retries + 1):
+            image_path = await _generate_single_image_with_ref(
+                prompt=image_prompt,
+                output_dir=images_dir,
+                index=i,
+                reference_image_paths=refs,
+            )
+            if image_path and Path(image_path).exists():
+                break
+            if retry < image_retries:
+                logger.warning(f"[ModeN] Image {i + 1} failed, retry {retry + 2}/{image_retries + 1}...")
         
-        # Сохраняем данные для генерации видео
-        scene_data.append({
-            "index": i,
-            "video_prompt": video_prompt,
-            "character_images": character_images,
-        })
-        
-        logger.info(f"Scene {i+1}: characters={scene_characters}, refs={[p.name for p in character_images]}")
-    
-    # 🚀 ПАРАЛЛЕЛЬНАЯ генерация изображений с референсами
-    image_paths = await generate_images_with_references_fastgen(
-        prompts_with_refs,
-        images_dir,
-        parallel=True,  # ← Включает параллельный режим
-    )
-    
-    # Переименовываем изображения
-    ref_image_paths: list[Path | None] = []
-    for i, img_path in enumerate(image_paths):
-        if img_path and Path(img_path).exists():
-            new_path = images_dir / f"scene_{i:03d}_ref.png"
-            Path(img_path).rename(new_path)
-            ref_image_paths.append(new_path)
+        if image_path:
+            ref_image_paths.append(image_path)
+            previous_image = image_path  # Цепочка на следующий этап
+            logger.success(f"[ModeN] Stage {i + 1} image: {image_path.name}")
         else:
             ref_image_paths.append(None)
+            logger.error(f"[ModeN] Stage {i + 1}: Failed after {image_retries + 1} attempts")
+            # НЕ прерываем — продолжаем с None, но предупреждаем
+            if i < len(scenes) - 1:
+                logger.warning(f"[ModeN] Stage {i + 2} will have no reference!")
     
     # ═══════════════════════════════════════════════════════════════════════
-    # ЭТАП 2: Параллельная генерация ВСЕХ видео
+    # ЭТАП 2: KEYFRAME генерация видео (переходы между этапами)
     # ═══════════════════════════════════════════════════════════════════════
     
-    logger.info(f"STEP 2: Generating {len(scenes)} videos in PARALLEL...")
+    num_videos = len(scenes) - 1  # Переходы между N этапами = N-1 видео
+    
+    if num_videos < 1:
+        raise ValueError("[ModeN] Need at least 2 stages for keyframe videos")
+    
+    logger.info(f"[ModeN] STEP 2: Generating {num_videos} KEYFRAME videos...")
     
     video_tasks = []
-    for i, data in enumerate(scene_data):
-        # Комбинируем фото персонажей + сгенерированное референсное изображение
-        ref_image = ref_image_paths[i] if i < len(ref_image_paths) else None
-        all_references = data["character_images"].copy()
+    for i in range(num_videos):
+        start_frame = ref_image_paths[i] if i < len(ref_image_paths) else None
+        end_frame = ref_image_paths[i + 1] if i + 1 < len(ref_image_paths) else None
         
-        if ref_image and ref_image.exists():
-            all_references.append(ref_image)
+        # Проверка существования файлов
+        if not start_frame or not end_frame:
+            logger.warning(f"[ModeN] Skipping video {i}: missing frames")
+            video_tasks.append(asyncio.create_task(asyncio.sleep(0)))
+            continue
         
-        # Лимит 3 референса (FastGen limit)
-        all_references = all_references[:3]
+        if not Path(start_frame).exists() or not Path(end_frame).exists():
+            logger.warning(f"[ModeN] Skipping video {i}: frame files not found")
+            video_tasks.append(asyncio.create_task(asyncio.sleep(0)))
+            continue
         
-        task = _generate_single_video(
+        video_prompt = _build_keyframe_video_prompt(scenes[i], scenario, language)
+        
+        task = _generate_keyframe_video(
             index=i,
-            prompt=data["video_prompt"],
-            reference_image_paths=all_references,
+            prompt=video_prompt,
+            start_frame=Path(start_frame),
+            end_frame=Path(end_frame),
             output_dir=output_dir,
         )
         video_tasks.append(task)
     
-    # 🚀 ПАРАЛЛЕЛЬНАЯ генерация видео
+    # ПАРАЛЛЕЛЬНАЯ генерация всех видео
     video_paths = await asyncio.gather(*video_tasks, return_exceptions=True)
     
     # Обработка результатов
     valid_paths: list[Path | None] = []
     for i, result in enumerate(video_paths):
         if isinstance(result, Exception):
-            logger.error(f"Scene {i+1} video failed: {result}")
+            logger.error(f"[ModeN] Video {i + 1} failed: {result}")
+            valid_paths.append(None)
+        elif result is None:
             valid_paths.append(None)
         else:
             valid_paths.append(result)
     
-    return valid_paths, scenario
-
-
-async def _generate_single_video(
-    index: int,
-    prompt: str,
-    reference_image_paths: list[Path],
-    output_dir: Path,
-) -> Path | None:
-    """Генерация одного видео с референсами."""
-    try:
-        result = await generate_single_video_multi_ref(
-            index=index,
-            prompt=prompt,
-            output_dir=output_dir,
-            reference_image_paths=reference_image_paths,
-        )
-        if result and Path(result).exists():
-            logger.success(f"Scene {index+1} video saved")
-            return result
-        return None
-    except Exception as e:
-        logger.error(f"Scene {index+1} failed: {e}")
-        return None
+    # Обогащение сценария путями
+    enriched_scenes = []
+    for i, scene in enumerate(scenes):
+        enriched_scene = dict(scene)
+        if i < len(ref_image_paths) and ref_image_paths[i]:
+            enriched_scene["reference_image_path"] = str(ref_image_paths[i])
+        if i > 0 and i - 1 < len(valid_paths) and valid_paths[i - 1]:
+            enriched_scene["video_path"] = str(valid_paths[i - 1])
+        enriched_scenes.append(enriched_scene)
+    
+    enriched_scenario = dict(scenario)
+    enriched_scenario["scenes"] = enriched_scenes
+    
+    valid_count = sum(1 for p in valid_paths if p and Path(p).exists())
+    ref_count = sum(1 for p in ref_image_paths if p and Path(p).exists())
+    logger.success(
+        f"[ModeN] Generated {ref_count}/{len(scenes)} images "
+        f"and {valid_count}/{num_videos} videos"
+    )
+    
+    return valid_paths, enriched_scenario
 ```
 
 ---
 
-## Шаг 3: Pipeline режима
+## Шаг 4: Video Assembler с продвинутой обработкой
+
+### `modes/modeN/video_assembler.py`
+
+```python
+"""
+Mode N Video Assembler — Сборка финального видео.
+
+Features:
+- Crossfade transitions между клипами
+- Speed ramping для кинематографичности
+- Final hold frame для удержания внимания
+- Смешивание аудио: оригинал + фоновая музыка
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+from loguru import logger
+from moviepy import (
+    AudioFileClip,
+    CompositeAudioClip,
+    VideoClip,
+    VideoFileClip,
+    afx,
+    concatenate_audioclips,
+    concatenate_videoclips,
+)
+from PIL import Image
+
+from config import settings
+
+
+def _resize_fill(img: Image.Image, w: int, h: int, bottom_crop: float = 0.0) -> Image.Image:
+    """Масштабирование с заполнением; опционально обрезка снизу (для водяных знаков)."""
+    if bottom_crop > 0 and bottom_crop < 1:
+        keep_h = int(img.height * (1.0 - bottom_crop))
+        if keep_h > 0:
+            img = img.crop((0, 0, img.width, keep_h))
+    ratio = max(w / img.width, h / img.height)
+    nw, nh = int(img.width * ratio), int(img.height * ratio)
+    img = img.resize((nw, nh), Image.LANCZOS)
+    left, top = (nw - w) // 2, (nh - h) // 2
+    return img.crop((left, top, left + w, top + h))
+
+
+def _clip_with_bottom_crop(
+    vc: VideoFileClip, target_w: int, target_h: int, fps: int, bottom_crop: float
+) -> VideoClip:
+    """Обёртка VideoFileClip с обрезкой снизу + ресайз."""
+    vid_dur = float(vc.duration)
+
+    def make_frame(t: float) -> np.ndarray:
+        t_vid = min(t, vid_dur - 0.001) if vid_dur > 0 else 0
+        frame = vc.get_frame(t_vid)
+        if frame is None or frame.size == 0:
+            return np.zeros((target_h, target_w, 3), dtype=np.uint8)
+        img = Image.fromarray(frame)
+        img = _resize_fill(img, target_w, target_h, bottom_crop=bottom_crop)
+        return np.array(img)
+
+    return VideoClip(make_frame, duration=vid_dur).with_fps(fps)
+
+
+def _make_crossfade(clip_a, clip_b, duration: float, fps: int):
+    """Плавный переход между клипами с smoothstep."""
+    dur_a = float(clip_a.duration)
+    dur_b = float(clip_b.duration)
+    half = duration / 2.0
+
+    def smoothstep(x):
+        x = max(0.0, min(1.0, x))
+        return x * x * (3.0 - 2.0 * x)
+
+    def make_frame(t):
+        raw = t / duration if duration > 0 else 1.0
+        alpha = smoothstep(raw)
+        half_a = min(half, dur_a)
+        half_b = min(half, dur_b)
+        ta = max(0.0, dur_a - half_a) + raw * half_a
+        tb = raw * half_b
+        fa = clip_a.get_frame(ta).astype("float32")
+        fb = clip_b.get_frame(tb).astype("float32")
+        return ((1.0 - alpha) * fa + alpha * fb).astype("uint8")
+
+    return VideoClip(make_frame, duration=duration).with_fps(fps)
+
+
+def _assemble_with_crossfades(clips: list, T: float, fps: int):
+    """Сборка клипов с crossfade переходами."""
+    if len(clips) == 1 or T <= 0:
+        return concatenate_videoclips(clips, method="compose")
+    half = T / 2.0
+    parts = []
+    for i, clip in enumerate(clips):
+        is_first, is_last = i == 0, i == len(clips) - 1
+        t_start = 0.0 if is_first else half
+        t_end = clip.duration if is_last else max(clip.duration - half, half + 0.1)
+        t_end = min(t_end, clip.duration - 0.01)
+        trimmed = clip.subclipped(t_start, t_end)
+        parts.append(trimmed)
+        if not is_last:
+            parts.append(_make_crossfade(trimmed, clips[i + 1], T, fps))
+    return concatenate_videoclips(parts, method="compose")
+
+
+def assemble_modeN_video(
+    video_paths: list[Path | str],
+    output_path: Path,
+    title: str | None = None,
+    crossfade_duration: float = 0.2,
+    speed_multiplier: float = 1.5,
+    use_speed_ramping: bool = True,
+    final_hold_duration: float = 1.5,
+) -> Path:
+    """
+    Сборка финального видео.
+    
+    Args:
+        video_paths: Список путей к видео
+        output_path: Путь для сохранения
+        title: Заголовок (для логов)
+        crossfade_duration: Длительность перехода (0.2s для viral стиля)
+        speed_multiplier: Множитель скорости (1.5x для динамики)
+        use_speed_ramping: Кинематографичное изменение скорости
+        final_hold_duration: Удержание последнего кадра
+    """
+    target_w, target_h = settings.video_resolution
+    fps = settings.video_fps
+    T = max(0.0, min(crossfade_duration, 0.5))
+    bottom_crop = max(0, min(0.2, getattr(settings, "video_bottom_crop", 0.05)))
+
+    # Сохраняем оригинальные VideoFileClips для доступа к аудио
+    original_vcs: list[VideoFileClip] = []
+    clips: list = []
+    original_audios: list = []
+
+    for p in video_paths:
+        path = Path(p)
+        if not path.exists():
+            logger.warning(f"[ModeN Assembler] Skip missing: {path}")
+            continue
+        vc = VideoFileClip(str(path))
+        original_vcs.append(vc)
+
+        # Сохраняем оригинальное аудио
+        if vc.audio is not None:
+            dur = max(0.0, vc.duration - 0.05)
+            original_audios.append(vc.audio.subclipped(0, min(vc.audio.duration, dur)))
+        else:
+            original_audios.append(None)
+
+        # Визуальный клип (с обрезкой/ресайзом)
+        clip = _clip_with_bottom_crop(vc, target_w, target_h, fps, bottom_crop)
+        clips.append(clip)
+
+    if not clips:
+        raise ValueError("[ModeN Assembler] No valid clips")
+
+    logger.info(f"[ModeN Assembler] Assembling {len(clips)} clips (T={T}s)")
+
+    # Сборка видео (только визуал)
+    final = _assemble_with_crossfades(clips, T, fps)
+
+    # Применение множителя скорости
+    if speed_multiplier != 1.0:
+        from moviepy import vfx
+        final = final.with_effects([vfx.MultiplySpeed(speed_multiplier)])
+
+    # ===== SPEED RAMPING =====
+    if use_speed_ramping:
+        try:
+            from moviepy import vfx
+            total_dur = final.duration
+            phase1_end = total_dur * 0.1  # Медленный старт
+            phase2_end = total_dur * 0.8  # Быстрая середина
+
+            def speed_ramp(t):
+                if t < phase1_end:
+                    return 1.0  # Медленно
+                elif t < phase2_end:
+                    return 1.8  # Быстро
+                else:
+                    return 0.8  # Медленный финал
+
+            final = final.with_effects([vfx.TimeMirror(speed_ramp)])
+        except Exception as e:
+            logger.warning(f"[ModeN Assembler] Speed ramping failed: {e}")
+
+    # ===== FINAL HOLD =====
+    if final_hold_duration > 0:
+        try:
+            from moviepy import ImageClip
+            last_frame_time = max(0, final.duration - 0.05)
+            last_frame = final.get_frame(last_frame_time)
+            freeze_frame = ImageClip(last_frame).set_duration(final_hold_duration).with_fps(fps)
+            freeze_frame = freeze_frame.resized((target_w, target_h))
+            final = concatenate_videoclips([final, freeze_frame], method="compose")
+        except Exception as e:
+            logger.warning(f"[ModeN Assembler] Final hold failed: {e}")
+
+    # Сборка аудио
+    valid_audios = [a for a in original_audios if a is not None]
+    combined_video_audio = None
+    if valid_audios:
+        try:
+            combined_video_audio = concatenate_audioclips(valid_audios)
+            if speed_multiplier != 1.0:
+                from moviepy import afx as audio_fx
+                combined_video_audio = combined_video_audio.with_effects([
+                    audio_fx.MultiplySpeed(speed_multiplier)
+                ])
+            max_dur = min(final.duration, combined_video_audio.duration) - 0.05
+            combined_video_audio = combined_video_audio.subclipped(0, max(0.1, max_dur))
+        except Exception as e:
+            logger.warning(f"[ModeN Assembler] Audio combine failed: {e}")
+
+    # Фоновая музыка на 10%
+    bg_audio = None
+    try:
+        from agents.video_editor.moviepy_editor import _pick_background_music
+        music_path = _pick_background_music(topic="ambient", duration=final.duration)
+        if music_path:
+            bg = AudioFileClip(str(music_path))
+            if bg.duration < final.duration:
+                loops = int(final.duration / bg.duration) + 1
+                bg = concatenate_audioclips([bg] * loops)
+            fade_dur = min(2.0, final.duration * 0.1)
+            bg = bg.subclipped(0, min(final.duration, bg.duration) - 0.05)
+            bg = bg.with_effects([
+                afx.MultiplyVolume(0.1),
+                afx.AudioFadeIn(fade_dur),
+                afx.AudioFadeOut(fade_dur),
+            ])
+            bg_audio = bg
+    except Exception as e:
+        logger.warning(f"[ModeN Assembler] Background music failed: {e}")
+
+    # Микширование
+    if combined_video_audio and bg_audio:
+        final_audio = CompositeAudioClip([combined_video_audio, bg_audio])
+        final = final.with_audio(final_audio)
+    elif combined_video_audio:
+        final = final.with_audio(combined_video_audio)
+    elif bg_audio:
+        final = final.with_audio(bg_audio)
+
+    # Рендеринг
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    final.write_videofile(
+        str(output_path),
+        fps=fps,
+        codec="libx264",
+        audio_codec="aac",
+        threads=4,
+        preset="fast",
+        logger=None,
+    )
+
+    # Cleanup
+    final.close()
+    for c in clips:
+        try:
+            c.close()
+        except Exception:
+            pass
+    for vc in original_vcs:
+        try:
+            vc.close()
+        except Exception:
+            pass
+
+    logger.success(f"[ModeN Assembler] Done -> {output_path}")
+    return output_path
+```
+
+---
+
+## Шаг 5: Publishing Metadata (опционально)
+
+### `modes/modeN/publishing_metadata.py`
+
+```python
+"""
+Mode N Publishing Metadata Generator.
+
+Генерирует Title, Description, Hashtags, Tags для YouTube Shorts.
+"""
+
+from __future__ import annotations
+
+import json
+import random
+import re
+from typing import Any
+
+from langchain_core.messages import HumanMessage, SystemMessage
+from loguru import logger
+from utils.llm import make_llm
+
+
+PUBLISHING_PROMPT = """Generate YouTube Shorts publishing content.
+
+CONTEXT:
+- Style: {style}
+- Location: {location}
+- Stages: {stages_description}
+- Title: {title}
+
+OUTPUT STRUCTURE:
+
+1. TITLE
+- Short, attention-grabbing
+- First 2 words must be strong keywords
+- Max 1 emoji at the end
+- Max 2-3 hashtags at the end
+
+2. DESCRIPTION
+- First line: 1 short sentence
+- Then naturally include 4-5 keywords
+- Must read naturally
+
+3. HASHTAGS (separate block)
+- 4-5 relevant hashtags
+- Focus on niche
+
+4. TAGS (for YouTube Studio)
+- 10-15 tags
+- Mix: specific, general, viral
+
+OUTPUT FORMAT (JSON):
+{{
+  "title": "...",
+  "description": "...",
+  "hashtags": ["#tag1", ...],
+  "tags": ["tag1", ...]
+}}
+
+Language: {language}
+"""
+
+
+FALLBACK_TEMPLATES = {
+    "en": {
+        "titles": ["Title 1", "Title 2"],
+        "descriptions": ["Desc 1", "Desc 2"],
+        "hashtags": ["#tag1", "#tag2"],
+        "tags": ["tag1", "tag2"],
+    },
+}
+
+
+async def generate_publishing_metadata(
+    style: str,
+    location: str,
+    stages: list[dict],
+    title: str,
+    language: str = "en",
+) -> dict[str, Any]:
+    """Генерация метаданных для публикации."""
+    stages_desc = " → ".join([s.get("name_en", f"Stage {i+1}") for i, s in enumerate(stages[:6])])
+    
+    prompt = PUBLISHING_PROMPT.format(
+        style=style.replace("_", " ").title(),
+        location=location.replace("_", " ").title(),
+        stages_description=stages_desc or "Stages",
+        title=title or "Video",
+        language=language,
+    )
+    
+    try:
+        llm = make_llm(temperature=0.8)
+        messages = [
+            SystemMessage(content="You are a YouTube Shorts SEO expert."),
+            HumanMessage(content=prompt),
+        ]
+        response = await llm.ainvoke(messages)
+        raw = response.content.strip() if hasattr(response, 'content') else str(response)
+        
+        if raw.startswith("```"):
+            lines = raw.splitlines()
+            raw = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+        
+        json_match = re.search(r"\{[\s\S]*\}", raw)
+        if json_match:
+            result = json.loads(json_match.group())
+            logger.success(f"[ModeN Publishing] Generated: {result.get('title', 'N/A')}")
+            return result
+    except Exception as e:
+        logger.warning(f"[ModeN Publishing] LLM failed: {e}")
+    
+    # Fallback
+    templates = FALLBACK_TEMPLATES.get(language, FALLBACK_TEMPLATES["en"])
+    return {
+        "title": random.choice(templates["titles"]),
+        "description": random.choice(templates["descriptions"]),
+        "hashtags": templates["hashtags"],
+        "tags": templates["tags"],
+    }
+```
+
+---
+
+## Шаг 6: Главный Pipeline
 
 ### `modes/modeN/pipeline.py`
 
@@ -309,14 +1043,16 @@ async def _generate_single_video(
 """
 Mode N Pipeline — Главный пайплайн режима.
 
-Шаги:
-1. Генерация сценария (scenario_writer)
-2. Параллельная генерация фото + видео (video_generator)
-3. Сборка финального видео (video_assembler)
+Flow:
+  1. Scenario Writer — Генерация структурированного сценария
+  2. Video Generator — Последовательные изображения + keyframe видео
+  3. Video Assembler — Сборка финального видео
+  4. Publishing Metadata — Метаданные для публикации
 """
 
 from __future__ import annotations
 
+import functools
 import time
 from pathlib import Path
 from typing import Any
@@ -324,281 +1060,141 @@ from typing import Any
 from loguru import logger
 
 from config import settings
-from modes.modeN.scenario_writer import generate_scenario
+from modes.modeN.scenario_writer import run_modeN_scenario_writer
 from modes.modeN.video_generator import generate_videos
-from modes.modeN.video_assembler import assemble_final_video
+from modes.modeN.video_assembler import assemble_modeN_video
+from modes.modeN.publishing_metadata import generate_publishing_metadata
 
 
 async def run_modeN_pipeline(
-    topic: str,
     session_id: str | None = None,
+    local_only: bool = True,
+    style: str | None = None,
+    location: str | None = None,
+    num_stages: int = 5,
     language: str = "ru",
     control: dict | None = None,
 ) -> dict[str, Any]:
     """
-    Запуск пайплайна режима N.
+    Запуск пайплайна Mode N.
     
     Args:
-        topic: Тема/идея для видео
         session_id: Уникальный ID сессии
-        language: Язык ("ru", "en", etc.)
+        local_only: Если True, пропустить публикацию
+        style: Стиль (или None для случайного)
+        location: Локация (или None для случайной)
+        num_stages: Количество этапов (5-8)
+        language: Язык ("ru" или "en")
         control: Контроль паузы/отмены
     
     Returns:
-        dict с video_path, session_id, topic
+        dict с video_path, session_id, publishing metadata и т.д.
     """
+    import asyncio
     from pipeline_control import checkpoint
-    
+
     session_id = session_id or str(int(time.time() * 1000))
-    output_dir = settings.output_dir / session_id
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    logger.info(f"=== Mode N Pipeline | topic={topic!r} | session={session_id} ===")
-    
+    videos_dir = settings.videos_dir
+    clips_dir = videos_dir / session_id / "clips"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info(
+        f"=== Mode N Pipeline | session={session_id} | "
+        f"style={style or 'random'} | location={location or 'random'} ==="
+    )
+
+    # Step 1: Генерация сценария
     await checkpoint(control)
+    logger.info("Step 1/4 - Generating Scenario...")
     
-    # Шаг 1: Генерация сценария
-    logger.info("Step 1/3 - Generating scenario...")
-    scenario = await generate_scenario(topic, language=language)
+    scenario = await run_modeN_scenario_writer(
+        preferred_style=style,
+        preferred_location=location,
+        num_stages=num_stages,
+        language=language,
+        control=control,
+    )
     
+    title = scenario.get("title", "Video")
+    style_name = scenario.get("style_name", "default")
+    location_name = scenario.get("location_name", "default")
+    stages = scenario.get("scenes", [])
+    
+    logger.success(f"[ModeN] Scenario: {title} | {len(stages)} stages")
+
+    # Step 2: Генерация видео
     await checkpoint(control)
+    logger.info("Step 2/4 - Video Generator (Sequential + Keyframes)")
     
-    # Шаг 2: Параллельная генерация фото + видео
-    logger.info("Step 2/3 - Generating photos and videos in parallel...")
     video_paths, enriched_scenario = await generate_videos(
         scenario=scenario,
-        output_dir=output_dir,
+        output_dir=clips_dir,
         session_id=session_id,
         language=language,
     )
     
+    valid_paths = [p for p in video_paths if p and Path(p).exists()]
+    if not valid_paths:
+        raise RuntimeError("[ModeN] No video clips generated")
+    
+    expected_videos = len(stages) - 1 if len(stages) > 1 else 1
+    logger.success(f"[ModeN] Generated {len(valid_paths)}/{expected_videos} clips")
+
+    # Step 3: Сборка финального видео
     await checkpoint(control)
+    logger.info("Step 3/4 - Video Assembly")
     
-    # Шаг 3: Сборка финального видео
-    logger.info("Step 3/3 - Assembling final video...")
-    final_video = await assemble_final_video(
-        video_paths=video_paths,
-        output_dir=output_dir,
-        scenario=enriched_scenario,
+    output_path = videos_dir / f"video_{session_id}.mp4"
+    
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(
+        None,
+        functools.partial(
+            assemble_modeN_video,
+            valid_paths,
+            output_path,
+            title=title,
+        ),
     )
-    
-    logger.success(f"=== Mode N Pipeline DONE | video={final_video} ===")
-    
+
+    # Запись в историю
+    from agents.topics_history import mark_topic_used
+    mark_topic_used(
+        topic=f"[ModeN] {title}",
+        session_id=session_id,
+        video_path=str(output_path),
+        video_angle=f"style={style_name},location={location_name}",
+    )
+
+    video_path = str(output_path.resolve())
+
+    # Step 4: Генерация метаданных
+    logger.info("Step 4/4 - Generating Publishing Metadata...")
+    publishing = await generate_publishing_metadata(
+        style=style_name,
+        location=location_name,
+        stages=stages,
+        title=title,
+        language=language,
+    )
+
+    logger.success(f"=== Mode N Pipeline DONE | video={video_path} ===")
+
     return {
         "session_id": session_id,
-        "video_path": str(final_video) if final_video else None,
-        "topic": topic,
+        "video_path": video_path,
+        "topic": title,
+        "scenario": enriched_scenario,
+        "style": style_name,
+        "location": location_name,
+        "stages": len(stages),
+        "publishing": publishing,
     }
 ```
 
 ---
 
-## Шаг 4: Интеграция с FastGen Scraper
-
-### Необходимые функции из `agents/content_generator/fastgen_scraper.py`
-
-```python
-# Импорты для video_generator.py
-from agents.content_generator.fastgen_scraper import (
-    generate_images_with_references_fastgen,  # Параллельная генерация фото с refs
-    generate_single_video_multi_ref,          # Генерация видео с refs
-)
-```
-
-### Ключевые функции в fastgen_scraper.py:
-
-| Функция | Описание |
-|---------|----------|
-| `generate_images_with_references_fastgen(prompts_with_refs, output_dir, parallel=True)` | Параллельная генерация изображений с multiple references |
-| `generate_single_video_multi_ref(index, prompt, output_dir, reference_image_paths)` | Генерация видео с multiple references |
-| `_upload_multiple_reference_images(page, image_paths)` | Загрузка до 3 референсных изображений в FastGen UI |
-| `_run_fastgen_images_with_refs_parallel_sync()` | ThreadPoolExecutor для параллельной генерации |
-
-### Логика загрузки референсов:
-
-```python
-async def _upload_multiple_reference_images(page: Page, image_paths: list[Path]) -> int:
-    """
-    Загрузка нескольких изображений в FastGen.
-    
-    UI селекторы:
-    - Первый слот: уже открыт
-    - Добавление слота: div.aspect-square.flex.flex-col.items-center.justify-center.rounded-lg.border-2.border-dashed.cursor-pointer
-    
-    Лимит: 3 референса max
-    """
-    MAX_REFS = 3
-    images_to_upload = image_paths[:MAX_REFS]
-    
-    for i, img_path in enumerate(images_to_upload):
-        if i > 0:  # Для второго и третьего — кликаем кнопку добавления
-            add_btn = page.locator('div.aspect-square.flex.flex-col.items-center.justify-center.rounded-lg.border-2.border-dashed.cursor-pointer').first
-            await add_btn.click()
-            await asyncio.sleep(0.5)
-        
-        # Загружаем изображение
-        await _upload_reference_image(page, img_path)
-    
-    return len(images_to_upload)
-```
-
----
-
-## Шаг 5: Интеграция в UI (Frontend)
-
-### 5.1. Добавление режима в конфигурацию
-
-#### `frontend/src/context/ModeContext.jsx`
-
-```jsx
-export const MODES = {
-  MODE1: { id: 'mode1', name: 'Short Facts', icon: 'facts' },
-  MODE2: { id: 'mode2', name: 'Long Facts', icon: 'book' },
-  // ... другие режимы
-  MODEN: { id: 'modeN', name: 'Mode N Name', icon: 'new_icon' },  // ← Добавить
-};
-
-export const ModeProvider = ({ children }) => {
-  const [currentMode, setCurrentMode] = useState(MODES.MODE1);
-  // ...
-};
-```
-
-### 5.2. Компонент выбора режима
-
-#### `frontend/src/components/ModeSelector.jsx`
-
-```jsx
-import { MODES } from '../context/ModeContext';
-
-const ModeSelector = ({ currentMode, onModeChange }) => {
-  return (
-    <div className="flex flex-wrap gap-2 p-4 bg-gray-800 rounded-lg">
-      {Object.values(MODES).map((mode) => (
-        <button
-          key={mode.id}
-          onClick={() => onModeChange(mode)}
-          className={`px-4 py-2 rounded-lg transition-all ${
-            currentMode.id === mode.id
-              ? 'bg-blue-600 text-white'
-              : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-          }`}
-        >
-          <span className="mr-2">{getIcon(mode.icon)}</span>
-          {mode.name}
-        </button>
-      ))}
-    </div>
-  );
-};
-```
-
-### 5.3. Страница генерации
-
-#### `frontend/src/pages/Generate.jsx`
-
-```jsx
-import { useMode } from '../context/ModeContext';
-import ModeSelector from '../components/ModeSelector';
-
-const Generate = () => {
-  const { currentMode, setCurrentMode } = useMode();
-  const [topic, setTopic] = useState('');
-  const [language, setLanguage] = useState('ru');
-  const [isGenerating, setIsGenerating] = useState(false);
-  
-  const handleGenerate = async () => {
-    setIsGenerating(true);
-    try {
-      const response = await fetch('/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          mode: currentMode.id,  // ← Режим передаётся на бэкенд
-          topic,
-          language,
-        }),
-      });
-      const data = await response.json();
-      // Обработка результата
-    } finally {
-      setIsGenerating(false);
-    }
-  };
-  
-  return (
-    <div className="p-6">
-      <ModeSelector 
-        currentMode={currentMode} 
-        onModeChange={setCurrentMode} 
-      />
-      
-      <div className="mt-6 space-y-4">
-        <textarea
-          value={topic}
-          onChange={(e) => setTopic(e.target.value)}
-          placeholder="Введите тему для видео..."
-          className="w-full p-4 bg-gray-800 rounded-lg text-white"
-          rows={4}
-        />
-        
-        <select
-          value={language}
-          onChange={(e) => setLanguage(e.target.value)}
-          className="p-2 bg-gray-800 rounded-lg text-white"
-        >
-          <option value="ru">Русский</option>
-          <option value="en">English</option>
-        </select>
-        
-        <button
-          onClick={handleGenerate}
-          disabled={isGenerating || !topic}
-          className="px-6 py-3 bg-blue-600 rounded-lg text-white"
-        >
-          {isGenerating ? 'Генерация...' : 'Сгенерировать'}
-        </button>
-      </div>
-    </div>
-  );
-};
-```
-
----
-
-## Шаг 6: Интеграция в Backend
-
-### `server.py` — добавление роута для нового режима
-
-```python
-from modes.modeN import run_modeN_pipeline
-
-@app.post("/api/generate")
-async def api_generate(request: Request):
-    """API endpoint для генерации видео."""
-    data = await request.json()
-    mode = data.get("mode", "mode1")
-    topic = data.get("topic", "")
-    language = data.get("language", "ru")
-    
-    # Маршрутизация по режимам
-    if mode == "modeN":
-        result = await run_modeN_pipeline(
-            topic=topic,
-            language=language,
-        )
-    elif mode == "mode1":
-        result = await run_mode1_pipeline(...)
-    # ... другие режимы
-    else:
-        raise HTTPException(400, f"Unknown mode: {mode}")
-    
-    return result
-```
-
----
-
-## Шаг 7: Dispatcher для WebSocket прогресса
+## Шаг 7: Интеграция в систему
 
 ### `orchestrator/dispatcher.py`
 
@@ -607,168 +1203,168 @@ from modes.modeN import run_modeN_pipeline
 
 MODE_REGISTRY = {
     "mode1": run_mode1_pipeline,
-    "mode2": run_mode2_pipeline,
-    # ...
+    # ... другие режимы
     "modeN": run_modeN_pipeline,  # ← Добавить
 }
-
-async def dispatch_generation(
-    mode: str,
-    topic: str,
-    language: str,
-    ws_callback: Callable,
-):
-    """Запуск генерации с WebSocket уведомлениями."""
-    pipeline = MODE_REGISTRY.get(mode)
-    if not pipeline:
-        raise ValueError(f"Unknown mode: {mode}")
-    
-    # Уведомление о начале
-    await ws_callback({"status": "started", "mode": mode})
-    
-    try:
-        result = await pipeline(
-            topic=topic,
-            language=language,
-            control={"ws_callback": ws_callback},
-        )
-        await ws_callback({"status": "completed", "result": result})
-    except Exception as e:
-        await ws_callback({"status": "error", "message": str(e)})
-        raise
 ```
 
----
-
-## Конфигурация
-
-### `.env` — переменные окружения
-
-```env
-# FastGen API
-FASTGEN_API_KEY=your_api_key_here
-FASTGEN_HEADLESS=true
-FASTGEN_MODEL=Imagen 3
-FASTGEN_IMAGE_TIMEOUT=180
-FASTGEN_IMAGE_PARALLEL_WORKERS=5  # Количество параллельных браузеров для фото
-FASTGEN_VIDEO_PARALLEL_WORKERS=3  # Количество параллельных браузеров для видео
-```
-
-### `config.py` — настройки
+### `server.py`
 
 ```python
-class Settings(BaseSettings):
-    # ... existing settings ...
+from modes.modeN import run_modeN_pipeline
+
+@app.post("/api/generate")
+async def api_generate(request: Request):
+    data = await request.json()
+    mode = data.get("mode", "mode1")
     
-    fastgen_api_key: str = ""
-    fastgen_headless: bool = True
-    fastgen_model: str = ""
-    fastgen_image_timeout: int = 180
-    fastgen_image_parallel_workers: int = 5
-    fastgen_video_parallel_workers: int = 3
+    if mode == "modeN":
+        result = await run_modeN_pipeline(
+            style=data.get("style"),
+            location=data.get("location"),
+            num_stages=data.get("num_stages", 5),
+            language=data.get("language", "ru"),
+        )
+    # ... другие режимы
 ```
 
 ---
 
-## Чек-лист для проверки
+## Ключевые паттерны из Mode 8
 
-### Backend:
+### 1. Последовательная генерация изображений
+
+```python
+# Цепочка референсов: каждое следующее изображение 
+# использует предыдущее как референс
+ref_image_paths: list[Path | None] = []
+previous_image: Path | None = None
+
+for i, scene in enumerate(scenes):
+    refs = [previous_image] if previous_image else []
+    image_path = await _generate_single_image_with_ref(..., refs)
+    if image_path:
+        ref_image_paths.append(image_path)
+        previous_image = image_path  # Цепочка!
+```
+
+### 2. Retry-логика
+
+```python
+image_retries = 2
+
+for retry in range(image_retries + 1):
+    image_path = await _generate_single_image_with_ref(...)
+    if image_path and Path(image_path).exists():
+        break
+    if retry < image_retries:
+        logger.warning(f"Retry {retry + 2}/{image_retries + 1}...")
+```
+
+### 3. Keyframe видео
+
+```python
+# N изображений → N-1 видео (переходы между этапами)
+num_videos = len(scenes) - 1
+
+for i in range(num_videos):
+    start_frame = ref_image_paths[i]
+    end_frame = ref_image_paths[i + 1]
+    
+    video = await generate_video_from_keyframes(
+        prompt=prompt,
+        start_frame_path=start_frame,
+        end_frame_path=end_frame,
+    )
+```
+
+### 4. Детальные параметры сцены
+
+```python
+class SceneStage(BaseModel):
+    build_intensity: str = "medium"   # low | medium | high
+    time_of_day: str = "midday"       # morning | midday | afternoon | golden_hour
+    is_peak_moment: bool = False      # Пиковый момент
+    workers: str | None = None        # Описание работников
+    machinery: str | None = None      # Описание техники
+    micro_actions: list[str] = []     # Микро-действия
+```
+
+### 5. Короткий промпт для FastGen
+
+```python
+def _build_keyframe_video_prompt(...) -> str:
+    """~700 символов для оптимальной работы FastGen."""
+    prompt = f"""Wide shot (WS), timelapse: {stage_name}.
+    
+SUBJECT: {action}. Workers: {workers_short}. Equipment: {machinery_short}.
+
+CAMERA: Locked-off tripod, static frame.
+TEMPORAL: Time-lapse, forward motion ONLY.
+
+TRANSITION: "{start_state}" → "{end_state}".
+
+TECHNICAL: Vertical 9:16, cinematic, photorealistic 4K."""
+    return prompt
+```
+
+---
+
+## Чек-лист создания режима
+
 - [ ] `modes/modeN/__init__.py` создан
-- [ ] `modes/modeN/pipeline.py` реализован
-- [ ] `modes/modeN/scenario_writer.py` реализован
-- [ ] `modes/modeN/video_generator.py` с параллельной генерацией
-- [ ] `modes/modeN/video_assembler.py` реализован
-- [ ] `server.py` обновлён с роутом для режима
+- [ ] `modes/modeN/scenario_writer.py` с Pydantic моделями
+- [ ] `modes/modeN/video_generator.py` с последовательной генерацией
+- [ ] `modes/modeN/video_assembler.py` с crossfade и speed ramping
+- [ ] `modes/modeN/publishing_metadata.py` (опционально)
+- [ ] `modes/modeN/pipeline.py` главный пайплайн
 - [ ] `orchestrator/dispatcher.py` обновлён
-
-### Frontend:
-- [ ] `ModeContext.jsx` обновлён с новым режимом
-- [ ] `ModeSelector.jsx` отображает новый режим
-- [ ] `Generate.jsx` передаёт правильный mode_id
-
-### Конфигурация:
-- [ ] `.env` содержит FASTGEN_API_KEY
-- [ ] `config.py` имеет все необходимые настройки
-
-### Тестирование:
-- [ ] Генерация одного изображения с refs работает
-- [ ] Параллельная генерация 3+ изображений работает
-- [ ] Генерация видео с refs работает
-- [ ] WebSocket уведомления приходят
-- [ ] UI корректно отображает прогресс
+- [ ] `server.py` обновлён с роутом
+- [ ] `.env` содержит `FASTGEN_API_KEY`
 
 ---
 
-## Архитектура параллельной генерации
+## Архитектура Mode 8
 
 ```
-                    ┌─────────────────────────────────┐
-                    │     video_generator.py          │
-                    │  generate_videos()              │
-                    └────────────┬────────────────────┘
-                                 │
-         ┌───────────────────────┼───────────────────────┐
-         │                       │                       │
-         ▼                       ▼                       ▼
-┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐
-│ Browser 1       │   │ Browser 2       │   │ Browser N       │
-│ Scene 1 photo   │   │ Scene 2 photo   │   │ Scene N photo   │
-│ + char refs     │   │ + char refs     │   │ + char refs     │
-└─────────────────┘   └─────────────────┘   └─────────────────┘
-         │                       │                       │
-         └───────────────────────┼───────────────────────┘
-                                 │
-                                 ▼
-                    ┌─────────────────────────────────┐
-                    │   Все фото готовы               │
-                    │   reference_images/             │
-                    └────────────┬────────────────────┘
-                                 │
-         ┌───────────────────────┼───────────────────────┐
-         │                       │                       │
-         ▼                       ▼                       ▼
-┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐
-│ Browser 1       │   │ Browser 2       │   │ Browser N       │
-│ Scene 1 video   │   │ Scene 2 video   │   │ Scene N video   │
-│ + refs          │   │ + refs          │   │ + refs          │
-└─────────────────┘   └─────────────────┘   └─────────────────┘
-         │                       │                       │
-         └───────────────────────┼───────────────────────┘
-                                 │
-                                 ▼
-                    ┌─────────────────────────────────┐
-                    │   video_assembler.py            │
-                    │   Финальная сборка              │
-                    └─────────────────────────────────┘
-```
-
----
-
-## Пример полного workflow
-
-```
-1. Пользователь выбирает режим в UI
-   ↓
-2. UI отправляет POST /api/generate {mode: "modeN", topic: "...", language: "ru"}
-   ↓
-3. Dispatcher запускает run_modeN_pipeline()
-   ↓
-4. scenario_writer генерирует сценарий с 6 сценами
-   ↓
-5. video_generator:
-   5.1. Собирает (prompt, [char1.png, char2.png]) для каждой сцены
-   5.2. Запускает 5 параллельных браузеров
-   5.3. Каждый браузер: загружает фото персонажей → генерирует фото
-   5.4. Сохраняет 6 изображений в reference_images/
-   ↓
-6. video_generator (продолжение):
-   6.1. Для каждого видео: комбинирует char refs + generated ref
-   6.2. Запускает 3 параллельных браузера для видео
-   6.3. Каждый браузер: загружает до 3 refs → генерирует видео
-   ↓
-7. video_assembler склеивает все видео в одно
-   ↓
-8. WebSocket отправляет уведомление о завершении
-   ↓
-9. UI показывает готовое видео
+┌─────────────────────────────────────────────────────────────────┐
+│                    pipeline.py                                  │
+│  1. Scenario Writer → 2. Video Generator → 3. Assembler         │
+└────────────────────┬────────────────────────────────────────────┘
+                     │
+         ┌───────────┴───────────┐
+         ▼                       ▼
+┌─────────────────┐   ┌─────────────────────────────┐
+│ scenario_writer │   │     video_generator.py      │
+│  Pydantic models│   │                             │
+│  Stage configs  │   │  STEP 1: Images (sequential)│
+│  Visual prompts │   │  ┌─────┐    ┌─────┐        │
+└─────────────────┘   │  │Img 0│───→│Img 1│───→...  │
+                      │  └─────┘    └─────┘        │
+                      │     ↑            ↑          │
+                      │   no ref      ref=Img 0     │
+                      │                             │
+                      │  STEP 2: Videos (parallel)  │
+                      │  ┌─────┐    ┌─────┐        │
+                      │  │Vid 0│    │Vid 1│  ...    │
+                      │  └──┬──┘    └──┬──┘        │
+                      │  start=Img0    start=Img1   │
+                      │  end=Img1      end=Img2     │
+                      └──────────────┬──────────────┘
+                                     │
+                                     ▼
+                      ┌─────────────────────────────┐
+                      │    video_assembler.py       │
+                      │  - Crossfade transitions    │
+                      │  - Speed ramping            │
+                      │  - Final hold frame         │
+                      │  - Audio mixing             │
+                      └──────────────┬──────────────┘
+                                     │
+                                     ▼
+                      ┌─────────────────────────────┐
+                      │   publishing_metadata.py    │
+                      │  - Title, Description       │
+                      │  - Hashtags, Tags           │
+                      └─────────────────────────────┘
 ```

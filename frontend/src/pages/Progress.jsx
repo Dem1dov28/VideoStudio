@@ -1,7 +1,19 @@
 import { useEffect, useState, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { RiArrowLeftLine, RiDownloadLine, RiVideoLine, RiCheckboxCircleLine, RiPauseLine, RiPlayLine, RiStopLine, RiRestartLine, RiFileTextLine } from 'react-icons/ri';
+import {
+  RiArrowLeftLine,
+  RiDownloadLine,
+  RiVideoLine,
+  RiCheckboxCircleLine,
+  RiPauseLine,
+  RiPlayLine,
+  RiStopLine,
+  RiRestartLine,
+  RiFileTextLine,
+  RiFileCopyLine,
+  RiCheckLine,
+} from 'react-icons/ri';
 import { subscribeToStream, api } from '../services/api';
 import LogConsole from '../components/LogConsole';
 import StepIndicator from '../components/StepIndicator';
@@ -32,6 +44,7 @@ export default function Progress() {
   const [busy, setBusy]   = useState(false);
   const [sessionTopic, setSessionTopic] = useState('');
   const [sessionMode, setSessionMode] = useState(1);
+  const [copied, setCopied] = useState('');
 
   useEffect(() => {
     setLogs([]);
@@ -41,6 +54,7 @@ export default function Progress() {
     setBusy(false);
     setSessionTopic('');
     setSessionMode(1);
+    setCopied('');
 
     let cancelled = false;
 
@@ -94,12 +108,26 @@ export default function Progress() {
   // Video URL(s) from result — один файл или несколько (Mode 4 bilingual)
   const videoUrls = useMemo(() => {
     if (!done) return [];
+    
+    // Debug logging for troubleshooting
+    console.log('[Progress] done result:', {
+      video_path: done.video_path,
+      video_paths: done.video_paths,
+      session_id: done.session_id,
+      publishing: done.publishing,
+    });
+    
     const base = done.session_id || sid;
     const paths = done.video_paths && done.video_paths.length > 0
       ? done.video_paths
       : done.video_path
         ? [done.video_path]
         : [];
+    
+    if (paths.length === 0) {
+      console.warn('[Progress] No video paths found in result:', done);
+    }
+    
     const prefix = import.meta.env.VITE_API_URL || '';
     return paths.map(p => {
       const fname = (p || "").split(/[/\\]/).pop();
@@ -109,6 +137,17 @@ export default function Progress() {
       };
     });
   }, [done, sid]);
+
+  // Copy to clipboard helper
+  const copyToClipboard = async (text, field) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(field);
+      setTimeout(() => setCopied(''), 2000);
+    } catch (err) {
+      console.error('Failed to copy:', err);
+    }
+  };
 
   return (
     <div className="max-w-2xl mx-auto px-6 py-10">
@@ -346,6 +385,83 @@ export default function Progress() {
               >
                 + Создать ещё
               </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Publishing Metadata */}
+      <AnimatePresence>
+        {done?.publishing && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95, y: 10 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            className="card overflow-hidden mb-4"
+          >
+            <div className="p-4 border-b border-[#27272f] flex items-center gap-2">
+              <span className="text-lg">📝</span>
+              <span className="text-sm font-semibold text-white">Данные для публикации</span>
+            </div>
+            <div className="p-4 space-y-4">
+              {/* Title */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-medium text-[#71717a] uppercase tracking-wider">Название</span>
+                  <button
+                    onClick={() => copyToClipboard(done.publishing.title, 'title')}
+                    className="text-[#71717a] hover:text-white transition-colors"
+                  >
+                    {copied === 'title' ? <RiCheckLine className="text-emerald-400" /> : <RiFileCopyLine />}
+                  </button>
+                </div>
+                <p className="text-white text-sm font-medium">{done.publishing.title}</p>
+              </div>
+
+              {/* Description */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-medium text-[#71717a] uppercase tracking-wider">Описание</span>
+                  <button
+                    onClick={() => copyToClipboard(done.publishing.description, 'description')}
+                    className="text-[#71717a] hover:text-white transition-colors"
+                  >
+                    {copied === 'description' ? <RiCheckLine className="text-emerald-400" /> : <RiFileCopyLine />}
+                  </button>
+                </div>
+                <p className="text-[#a1a1aa] text-sm">{done.publishing.description}</p>
+              </div>
+
+              {/* Hashtags */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-medium text-[#71717a] uppercase tracking-wider">Хештеги</span>
+                  <button
+                    onClick={() => copyToClipboard(done.publishing.hashtags?.join(' '), 'hashtags')}
+                    className="text-[#71717a] hover:text-white transition-colors"
+                  >
+                    {copied === 'hashtags' ? <RiCheckLine className="text-emerald-400" /> : <RiFileCopyLine />}
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {done.publishing.hashtags?.map((tag, i) => (
+                    <span key={i} className="px-2 py-1 bg-[#27272f] rounded text-xs text-[#a1a1aa]">{tag}</span>
+                  ))}
+                </div>
+              </div>
+
+              {/* Tags */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-medium text-[#71717a] uppercase tracking-wider">Теги (YouTube Studio)</span>
+                  <button
+                    onClick={() => copyToClipboard(done.publishing.tags?.join(', '), 'tags')}
+                    className="text-[#71717a] hover:text-white transition-colors"
+                  >
+                    {copied === 'tags' ? <RiCheckLine className="text-emerald-400" /> : <RiFileCopyLine />}
+                  </button>
+                </div>
+                <p className="text-[#71717a] text-xs font-mono">{done.publishing.tags?.join(', ')}</p>
+              </div>
             </div>
           </motion.div>
         )}

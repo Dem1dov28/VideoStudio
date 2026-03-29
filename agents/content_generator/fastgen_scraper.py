@@ -110,12 +110,23 @@ async def _download_blob(page: Page, blob_url: str) -> bytes:
 async def _react_fill(page: Page, selector: str, text: str) -> None:
     """
     Fill a React-controlled input properly:
-    1. Click to focus
+    1. Click to focus (with force=True to bypass overlays)
     2. Select all & delete existing text
     3. Use nativeInputValueSetter to set value
     4. Dispatch 'input' and 'change' events so React state updates
     """
-    await page.click(selector)
+    # Try force click first (bypasses overlay interception like <html> intercepts pointer events)
+    try:
+        await page.click(selector, force=True)
+    except Exception:
+        # Fallback: JS-based focus and click
+        try:
+            await page.evaluate("""(sel) => {
+                const el = document.querySelector(sel);
+                if (el) { el.focus(); el.click(); }
+            }""", selector)
+        except Exception:
+            pass
     await asyncio.sleep(0.1)
     # Use JS to set value and fire React events
     await page.evaluate("""([sel, val]) => {
@@ -187,6 +198,40 @@ async def _check_video_page_errors(page: Page) -> str | None:
     return None
 
 
+async def _count_error_blocks(page: Page) -> int:
+    """
+    Count error blocks in the error container.
+    """
+    try:
+        count = await page.evaluate("""() => {
+            const errorDivs = document.querySelectorAll('div[data-slot="scroll-area"] div[class*="bg-destructive"]');
+            return errorDivs.length;
+        }""")
+        return int(count) if count else 0
+    except Exception as e:
+        logger.debug(f"[FastGen] Could not count error blocks: {e}")
+        return 0
+
+
+async def _wait_for_error_count_increase(page: Page, initial_count: int, timeout_s: int = 60) -> bool:
+    """
+    Wait until the error count on page increases.
+    Returns True if error count increased, False if timeout.
+    """
+    deadline = time.monotonic() + timeout_s
+    check_interval = 2
+    
+    while time.monotonic() < deadline:
+        current_count = await _count_error_blocks(page)
+        if current_count > initial_count:
+            logger.info(f"[FastGen] Error count increased: {initial_count} → {current_count}")
+            return True
+        await asyncio.sleep(check_interval)
+    
+    logger.warning(f"[FastGen] Error count did not increase within {timeout_s}s (still {initial_count})")
+    return False
+
+
 class VideoGenerationError(RuntimeError):
     """Ошибка генерации, обнаруженная на странице (можно перегенерировать)."""
     pass
@@ -223,14 +268,25 @@ async def _wait_for_new_video_with_regen(
     gen_button_sel: str = None,
 ) -> list[str]:
     """
-    Wait for video generation with auto-regeneration after 7 minutes.
-    If no video appears after REGEN_INTERVAL_SECONDS, clicks Generate button again.
+    Wait for video generation with error-count-based retry.
+    
+    Logic:
+    1. Get initial error count at start
+    2. Wait for video to appear
+    3. If error detected: wait for error count to increase, then click Generate
+    
+    IMPORTANT: Only click Generate when error count increases.
+    This prevents queue overflow from multiple rapid clicks.
     """
-    logger.info(f"[FastGen] Waiting for video generation (timeout {timeout_s}s, auto-regen after {REGEN_INTERVAL_SECONDS}s) ...")
+    logger.info(f"[FastGen] Waiting for video generation (timeout {timeout_s}s) ...")
+    
+    # Get initial error count
+    initial_error_count = await _count_error_blocks(page)
+    logger.info(f"[FastGen] Initial error count: {initial_error_count}")
+    
     deadline = time.monotonic() + timeout_s
     last_log = time.monotonic()
     last_error_check = time.monotonic()
-    last_regen = time.monotonic()  # Time of last Generate click
     elapsed = 0
     ERROR_CHECK_INTERVAL = 10
     
@@ -243,50 +299,18 @@ async def _wait_for_new_video_with_regen(
 
         # Check for errors every 10 seconds
         if time.monotonic() - last_error_check >= ERROR_CHECK_INTERVAL:
+            current_error_count = await _count_error_blocks(page)
+            if current_error_count > initial_error_count:
+                logger.warning(f"[FastGen] Error count increased ({initial_error_count} -> {current_error_count}). UI regen aborted.")
+                raise VideoGenerationError("FastGen error block detected, UI regen aborted.")
+            
+            # Additional check for generic textual errors
             err = await _check_video_page_errors(page)
             if err:
-                logger.warning(f"[FastGen] {err} — retrying earlier")
-                raise VideoGenerationError(err)
+                logger.warning(f"[FastGen] Textual error detected: {err}. UI regen aborted.")
+                raise VideoGenerationError("FastGen textual error detected, UI regen aborted.")
+                
             last_error_check = time.monotonic()
-        
-        # Auto-regenerate after 7 minutes if still no result
-        if gen_button_sel and (time.monotonic() - last_regen >= REGEN_INTERVAL_SECONDS):
-            logger.warning(f"[FastGen] No video after {REGEN_INTERVAL_SECONDS}s — clicking Generate again...")
-            await _screenshot(page, "auto_regen_video_before")
-            
-            # Find button FRESH (old element may be stale after 7 minutes)
-            try:
-                fresh_btn = page.locator(gen_button_sel).first
-                if await fresh_btn.is_visible(timeout=2000):
-                    disabled = await fresh_btn.get_attribute("disabled")
-                    if disabled is None:
-                        await page.keyboard.press("Escape")
-                        await asyncio.sleep(0.5)
-                        await fresh_btn.click()
-                        last_regen = time.monotonic()
-                        logger.info("[FastGen] Generate button clicked again (auto-regen)")
-                        await asyncio.sleep(2)
-                        await _screenshot(page, "auto_regen_video_after")
-                    else:
-                        logger.warning("[FastGen] Generate button is disabled, skipping auto-regen")
-                else:
-                    logger.warning("[FastGen] Generate button not visible, trying alternative selectors...")
-                    # Try all generate selectors
-                    for sel in _GENERATE_SELECTORS:
-                        try:
-                            alt_btn = page.locator(sel).first
-                            if await alt_btn.is_visible(timeout=1000):
-                                disabled = await alt_btn.get_attribute("disabled")
-                                if disabled is None:
-                                    await alt_btn.click()
-                                    last_regen = time.monotonic()
-                                    logger.info(f"[FastGen] Clicked alt button: {sel}")
-                                    await asyncio.sleep(2)
-                                    break
-                        except Exception:
-                            continue
-            except Exception as e:
-                logger.warning(f"[FastGen] Auto-regen failed: {e}")
 
         await asyncio.sleep(4)
         elapsed += 4
@@ -306,14 +330,27 @@ async def _wait_for_new_image_with_regen(
     gen_button_sel: str = None,
 ) -> list[str]:
     """
-    Wait for image generation with auto-regeneration after 7 minutes.
-    If no image appears after REGEN_INTERVAL_SECONDS, clicks Generate button again.
+    Wait for image generation with error-count-based retry.
+    
+    Logic:
+    1. Get initial error count at start
+    2. Wait for image to appear
+    3. If error detected: wait for error count to increase, then click Generate
+    
+    IMPORTANT: Only click Generate when error count increases.
+    This prevents queue overflow from multiple rapid clicks.
     """
-    logger.info(f"[FastGen] Waiting for image generation (timeout {timeout_s}s, auto-regen after {REGEN_INTERVAL_SECONDS}s) ...")
+    logger.info(f"[FastGen] Waiting for image generation (timeout {timeout_s}s) ...")
+    
+    # Get initial error count
+    initial_error_count = await _count_error_blocks(page)
+    logger.info(f"[FastGen] Initial error count: {initial_error_count}")
+    
     deadline = time.monotonic() + timeout_s
     last_log = time.monotonic()
-    last_regen = time.monotonic()
+    last_error_check = time.monotonic()
     elapsed = 0
+    ERROR_CHECK_INTERVAL = 10
     
     while time.monotonic() < deadline:
         current = await _collect_image_srcs(page)
@@ -322,44 +359,20 @@ async def _wait_for_new_image_with_regen(
             logger.success(f"[FastGen] Image ready after ~{int(elapsed)}s")
             return list(new)
         
-        # Auto-regenerate after 7 minutes if still no result
-        if gen_button_sel and (time.monotonic() - last_regen >= REGEN_INTERVAL_SECONDS):
-            logger.warning(f"[FastGen] No image after {REGEN_INTERVAL_SECONDS}s — clicking Generate again...")
-            await _screenshot(page, "auto_regen_image_before")
+        # Check for errors every 10 seconds
+        if time.monotonic() - last_error_check >= ERROR_CHECK_INTERVAL:
+            current_error_count = await _count_error_blocks(page)
+            if current_error_count > initial_error_count:
+                logger.warning(f"[FastGen] Error count increased ({initial_error_count} -> {current_error_count}). UI regen aborted.")
+                raise VideoGenerationError("FastGen error block detected, UI regen aborted.")
             
-            # Find button FRESH (old element may be stale after 7 minutes)
-            try:
-                fresh_btn = page.locator(gen_button_sel).first
-                if await fresh_btn.is_visible(timeout=2000):
-                    disabled = await fresh_btn.get_attribute("disabled")
-                    if disabled is None:
-                        await page.keyboard.press("Escape")
-                        await asyncio.sleep(0.5)
-                        await fresh_btn.click()
-                        last_regen = time.monotonic()
-                        logger.info("[FastGen] Generate button clicked again (auto-regen)")
-                        await asyncio.sleep(2)
-                        await _screenshot(page, "auto_regen_image_after")
-                    else:
-                        logger.warning("[FastGen] Generate button is disabled, skipping auto-regen")
-                else:
-                    logger.warning("[FastGen] Generate button not visible, trying alternative selectors...")
-                    # Try all generate selectors
-                    for sel in _GENERATE_SELECTORS:
-                        try:
-                            alt_btn = page.locator(sel).first
-                            if await alt_btn.is_visible(timeout=1000):
-                                disabled = await alt_btn.get_attribute("disabled")
-                                if disabled is None:
-                                    await alt_btn.click()
-                                    last_regen = time.monotonic()
-                                    logger.info(f"[FastGen] Clicked alt button: {sel}")
-                                    await asyncio.sleep(2)
-                                    break
-                        except Exception:
-                            continue
-            except Exception as e:
-                logger.warning(f"[FastGen] Auto-regen failed: {e}")
+            # Additional check for generic textual errors
+            err = await _check_video_page_errors(page)
+            if err:
+                logger.warning(f"[FastGen] Textual error detected: {err}. UI regen aborted.")
+                raise VideoGenerationError("FastGen textual error detected, UI regen aborted.")
+                
+            last_error_check = time.monotonic()
         
         await asyncio.sleep(3)
         elapsed += 3
@@ -710,6 +723,34 @@ class FastGenScraper:
         self._prompt_selector = None
         await self.start()
 
+    async def restart_browser(self) -> None:
+        """Safely restart only the browser context without killing the Playwright driver."""
+        logger.info("[FastGen] Completely restarting browser context (Soft Restart)...")
+        if self._page:
+            try: await self._page.close()
+            except Exception: pass
+            self._page = None
+            
+        if self._context:
+            try: await self._context.close()
+            except Exception: pass
+            self._context = None
+            
+        self._authenticated = False
+        self._prompt_selector = None
+        
+        self._context = await self._browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 900},
+            locale="ru-RU",
+        )
+        self._page = await self._context.new_page()
+        logger.info("[FastGen] New clean Browser context ready.")
+
     async def _authenticate(self) -> None:
         page = self._page
         assert page is not None
@@ -734,6 +775,15 @@ class FastGenScraper:
         if any(kw in body for kw in _SUCCESS_KW):
             logger.info("Already authenticated")
             self._authenticated = True
+            # Wait for page to fully load before proceeding
+            # Purpose: Ensure Radix UI components are initialized
+            # Trigger: After detecting already authenticated state
+            # Termination: Proceeds after networkidle or 5s timeout
+            try:
+                await page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                pass
+            await asyncio.sleep(1)
             return
 
         # Wait for the page to fully load with retry
@@ -764,101 +814,214 @@ class FastGenScraper:
 
         logger.success("Authentication successful!")
         self._authenticated = True
+        # Wait for page to fully load after authentication
+        # Purpose: Ensure all UI components (including combobox) are initialized
+        # Trigger: After successful authentication
+        # Termination: Proceeds after networkidle or 5s timeout
+        try:
+            await page.wait_for_load_state("networkidle", timeout=5000)
+        except Exception:
+            pass
+        await asyncio.sleep(1)
 
     async def _select_model(self) -> None:
-        """Select model from FastGen dropdown (Radix UI combobox)."""
+        """Select model from FastGen dropdown (Radix UI combobox) with retry logic.
+        
+        FastGen uses Radix UI Select which renders:
+        - A visible <button role="combobox"> (may be obscured by overlays)
+        - A hidden <select aria-hidden="true" tabindex="-1"> with 1px size
+        - A dropdown with [role="option"] items when opened
+        
+        Strategy:
+        1. Try JavaScript-based value selection on the hidden <select> + dispatch change event
+        2. Try force-clicking the combobox button to open dropdown, then click the option
+        3. Fall back to keyboard navigation
+        """
         model = settings.fastgen_model
         if not model:
             return
         page = self._page
         assert page is not None
         
-        # Map of model names to their possible values (for logging/debugging)
-        model_variants = {
-            "Nano Banana Pro - Flow": ["GEM_PIX_2", "Nano Banana Pro - Flow", "Nano Banana Pro - Flow4x"],
-            "Imagen 4 - Whisk": ["Imagen 4 - Whisk", "WHISK"],
-            "Banana Pro - Flow4x": ["Banana Pro - Flow4x", "FLOW_4X"],
-            "Nano Banana 2 - FlowNew4x": ["Nano Banana 2 - FlowNew4x"],
-            "Nano Banana Pro - GeminiBeta": ["Nano Banana Pro - GeminiBeta"],
-        }
+        # Wait for page to be fully loaded before attempting model selection
+        await asyncio.sleep(2)
         
-        try:
-            # Method 1: Try native select first (fallback)
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
             try:
-                sel_el = page.locator("select").first
-                await sel_el.wait_for(state="attached", timeout=2000)
-                # Get all available options for logging
-                options = await sel_el.locator("option").all_inner_texts()
-                logger.info(f"[FastGen] Available models: {options}")
+                logger.debug(f"[FastGen] Model selection attempt {attempt}/{max_retries}")
                 
-                # Try to select by label
-                await sel_el.select_option(label=model, timeout=3000)
-                logger.info(f"[FastGen] Model '{model}' selected via native select")
+                # Log available options from hidden <select> for debugging
+                try:
+                    sel_el = page.locator("select").first
+                    await sel_el.wait_for(state="attached", timeout=3000)
+                    options_info = await page.evaluate("""() => {
+                        const sel = document.querySelector('select');
+                        if (!sel) return [];
+                        return Array.from(sel.options).map(o => ({
+                            value: o.value, 
+                            label: o.textContent.trim()
+                        }));
+                    }""")
+                    logger.info(f"[FastGen] Available model options: {options_info}")
+                except Exception as e:
+                    logger.debug(f"[FastGen] Could not read select options: {e}")
+                    options_info = []
+                
+                # Step 1: Try JavaScript-based selection on hidden <select>
+                # This bypasses all visibility/actionability checks
+                # The model value can be either a value attribute (e.g. "GEM_PIX_2") 
+                # or a label text (e.g. "Nano Banana Pro - Flow")
+                try:
+                    js_result = await page.evaluate("""(modelQuery) => {
+                        const sel = document.querySelector('select');
+                        if (!sel) return {ok: false, error: 'no select element'};
+                        
+                        // Try to find option by value first
+                        let option = sel.querySelector(`option[value="${modelQuery}"]`);
+                        
+                        // Try by label text (partial match)
+                        if (!option) {
+                            for (const opt of sel.options) {
+                                if (opt.textContent.trim().includes(modelQuery) || 
+                                    modelQuery.includes(opt.textContent.trim())) {
+                                    option = opt;
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        // Try by value partial match
+                        if (!option) {
+                            for (const opt of sel.options) {
+                                if (opt.value.includes(modelQuery) || 
+                                    modelQuery.includes(opt.value)) {
+                                    option = opt;
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if (!option) return {ok: false, error: 'option not found'};
+                        
+                        // Set the value
+                        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+                            window.HTMLSelectElement.prototype, 'value'
+                        ).set;
+                        nativeInputValueSetter.call(sel, option.value);
+                        
+                        // Dispatch events to trigger React state update
+                        sel.dispatchEvent(new Event('change', {bubbles: true}));
+                        sel.dispatchEvent(new Event('input', {bubbles: true}));
+                        
+                        return {ok: true, value: option.value, label: option.textContent.trim()};
+                    }""", model)
+                    
+                    if js_result.get("ok"):
+                        logger.info(f"[FastGen] Model selected via JS: value='{js_result['value']}', label='{js_result['label']}'")
+                        await asyncio.sleep(0.5)
+                        # Verify selection took effect by checking combobox text
+                        # If not, continue to combobox click approach
+                except Exception as e:
+                    logger.debug(f"[FastGen] JS select approach failed: {e}")
+                
+                # Step 2: Click the combobox button with force=True to open dropdown
+                # force=True bypasses Playwright's actionability checks (visibility, overlay)
+                combobox = page.locator('button[role="combobox"]').first
+                await combobox.wait_for(state="attached", timeout=5000)
+                
+                # Try force click first (bypasses overlay/visibility issues)
+                try:
+                    await combobox.click(force=True)
+                    logger.debug("[FastGen] Combobox force-clicked, waiting for dropdown...")
+                except Exception as e:
+                    logger.debug(f"[FastGen] Force click failed: {e}, trying JS click...")
+                    # Fallback: JavaScript click bypasses all Playwright checks
+                    await page.evaluate("""() => {
+                        const btn = document.querySelector('button[role="combobox"]');
+                        if (btn) btn.click();
+                    }""")
+                    logger.debug("[FastGen] Combobox clicked via JS")
+                
+                # Wait for dropdown to open
+                await asyncio.sleep(1.5)
+                
+                # Step 3: Try to click the desired option in the opened dropdown
+                # Radix dropdown renders [role="option"] items
+                try:
+                    # Try exact text match first, then partial
+                    for selector in [
+                        f'[role="option"]:has-text("{model}")',
+                        f'[role="listbox"] [role="option"]:has-text("{model}")',
+                        f'div[data-radix-popper-content-wrapper] [role="option"]:has-text("{model}")',
+                    ]:
+                        try:
+                            option = page.locator(selector).first
+                            await option.wait_for(state="visible", timeout=2000)
+                            await option.click()
+                            logger.info(f"[FastGen] Model '{model}' selected via dropdown option click")
+                            await asyncio.sleep(0.5)
+                            return
+                        except Exception:
+                            continue
+                except Exception as e:
+                    logger.debug(f"[FastGen] Dropdown option click failed: {e}")
+                
+                # Step 4: Try selecting by value on hidden select with Playwright
+                try:
+                    sel_el = page.locator("select").first
+                    await sel_el.wait_for(state="attached", timeout=2000)
+                    # Try by value attribute (e.g. "GEM_PIX_2")
+                    await sel_el.select_option(value=model, timeout=2000)
+                    logger.info(f"[FastGen] Model '{model}' selected via native select value")
+                    await page.keyboard.press("Escape")
+                    await asyncio.sleep(0.3)
+                    return
+                except Exception:
+                    pass
+                
+                # Try by label
+                try:
+                    sel_el = page.locator("select").first
+                    await sel_el.select_option(label=model, timeout=2000)
+                    logger.info(f"[FastGen] Model '{model}' selected via native select label")
+                    await page.keyboard.press("Escape")
+                    await asyncio.sleep(0.3)
+                    return
+                except Exception:
+                    pass
+                
+                # Step 5: Close dropdown and check if JS selection from Step 1 worked
                 await page.keyboard.press("Escape")
                 await asyncio.sleep(0.3)
-                return
+                
+                # If JS approach succeeded earlier, we're good
+                if js_result and js_result.get("ok"):
+                    logger.info(f"[FastGen] Using JS-selected model: {js_result['label']}")
+                    return
+                
+                raise Exception(f"Could not select model '{model}' via any method")
+                    
             except Exception as e:
-                logger.debug(f"[FastGen] Native select failed: {e}, trying combobox approach")
-            
-            # Method 2: Radix UI combobox
-            # Click on the combobox button to open dropdown
-            combobox = page.locator('button[role="combobox"]').first
-            await combobox.wait_for(state="visible", timeout=3000)
-            await combobox.click()
-            await asyncio.sleep(0.5)
-            
-            # Wait for dropdown to appear and find the option
-            # Radix uses [role="listbox"] or [role="option"] for dropdown items
-            dropdown_selectors = [
-                '[role="listbox"]',
-                '[role="listbox"] [role="option"]',
-                '[data-radix-select-viewport]',
-                'div[data-state="open"]',
-            ]
-            
-            # Try to find and click the model option
-            option_clicked = False
-            for ds in dropdown_selectors:
+                logger.warning(f"[FastGen] Model selection attempt {attempt} failed: {e}")
+                # Close any open dropdown before retry
                 try:
-                    dropdown = page.locator(ds)
-                    if await dropdown.first.is_visible(timeout=1000):
-                        # Find option by text
-                        # Try exact match first, then partial match
-                        option = dropdown.locator(f'[role="option"]:has-text("{model}")').first
-                        if await option.is_visible(timeout=1000):
-                            await option.click()
-                            option_clicked = True
-                            logger.info(f"[FastGen] Model '{model}' selected via combobox option")
-                            break
-                except Exception:
-                    continue
-            
-            if not option_clicked:
-                # Try clicking by text directly in the opened dropdown
-                try:
-                    option = page.locator(f'text="{model}"').first
-                    if await option.is_visible(timeout=1000):
-                        await option.click()
-                        logger.info(f"[FastGen] Model '{model}' selected via text click")
-                        option_clicked = True
-                except Exception as e:
-                    logger.debug(f"[FastGen] Text click failed: {e}")
-            
-            # Close dropdown if still open
-            await page.keyboard.press("Escape")
-            await asyncio.sleep(0.3)
-            
-            if not option_clicked:
-                logger.warning(f"[FastGen] Could not find model '{model}' in dropdown")
-                # Log available options for debugging
-                try:
-                    all_options = await page.locator('[role="option"]').all_inner_texts()
-                    logger.info(f"[FastGen] Available model options: {all_options}")
+                    await page.keyboard.press("Escape")
+                    await asyncio.sleep(0.5)
                 except Exception:
                     pass
                     
-        except Exception as e:
-            logger.warning(f"[FastGen] Could not select model: {e}")
+                if attempt < max_retries:
+                    wait_time = 2 * attempt
+                    logger.info(f"[FastGen] Retrying model selection in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"[FastGen] Failed to select model after {max_retries} attempts")
+                    try:
+                        all_options = await page.locator('select option').all_inner_texts()
+                        logger.info(f"[FastGen] Available model options: {all_options}")
+                    except Exception:
+                        pass
 
     async def _activate_image_tab(self) -> None:
         page = self._page
@@ -869,6 +1032,14 @@ class FastGenScraper:
                 el = page.locator(sel).first
                 await el.wait_for(state="visible", timeout=2000)
                 await el.click()
+                # Wait for tab content to load
+                # Purpose: Ensure Image tab UI (including model combobox) is ready
+                # Trigger: After clicking Image tab
+                # Termination: Proceeds after networkidle or 3s timeout, plus 0.5s delay
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=3000)
+                except Exception:
+                    pass
                 await asyncio.sleep(0.5)
                 return
             except Exception:
@@ -1022,10 +1193,10 @@ class FastGenScraper:
                 if not gen_el:
                     await _screenshot(page, "error_no_gen_btn_retry")
                     raise RuntimeError("Generate button not found on retry.")
-
+            
             # Snapshot right before each click (new img src must differ from this set)
             images_before = await _collect_image_srcs(page)
-
+            
             # Wait up to 5s for button to become enabled
             for _ in range(10):
                 if _cancel_requested(cancel_event):
@@ -1034,16 +1205,32 @@ class FastGenScraper:
                 if disabled is None:
                     break
                 await asyncio.sleep(0.5)
-
+            
             await page.keyboard.press("Escape")
             await asyncio.sleep(0.3)
-
+            
             if attempt > 0:
+                # After TimeoutError: check if button is still disabled (generation in progress)
+                # This can happen if _wait_for_new_image_with_regen clicked Generate recently
+                disabled = await gen_el.get_attribute("disabled")
+                if disabled is not None:
+                    logger.warning("[FastGen] Generate button still disabled after timeout - generation may still be in progress")
+                    # Wait a bit more for the button to become enabled
+                    for _ in range(10):
+                        disabled = await gen_el.get_attribute("disabled")
+                        if disabled is None:
+                            break
+                        await asyncio.sleep(0.5)
+                    if disabled is not None:
+                        logger.warning("[FastGen] Button still disabled after 5s - skipping retry click")
+                        await asyncio.sleep(2)
+                        continue
+                            
                 logger.warning(
                     f"[FastGen] Retry {attempt + 1}/{max_attempts} "
                     f"(timeout was {timeout_s}s) ..."
                 )
-
+            
             logger.info(f"Clicking: {gen_sel}")
             await page.evaluate("""(sel) => {
                 const el = document.querySelector(sel);
@@ -1051,7 +1238,7 @@ class FastGenScraper:
             }""", gen_sel)
             await asyncio.sleep(2)
             await _screenshot(page, "05_generating")
-
+            
             try:
                 if cancel_event is not None:
                     new_srcs = await _wait_for_new_image(
@@ -1175,26 +1362,42 @@ class FastGenScraper:
                 if not gen_el:
                     await _screenshot(page, "error_no_gen_btn_retry")
                     raise RuntimeError("Generate button not found on retry.")
-
+            
             # Snapshot right before each click (new img src must differ from this set)
             images_before = await _collect_image_srcs(page)
-
+            
             # Wait up to 5s for button to become enabled
             for _ in range(10):
                 disabled = await gen_el.get_attribute("disabled")
                 if disabled is None:
                     break
                 await asyncio.sleep(0.5)
-
+            
             await page.keyboard.press("Escape")
             await asyncio.sleep(0.3)
-
+            
             if attempt > 0:
+                # After TimeoutError: check if button is still disabled (generation in progress)
+                # This can happen if _wait_for_new_image_with_regen clicked Generate recently
+                disabled = await gen_el.get_attribute("disabled")
+                if disabled is not None:
+                    logger.warning("[FastGen] Generate button still disabled after timeout - generation may still be in progress")
+                    # Wait a bit more for the button to become enabled
+                    for _ in range(10):
+                        disabled = await gen_el.get_attribute("disabled")
+                        if disabled is None:
+                            break
+                        await asyncio.sleep(0.5)
+                    if disabled is not None:
+                        logger.warning("[FastGen] Button still disabled after 5s - skipping retry click")
+                        await asyncio.sleep(2)
+                        continue
+                            
                 logger.warning(
                     f"[FastGen] Retry {attempt + 1}/{max_attempts} "
                     f"(timeout was {timeout_s}s) ..."
                 )
-
+            
             logger.info(f"Clicking: {gen_sel}")
             await page.evaluate("""(sel) => {
                 const el = document.querySelector(sel);
@@ -1202,7 +1405,7 @@ class FastGenScraper:
             }""", gen_sel)
             await asyncio.sleep(2)
             await _screenshot(page, "05_generating")
-
+            
             try:
                 new_srcs = await _wait_for_new_image_with_regen(
                     page, images_before, timeout_s=timeout_s,
@@ -1303,50 +1506,51 @@ class FastGenScraper:
         new_srcs: list[str] = []
 
         for attempt in range(max_attempts):
-            if attempt > 0:
-                gen_el, gen_sel = await _find_first(page, _GENERATE_SELECTORS, timeout=5000)
-                if not gen_el:
-                    raise RuntimeError("Generate button not found on retry.")
-                try:
-                    await page.fill(sel, "")
-                    await asyncio.sleep(0.5)
-                except Exception:
-                    pass
-                await _react_fill(page, sel, prompt)
-                await asyncio.sleep(0.5)
-                logger.warning(
-                    f"[FastGen] Retry {attempt + 1}/{max_attempts} for video "
-                    "(previous attempt failed: timeout or content filtered) ..."
-                )
-
             videos_before = await _collect_video_srcs(page)
 
-            for _ in range(10):
-                disabled = await gen_el.get_attribute("disabled")
-                if disabled is None:
-                    break
-                await asyncio.sleep(0.5)
+            # First attempt: click Generate to start
+            # Subsequent attempts (after TimeoutError): click Generate for retry
+            # Error-triggered retries: handled by _wait_for_new_video_with_regen
+            if attempt == 0:
+                for _ in range(10):
+                    disabled = await gen_el.get_attribute("disabled")
+                    if disabled is None:
+                        break
+                    await asyncio.sleep(0.5)
 
-            await page.keyboard.press("Escape")
-            await asyncio.sleep(0.3)
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.3)
 
-            await gen_el.click()
-            await asyncio.sleep(2)
-            await _screenshot(page, f"05_video_generating{'_retry' + str(attempt) if attempt > 0 else ''}")
+                await gen_el.click()
+                await asyncio.sleep(2)
+                await _screenshot(page, "05_video_generating")
+                logger.info(f"[FastGen] Video attempt {attempt + 1}/{max_attempts} started")
 
             try:
                 new_srcs = await _wait_for_new_video_with_regen(
                     page, videos_before, timeout_s=timeout_s,
                     gen_button_el=gen_el, gen_button_sel=gen_sel
                 )
-            except (TimeoutError, VideoGenerationError) as e:
-                err_type = "error" if isinstance(e, VideoGenerationError) else "timeout"
-                await _screenshot(page, f"{err_type}_video{'_retry' + str(attempt) if attempt > 0 else ''}")
-                logger.warning(f"[FastGen] Video attempt {attempt + 1}/{max_attempts} failed: {e}")
+            except TimeoutError as e:
+                await _screenshot(page, f"timeout_video{'_retry' + str(attempt) if attempt > 0 else ''}")
+                logger.warning(f"[FastGen] Video attempt {attempt + 1}/{max_attempts} timeout: {e}")
                 if attempt + 1 >= max_attempts:
                     logger.error(f"[FastGen] All {max_attempts} attempts exhausted, giving up")
                     return None
-                logger.info(f"[FastGen] Retrying generation ({attempt + 2}/{max_attempts}) ...")
+                # Timeout means: after last Generate click, no video appeared within timeout
+                # This is a genuine retry situation - click Generate for next attempt
+                logger.info(f"[FastGen] Clicking Generate for retry {attempt + 2}...")
+                try:
+                    gen_el, gen_sel = await _find_first(page, _GENERATE_SELECTORS, timeout=5000)
+                    if gen_el:
+                        disabled = await gen_el.get_attribute("disabled")
+                        if disabled is None:
+                            await gen_el.click()
+                            logger.info("[FastGen] Generate button clicked for retry")
+                        else:
+                            logger.warning("[FastGen] Generate button is disabled")
+                except Exception as click_err:
+                    logger.warning(f"[FastGen] Could not click Generate: {click_err}")
                 await asyncio.sleep(3)
                 continue
 
@@ -1493,7 +1697,8 @@ class FastGenScraper:
 
             await gen_el.click()
             await asyncio.sleep(2)
-            await _screenshot(page, f"05_video_generating{'_retry' + str(attempt) if attempt > 0 else ''}")
+            await _screenshot(page, "05_video_generating")
+            logger.info(f"[FastGen] Video attempt {attempt + 1}/{max_attempts} started")
 
             try:
                 if cancel_event is not None:
@@ -1622,13 +1827,20 @@ def _run_single_image_with_refs_sync(
         scraper = FastGenScraper()
         await scraper.start()
         try:
-            paths = await scraper.generate_with_multiple_references(
-                prompt=prompt,
-                output_dir=output_dir,
-                index=index,
-                reference_image_paths=reference_image_paths,
-            )
-            return paths[0] if paths else None
+            for attempt in range(3):
+                try:
+                    paths = await scraper.generate_with_multiple_references(
+                        prompt=prompt,
+                        output_dir=output_dir,
+                        index=index,
+                        reference_image_paths=reference_image_paths,
+                    )
+                    return paths[0] if paths else None
+                except VideoGenerationError as e:
+                    logger.warning(f"[FastGen] Error caught during image generation (attempt {attempt+1}/3), restarting browser: {e}")
+                    await scraper.restart_browser()
+                    continue
+            return None
         finally:
             await scraper.stop()
 
@@ -1883,15 +2095,27 @@ def _run_single_video_sync(
             if _cancel_requested(cancel_event):
                 return None
             upload_ref = bool(reference_image_paths) or bool(reference_image_path)
-            return await scraper.generate_video(
-                prompt,
-                output_dir,
-                index=index,
-                reference_image_path=reference_image_path,
-                reference_image_paths=reference_image_paths,
-                upload_reference=upload_ref,
-                cancel_event=cancel_event,
-            )
+            for attempt in range(3):
+                try:
+                    if _cancel_requested(cancel_event):
+                        return None
+                    return await scraper.generate_video(
+                        prompt,
+                        output_dir,
+                        index=index,
+                        reference_image_path=reference_image_path,
+                        reference_image_paths=reference_image_paths,
+                        upload_reference=upload_ref,
+                        cancel_event=cancel_event,
+                    )
+                except VideoGenerationError as e:
+                    logger.warning(
+                        f"[FastGen] Video generation error (attempt {attempt + 1}/3), restarting browser: {e}"
+                    )
+                    if attempt >= 2:
+                        return None
+                    await scraper.restart_browser()
+            return None
         finally:
             await scraper.stop()
 
@@ -2015,10 +2239,17 @@ def _run_single_video_multi_ref_sync(
         scraper = FastGenScraper()
         await scraper.start()
         try:
-            return await scraper.generate_video_with_references(
-                prompt, output_dir, index=index,
-                reference_image_paths=reference_image_paths,
-            )
+            for attempt in range(3):
+                try:
+                    return await scraper.generate_video_with_references(
+                        prompt, output_dir, index=index,
+                        reference_image_paths=reference_image_paths,
+                    )
+                except VideoGenerationError as e:
+                    logger.warning(f"[FastGen] Error caught during multi-ref video generation (attempt {attempt+1}/3), restarting browser: {e}")
+                    await scraper.restart_browser()
+                    continue
+            return None
         finally:
             await scraper.stop()
 
@@ -2409,14 +2640,13 @@ def _run_keyframe_video_sync(
     """Sync wrapper for keyframe video generation."""
     import asyncio as _asyncio
     
-    async def _inner() -> Path | None:
-        scraper = FastGenScraper()
-        await scraper.start()
+    async def _inner_attempt(scraper: FastGenScraper) -> Path | None:
         try:
             page = scraper._page
             assert page is not None
             
             logger.info(f"[FastGen Keyframes] Generating video from keyframes: {prompt[:60]}...")
+
             if not scraper._authenticated:
                 await scraper._authenticate()
             
@@ -2487,42 +2717,52 @@ def _run_keyframe_video_sync(
             new_srcs: list[str] = []
             
             for attempt in range(max_attempts):
-                if attempt > 0:
-                    gen_el, gen_sel = await _find_first(page, _GENERATE_SELECTORS, timeout=5000)
-                    if not gen_el:
-                        raise RuntimeError("Generate button not found on retry.")
-                    logger.warning(
-                        f"[FastGen Keyframes] Retry {attempt + 1}/{max_attempts} ..."
-                    )
-                
                 videos_before = await _collect_video_srcs(page)
                 
-                # Wait for button to be enabled
-                for _ in range(10):
-                    disabled = await gen_el.get_attribute("disabled")
-                    if disabled is None:
-                        break
-                    await asyncio.sleep(0.5)
-                
-                await page.keyboard.press("Escape")
-                await asyncio.sleep(0.3)
-                
-                await gen_el.click()
-                await asyncio.sleep(2)
-                await _screenshot(page, f"kf_06_generating{'_retry' + str(attempt) if attempt > 0 else ''}")
+                # First attempt: click Generate to start
+                # Subsequent attempts (after TimeoutError): click Generate for retry
+                # Error-triggered retries: handled by _wait_for_new_video_with_regen
+                if attempt == 0:
+                    # Wait for button to be enabled
+                    for _ in range(10):
+                        disabled = await gen_el.get_attribute("disabled")
+                        if disabled is None:
+                            break
+                        await asyncio.sleep(0.5)
+                    
+                    await page.keyboard.press("Escape")
+                    await asyncio.sleep(0.3)
+                    
+                    await gen_el.click()
+                    await asyncio.sleep(2)
+                    await _screenshot(page, "kf_06_generating")
+                    logger.info(f"[FastGen Keyframes] Attempt {attempt + 1}/{max_attempts} started")
                 
                 try:
                     new_srcs = await _wait_for_new_video_with_regen(
-                    page, videos_before, timeout_s=timeout_s,
-                    gen_button_el=gen_el, gen_button_sel=gen_sel
-                )
-                except (TimeoutError, VideoGenerationError) as e:
-                    err_type = "error" if isinstance(e, VideoGenerationError) else "timeout"
-                    await _screenshot(page, f"kf_{err_type}{'_retry' + str(attempt) if attempt > 0 else ''}")
-                    logger.warning(f"[FastGen Keyframes] Attempt {attempt + 1}/{max_attempts} failed: {e}")
+                        page, videos_before, timeout_s=timeout_s,
+                        gen_button_el=gen_el, gen_button_sel=gen_sel
+                    )
+                except TimeoutError as e:
+                    await _screenshot(page, f"kf_timeout{'_retry' + str(attempt) if attempt > 0 else ''}")
+                    logger.warning(f"[FastGen Keyframes] Attempt {attempt + 1}/{max_attempts} timeout: {e}")
                     if attempt + 1 >= max_attempts:
                         logger.error(f"[FastGen Keyframes] All {max_attempts} attempts exhausted")
                         return None
+                    # Timeout means: after last Generate click, no video appeared within timeout
+                    # This is a genuine retry situation - click Generate for next attempt
+                    logger.info(f"[FastGen Keyframes] Clicking Generate for retry {attempt + 2}...")
+                    try:
+                        gen_el, gen_sel = await _find_first(page, _GENERATE_SELECTORS, timeout=5000)
+                        if gen_el:
+                            disabled = await gen_el.get_attribute("disabled")
+                            if disabled is None:
+                                await gen_el.click()
+                                logger.info("[FastGen Keyframes] Generate button clicked for retry")
+                            else:
+                                logger.warning("[FastGen Keyframes] Generate button is disabled")
+                    except Exception as click_err:
+                        logger.warning(f"[FastGen Keyframes] Could not click Generate: {click_err}")
                     await asyncio.sleep(3)
                     continue
                 
@@ -2556,6 +2796,25 @@ def _run_keyframe_video_sync(
                 logger.error(f"[FastGen Keyframes] Failed to download video: {e}")
                 return None
                 
+        finally:
+            pass # DO NOT STOP SCRAPER HERE! Keep it open for retry logic or cleanup!
+            
+    async def _inner() -> Path | None:
+        scraper = FastGenScraper()
+        await scraper.start()
+        try:
+            for attempt in range(3):
+                try:
+                    result = await _inner_attempt(scraper)
+                    return result
+                except VideoGenerationError as e:
+                    logger.warning(f"[FastGen Keyframes] Error caught, restarting browser context (attempt {attempt+1}/3): {e}")
+                    await scraper.restart_browser()
+                    continue
+                except Exception as e:
+                    logger.error(f"[FastGen Keyframes] Unknown error: {e}")
+                    raise
+            return None
         finally:
             await scraper.stop()
     
@@ -2648,14 +2907,21 @@ def _run_fastgen_with_refs_sync(
         try:
             all_paths: list[Path] = []
             for i, (prompt, ref_paths) in enumerate(prompts_with_refs):
-                paths = await scraper.generate_with_multiple_references(
-                    prompt=prompt,
-                    output_dir=output_dir,
-                    index=i,
-                    reference_image_paths=ref_paths,
-                )
-                all_paths.extend(paths)
-                await _asyncio.sleep(1)
+                for attempt in range(3):
+                    try:
+                        paths = await scraper.generate_with_multiple_references(
+                            prompt=prompt,
+                            output_dir=output_dir,
+                            index=i,
+                            reference_image_paths=ref_paths,
+                        )
+                        all_paths.extend(paths)
+                        await _asyncio.sleep(1)
+                        break
+                    except VideoGenerationError as e:
+                        logger.warning(f"[FastGen] Error caught during image generation (attempt {attempt+1}/3), restarting browser: {e}")
+                        await scraper.restart_browser()
+                        continue
             return all_paths
         finally:
             await scraper.stop()
