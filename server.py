@@ -19,31 +19,17 @@ from loguru import logger
 from pydantic import BaseModel
 
 from config import settings
+from session_logger import session_logger_manager, SessionLogger
 
 # ── Session store ─────────────────────────────────────────────────────────────
 _sessions: dict[str, dict] = {}
 
 # Statuses: running | paused | done | error | cancelled
 
-
-# ── Log capture per session ───────────────────────────────────────────────────
-
-class _SessionSink:
-    """Loguru sink that pushes structured log records into a per-session queue."""
-
-    def __init__(self, queue: asyncio.Queue, loop: asyncio.AbstractEventLoop) -> None:
-        self._q = queue
-        self._loop = loop
-
-    def __call__(self, message) -> None:
-        rec = message.record
-        entry = {
-            "type": "log",
-            "time": rec["time"].strftime("%H:%M:%S"),
-            "level": rec["level"].name,       # DEBUG INFO SUCCESS WARNING ERROR
-            "text": rec["message"],
-        }
-        asyncio.run_coroutine_threadsafe(self._q.put(entry), self._loop)
+# ── Concurrency control ───────────────────────────────────────────────────────
+# Максимальное количество одновременно выполняемых пайплайнов
+MAX_CONCURRENT_PIPELINES = 2
+_pipeline_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PIPELINES)
 
 
 # ── Pipeline runner ───────────────────────────────────────────────────────────
@@ -54,77 +40,100 @@ async def _run_pipeline_task(
     queue: asyncio.Queue,
     control: dict,
 ) -> None:
+    """
+    Запуск пайплайна с полной изоляцией:
+    - Semaphore ограничивает количество параллельных пайплайнов
+    - SessionLogger обеспечивает изолированное логирование
+    - Каждый пайплайн получает свой sink в loguru
+    """
     session = _sessions[session_id]
-    sink_id: int | None = None
-    try:
-        loop = asyncio.get_event_loop()
-        sink = _SessionSink(queue, loop)
-        sink_id = logger.add(sink, format="{message}", level="DEBUG", enqueue=False)
+    session_logger: SessionLogger | None = None
+    
+    # Ждём свободного слота через семафор
+    async with _pipeline_semaphore:
+        try:
+            loop = asyncio.get_event_loop()
+            
+            # Создаём изолированный логгер для этой сессии
+            session_logger = await session_logger_manager.create_logger(session_id, queue)
+            session_logger.bind_to_loguru(loop)
 
-        settings.ensure_dirs()
+            settings.ensure_dirs()
+            
+            # Логируем старт с session_id
+            session_logger.info(f"=== Pipeline started | mode={req.mode} | session={session_id} ===")
+            session_logger.info(f"[Pipeline] Session {session_id[:8]} started (active: {MAX_CONCURRENT_PIPELINES - _pipeline_semaphore._value}/{MAX_CONCURRENT_PIPELINES})")
 
-        from orchestrator.swarm import run_pipeline
+            from orchestrator.swarm import run_pipeline
 
-        result = await run_pipeline(
-            topic=req.topic,
-            num_scenes=req.num_scenes,
-            use_swarm=False,
-            session_id=session_id,
-            local_only=req.local_only,
-            auto_topic=req.auto_topic,
-            use_scenario=req.use_scenario,
-            show_subtitles=req.show_subtitles,
-            prebuilt_scenario=req.scenario,
-            mode=req.mode,
-            language=getattr(req, "language", "ru") or "ru",
-            custom_title_bg_path=req.custom_title_bg_path,
-            custom_outro_bg_path=req.custom_outro_bg_path,
-            reference_image_path=req.reference_image_path,
-            mode3_start_image_path=req.mode3_start_image_path,
-            mode3_end_image_path=req.mode3_end_image_path,
-            mode3_topic=req.mode3_topic,
-            mode4_quote=getattr(req, "mode4_quote", None),
-            mode4_person_name=getattr(req, "mode4_person_name", None),
-            mode4_photo_path=getattr(req, "mode4_photo_path", None),
-            mode6_num_characters=getattr(req, "mode6_num_characters", 3),
-            mode7_keyboards=getattr(req, "mode7_keyboards", None),
-            mode7_animal_type=getattr(req, "mode7_animal_type", None),
-            mode8_house_style=getattr(req, "mode8_house_style", None),
-            mode8_location=getattr(req, "mode8_location", None),
-            mode8_num_stages=getattr(req, "mode8_num_stages", 5),
-            mode9_vehicle_type=getattr(req, "mode9_vehicle_type", None),
-            mode9_location=getattr(req, "mode9_location", None),
-            mode9_num_stages=getattr(req, "mode9_num_stages", 5),
-            control=control,
-        )
+            result = await run_pipeline(
+                topic=req.topic,
+                num_scenes=req.num_scenes,
+                use_swarm=False,
+                session_id=session_id,
+                local_only=req.local_only,
+                auto_topic=req.auto_topic,
+                use_scenario=req.use_scenario,
+                show_subtitles=req.show_subtitles,
+                prebuilt_scenario=req.scenario,
+                mode=req.mode,
+                language=getattr(req, "language", "ru") or "ru",
+                custom_title_bg_path=req.custom_title_bg_path,
+                custom_outro_bg_path=req.custom_outro_bg_path,
+                reference_image_path=req.reference_image_path,
+                mode3_start_image_path=req.mode3_start_image_path,
+                mode3_end_image_path=req.mode3_end_image_path,
+                mode3_topic=req.mode3_topic,
+                mode4_quote=getattr(req, "mode4_quote", None),
+                mode4_person_name=getattr(req, "mode4_person_name", None),
+                mode4_photo_path=getattr(req, "mode4_photo_path", None),
+                mode6_num_characters=getattr(req, "mode6_num_characters", 3),
+                mode7_keyboards=getattr(req, "mode7_keyboards", None),
+                mode7_animal_type=getattr(req, "mode7_animal_type", None),
+                mode8_house_style=getattr(req, "mode8_house_style", None),
+                mode8_location=getattr(req, "mode8_location", None),
+                mode8_num_stages=getattr(req, "mode8_num_stages", 5),
+                mode9_vehicle_type=getattr(req, "mode9_vehicle_type", None),
+                mode9_location=getattr(req, "mode9_location", None),
+                mode9_num_stages=getattr(req, "mode9_num_stages", 5),
+                control=control,
+            )
 
-        if control.get("cancelled"):
-            return
-        session["status"] = "done"
-        session["result"] = {
-            "video_path": result.get("video_path"),
-            "video_paths": result.get("video_paths"),
-            "topic": result.get("topic"),
-            "trend": result.get("trend"),
-            "session_id": session_id,
-            "publishing": result.get("publishing"),
-        }
-        await queue.put({"type": "done", **session["result"]})
+            if control.get("cancelled"):
+                return
+            session["status"] = "done"
+            session["result"] = {
+                "video_path": result.get("video_path"),
+                "video_paths": result.get("video_paths"),
+                "topic": result.get("topic"),
+                "trend": result.get("trend"),
+                "session_id": session_id,
+                "publishing": result.get("publishing"),
+            }
+            await queue.put({"type": "done", **session["result"]})
+            session_logger.success(f"=== Pipeline completed | video={result.get('video_path')} ===")
 
-    except asyncio.CancelledError:
-        session["status"] = "cancelled"
-        control["cancelled"] = True
-        await queue.put({"type": "error", "error": "Генерация отменена"})
-    except Exception as exc:
-        import traceback
-        tb = traceback.format_exc()
-        logger.error(f"Pipeline error: {exc}\n{tb}")
-        session["status"] = "error"
-        session["error"] = str(exc)
-        await queue.put({"type": "error", "error": str(exc)})
-    finally:
-        if sink_id is not None:
-            logger.remove(sink_id)
+        except asyncio.CancelledError:
+            session["status"] = "cancelled"
+            control["cancelled"] = True
+            await queue.put({"type": "error", "error": "Генерация отменена"})
+            if session_logger:
+                session_logger.warning("Pipeline cancelled by user")
+        except Exception as exc:
+            import traceback
+            tb = traceback.format_exc()
+            if session_logger:
+                session_logger.error(f"Pipeline error: {exc}\n{tb}")
+            else:
+                logger.error(f"Pipeline error: {exc}\n{tb}")
+            session["status"] = "error"
+            session["error"] = str(exc)
+            await queue.put({"type": "error", "error": str(exc)})
+        finally:
+            # Очищаем ресурсы сессии
+            if session_logger:
+                session_logger.unbind()
+                await session_logger_manager.remove_logger(session_id)
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────

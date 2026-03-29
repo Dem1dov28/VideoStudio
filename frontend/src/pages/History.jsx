@@ -121,144 +121,252 @@ export default function History() {
               initial={{ scale: 0.9, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.9, opacity: 0 }}
-              className="card overflow-hidden max-w-sm w-full"
+              className="card overflow-hidden max-w-5xl w-full grid grid-cols-1 md:grid-cols-2"
               onClick={e => e.stopPropagation()}
             >
-              <div className="flex items-center justify-between p-4 border-b border-[#27272f]">
-                <span className="text-sm font-semibold text-white truncate pr-4">
-                  {selected?.title || `#${(selected?.session_id || '').slice(-8)}`}
-                </span>
-                <button
-                  onClick={() => setSelected(null)}
-                  className="text-[#71717a] hover:text-white transition-colors"
-                >
-                  <RiCloseLine className="text-xl" />
-                </button>
-              </div>
-              <div className="bg-black flex justify-center p-4">
-                <video
-                  controls
-                  autoPlay
-                  className="rounded-lg max-h-[70vh]"
-                  style={{ maxWidth: '280px' }}
-                >
-                  <source src={api.videoUrl(selected?.session_id, selected?.filename)} type="video/mp4" />
-                </video>
-              </div>
-              
-              {/* Publishing metadata panel */}
-              {selected?.publishing && (
-                <div className="p-4 space-y-3 border-t border-[#27272f] bg-[#0d0d14]">
-                  {/* Title */}
-                  <div>
-                    <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
-                      Название
-                    </label>
-                    <div className="flex gap-1.5">
-                      <input
-                        type="text"
-                        value={selected.publishing.title || ''}
-                        readOnly
-                        className="flex-1 bg-[#1a1a2e] border border-[#27272f] rounded px-2 py-1.5 text-xs text-white"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          navigator.clipboard.writeText(selected.publishing.title || '');
-                          alert('Название скопировано!');
-                        }}
-                        className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2.5 py-1.5 rounded transition-colors whitespace-nowrap"
-                      >
-                        Копия
-                      </button>
-                    </div>
-                  </div>
-                  
-                  {/* Hashtags */}
-                  <div>
-                    <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
-                      Хештеги
-                    </label>
-                    <div className="flex gap-1.5">
-                      <input
-                        type="text"
-                        value={(selected.publishing.hashtags || []).join(' ')}
-                        readOnly
-                        className="flex-1 bg-[#1a1a2e] border border-[#27272f] rounded px-2 py-1.5 text-xs text-white"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          navigator.clipboard.writeText((selected.publishing.hashtags || []).join(' '));
-                          alert('Хештеги скопированы!');
-                        }}
-                        className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2.5 py-1.5 rounded transition-colors whitespace-nowrap"
-                      >
-                        Копия
-                      </button>
-                    </div>
-                  </div>
-                  
-                  {/* Description */}
-                  <div>
-                    <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
-                      Описание
-                    </label>
-                    <div className="flex gap-1.5">
-                      <textarea
-                        value={selected.publishing.description || ''}
-                        readOnly
-                        rows={3}
-                        className="flex-1 bg-[#1a1a2e] border border-[#27272f] rounded px-2 py-1.5 text-xs text-white resize-none"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          navigator.clipboard.writeText(selected.publishing.description || '');
-                          alert('Описание скопировано!');
-                        }}
-                        className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2.5 py-1.5 rounded transition-colors whitespace-nowrap self-start mt-0.5"
-                      >
-                        Копия
-                      </button>
-                    </div>
-                  </div>
-                  
-                  {/* Tags */}
-                  <div>
-                    <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
-                      Теги
-                    </label>
-                    <div className="flex gap-1.5">
-                      <input
-                        type="text"
-                        value={(selected.publishing.tags || []).join(', ')}
-                        readOnly
-                        className="flex-1 bg-[#1a1a2e] border border-[#27272f] rounded px-2 py-1.5 text-xs text-white"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          navigator.clipboard.writeText((selected.publishing.tags || []).join(', '));
-                          alert('Теги скопированы!');
-                        }}
-                        className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2.5 py-1.5 rounded transition-colors whitespace-nowrap"
-                      >
-                        Копия
-                      </button>
-                    </div>
-                  </div>
+              {/* Video section (right side on desktop) */}
+              <div className="md:col-start-2 md:row-start-1 bg-black flex flex-col">
+                <div className="flex items-center justify-between p-4 border-b border-[#27272f] md:border-b-0">
+                  <span className="text-sm font-semibold text-white truncate pr-4">
+                    {selected?.title || `#${(selected?.session_id || '').slice(-8)}`}
+                  </span>
+                  <button
+                    onClick={() => setSelected(null)}
+                    className="text-[#71717a] hover:text-white transition-colors"
+                  >
+                    <RiCloseLine className="text-xl" />
+                  </button>
                 </div>
-              )}
+                <div className="flex-1 bg-black flex items-center justify-center p-4">
+                  <video
+                    controls
+                    autoPlay
+                    className="rounded-lg max-h-[60vh] w-full"
+                  >
+                    <source src={api.videoUrl(selected?.session_id, selected?.filename)} type="video/mp4" />
+                  </video>
+                </div>
+                <div className="p-4 border-t border-[#27272f]">
+                  <a
+                    href={api.videoUrl(selected?.session_id, selected?.filename)}
+                    download
+                    className="btn-primary flex items-center justify-center gap-2 text-sm w-full"
+                  >
+                    ⬇ Скачать
+                  </a>
+                </div>
+              </div>
               
-              <div className="p-4 flex gap-2">
-                <a
-                  href={api.videoUrl(selected?.session_id, selected?.filename)}
-                  download
-                  className="btn-primary flex items-center gap-2 text-sm flex-1 justify-center"
-                >
-                  ⬇ Скачать
-                </a>
+              {/* Text content section (left side on desktop) */}
+              <div className="md:col-start-1 md:row-start-1 bg-[#0d0d14] overflow-y-auto max-h-[80vh]">
+                {selected?.publishing ? (
+                  <div className="p-5 space-y-6">
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="text-base font-bold text-white">Публикация</h3>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const ru = selected.publishing.ru;
+                          const en = selected.publishing.en;
+                          const text = `🇷🇺 Русская версия
+
+Название: ${ru?.title || ''}
+
+Описание: ${ru?.description || ''}
+
+Теги: ${(ru?.tags || []).join(', ')}
+
+🇬🇧 English Version
+
+Title: ${en?.title || ''}
+
+Description: ${en?.description || ''}
+
+Tags: ${(en?.tags || []).join(', ')}`;
+                          navigator.clipboard.writeText(text);
+                        }}
+                        className="text-sm bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-3 py-1.5 rounded transition-colors font-medium"
+                        title="Копировать всё"
+                      >
+                        📋 Копировать всё
+                      </button>
+                    </div>
+                    
+                    {/* Russian Version */}
+                    {selected.publishing.ru && (
+                      <div className="space-y-4">
+                        <div className="flex items-center gap-2 border-b border-[#27272f] pb-2">
+                          <span className="text-lg">🇷🇺</span>
+                          <h4 className="text-sm font-semibold text-brand-300 uppercase tracking-wider">Русская версия</h4>
+                        </div>
+                        
+                        {/* Title RU */}
+                        <div>
+                          <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1.5">
+                            Название
+                          </label>
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={selected.publishing.ru.title || ''}
+                              readOnly
+                              className="flex-1 bg-[#1a1a2e] border border-[#27272f] rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-400/50"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(selected.publishing.ru.title || '');
+                              }}
+                              className="text-sm bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-3 py-2 rounded transition-colors whitespace-nowrap font-medium"
+                              title="Скопировать"
+                            >
+                              📋
+                            </button>
+                          </div>
+                        </div>
+                        
+                        {/* Description RU */}
+                        <div>
+                          <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1.5">
+                            Описание
+                          </label>
+                          <div className="flex gap-2">
+                            <textarea
+                              value={selected.publishing.ru.description || ''}
+                              readOnly
+                              rows={6}
+                              className="flex-1 bg-[#1a1a2e] border border-[#27272f] rounded px-3 py-2 text-sm text-white resize-none focus:outline-none focus:border-brand-400/50"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(selected.publishing.ru.description || '');
+                              }}
+                              className="text-sm bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-3 py-2 rounded transition-colors whitespace-nowrap font-medium self-start"
+                              title="Скопировать"
+                            >
+                              📋
+                            </button>
+                          </div>
+                        </div>
+                        
+                        {/* Tags RU */}
+                        <div>
+                          <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1.5">
+                            Теги
+                          </label>
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={(selected.publishing.ru.tags || []).join(', ')}
+                              readOnly
+                              className="flex-1 bg-[#1a1a2e] border border-[#27272f] rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-400/50"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText((selected.publishing.ru.tags || []).join(', '));
+                              }}
+                              className="text-sm bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-3 py-2 rounded transition-colors whitespace-nowrap font-medium"
+                              title="Скопировать"
+                            >
+                              📋
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    
+                    {/* English Version */}
+                    {selected.publishing.en && (
+                      <div className="space-y-4">
+                        <div className="flex items-center gap-2 border-t border-[#27272f] pt-4">
+                          <span className="text-lg">🇬🇧</span>
+                          <h4 className="text-sm font-semibold text-brand-300 uppercase tracking-wider">English Version</h4>
+                        </div>
+                        
+                        {/* Title EN */}
+                        <div>
+                          <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1.5">
+                            Title
+                          </label>
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={selected.publishing.en.title || ''}
+                              readOnly
+                              className="flex-1 bg-[#1a1a2e] border border-[#27272f] rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-400/50"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(selected.publishing.en.title || '');
+                              }}
+                              className="text-sm bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-3 py-2 rounded transition-colors whitespace-nowrap font-medium"
+                              title="Copy"
+                            >
+                              📋
+                            </button>
+                          </div>
+                        </div>
+                        
+                        {/* Description EN */}
+                        <div>
+                          <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1.5">
+                            Description
+                          </label>
+                          <div className="flex gap-2">
+                            <textarea
+                              value={selected.publishing.en.description || ''}
+                              readOnly
+                              rows={6}
+                              className="flex-1 bg-[#1a1a2e] border border-[#27272f] rounded px-3 py-2 text-sm text-white resize-none focus:outline-none focus:border-brand-400/50"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(selected.publishing.en.description || '');
+                              }}
+                              className="text-sm bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-3 py-2 rounded transition-colors whitespace-nowrap font-medium self-start"
+                              title="Copy"
+                            >
+                              📋
+                            </button>
+                          </div>
+                        </div>
+                        
+                        {/* Tags EN */}
+                        <div>
+                          <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1.5">
+                            Tags
+                          </label>
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={(selected.publishing.en.tags || []).join(', ')}
+                              readOnly
+                              className="flex-1 bg-[#1a1a2e] border border-[#27272f] rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-400/50"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText((selected.publishing.en.tags || []).join(', '));
+                              }}
+                              className="text-sm bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-3 py-2 rounded transition-colors whitespace-nowrap font-medium"
+                              title="Copy"
+                            >
+                              📋
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="p-5">
+                    <p className="text-[#71717a] text-sm">Нет данных для публикации</p>
+                  </div>
+                )}
               </div>
             </motion.div>
           </motion.div>

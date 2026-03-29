@@ -111,94 +111,158 @@ export default function VideoCard({ video, onClick, onDelete }) {
         
         {/* Publishing metadata panel */}
         {showPublishing && video.publishing && (
-          <div className="space-y-3 pt-2 border-t border-[#27272f]">
-            {/* Title */}
-            <div>
-              <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
-                Название
-              </label>
-              <div className="flex gap-1.5">
-                <input
-                  type="text"
-                  value={video.publishing.title || ''}
-                  readOnly
-                  className="flex-1 bg-[#0d0d14] border border-[#27272f] rounded px-2 py-1 text-xs text-white"
-                />
-                <button
-                  type="button"
-                  onClick={() => copyToClipboard(video.publishing.title || '', 'Название')}
-                  className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2 py-1 rounded transition-colors"
-                >
-                  Копия
-                </button>
+          <div className="space-y-4 pt-2 border-t border-[#27272f]">
+            {/* Russian Version */}
+            {video.publishing.ru && (
+              <div className="space-y-3">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs">🇷🇺</span>
+                  <span className="text-[10px] font-semibold text-brand-300 uppercase tracking-wider">Русская</span>
+                </div>
+                
+                {/* Title RU */}
+                <div>
+                  <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
+                    Название
+                  </label>
+                  <div className="flex gap-1.5">
+                    <input
+                      type="text"
+                      value={video.publishing.ru.title || ''}
+                      readOnly
+                      className="flex-1 bg-[#0d0d14] border border-[#27272f] rounded px-2 py-1 text-xs text-white"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => copyToClipboard(video.publishing.ru.title || '', 'Название')}
+                      className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2 py-1 rounded transition-colors"
+                    >
+                      Копия
+                    </button>
+                  </div>
+                </div>
+                
+                {/* Description RU */}
+                <div>
+                  <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
+                    Описание
+                  </label>
+                  <div className="flex gap-1.5">
+                    <textarea
+                      value={video.publishing.ru.description || ''}
+                      readOnly
+                      rows={3}
+                      className="flex-1 bg-[#0d0d14] border border-[#27272f] rounded px-2 py-1 text-xs text-white resize-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => copyToClipboard(video.publishing.ru.description || '', 'Описание')}
+                      className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2 py-1 rounded transition-colors self-start mt-0.5"
+                    >
+                      Копия
+                    </button>
+                  </div>
+                </div>
+                
+                {/* Tags RU */}
+                <div>
+                  <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
+                    Теги
+                  </label>
+                  <div className="flex gap-1.5">
+                    <input
+                      type="text"
+                      value={(video.publishing.ru.tags || []).join(', ')}
+                      readOnly
+                      className="flex-1 bg-[#0d0d14] border border-[#27272f] rounded px-2 py-1 text-xs text-white"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => copyToClipboard((video.publishing.ru.tags || []).join(', '), 'Теги')}
+                      className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2 py-1 rounded transition-colors"
+                    >
+                      Копия
+                    </button>
+                  </div>
+                </div>
               </div>
-            </div>
+            )}
             
-            {/* Hashtags */}
-            <div>
-              <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
-                Хештеги
-              </label>
-              <div className="flex gap-1.5">
-                <input
-                  type="text"
-                  value={(video.publishing.hashtags || []).join(' ')}
-                  readOnly
-                  className="flex-1 bg-[#0d0d14] border border-[#27272f] rounded px-2 py-1 text-xs text-white"
-                />
-                <button
-                  type="button"
-                  onClick={() => copyToClipboard((video.publishing.hashtags || []).join(' '), 'Хештеги')}
-                  className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2 py-1 rounded transition-colors"
-                >
-                  Копия
-                </button>
+            {/* English Version */}
+            {video.publishing.en && (
+              <div className="space-y-3 pt-3 border-t border-[#27272f]">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs">🇬🇧</span>
+                  <span className="text-[10px] font-semibold text-brand-300 uppercase tracking-wider">English</span>
+                </div>
+                
+                {/* Title EN */}
+                <div>
+                  <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
+                    Title
+                  </label>
+                  <div className="flex gap-1.5">
+                    <input
+                      type="text"
+                      value={video.publishing.en.title || ''}
+                      readOnly
+                      className="flex-1 bg-[#0d0d14] border border-[#27272f] rounded px-2 py-1 text-xs text-white"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => copyToClipboard(video.publishing.en.title || '', 'Title')}
+                      className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2 py-1 rounded transition-colors"
+                    >
+                      Copy
+                    </button>
+                  </div>
+                </div>
+                
+                {/* Description EN */}
+                <div>
+                  <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
+                    Description
+                  </label>
+                  <div className="flex gap-1.5">
+                    <textarea
+                      value={video.publishing.en.description || ''}
+                      readOnly
+                      rows={3}
+                      className="flex-1 bg-[#0d0d14] border border-[#27272f] rounded px-2 py-1 text-xs text-white resize-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => copyToClipboard(video.publishing.en.description || '', 'Description')}
+                      className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2 py-1 rounded transition-colors self-start mt-0.5"
+                    >
+                      Copy
+                    </button>
+                  </div>
+                </div>
+                
+                {/* Tags EN */}
+                <div>
+                  <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
+                    Tags
+                  </label>
+                  <div className="flex gap-1.5">
+                    <input
+                      type="text"
+                      value={(video.publishing.en.tags || []).join(', ')}
+                      readOnly
+                      className="flex-1 bg-[#0d0d14] border border-[#27272f] rounded px-2 py-1 text-xs text-white"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => copyToClipboard((video.publishing.en.tags || []).join(', '), 'Tags')}
+                      className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2 py-1 rounded transition-colors"
+                    >
+                      Copy
+                    </button>
+                  </div>
+                </div>
               </div>
-            </div>
-            
-            {/* Description */}
-            <div>
-              <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
-                Описание
-              </label>
-              <div className="flex gap-1.5">
-                <textarea
-                  value={video.publishing.description || ''}
-                  readOnly
-                  rows={3}
-                  className="flex-1 bg-[#0d0d14] border border-[#27272f] rounded px-2 py-1 text-xs text-white resize-none"
-                />
-                <button
-                  type="button"
-                  onClick={() => copyToClipboard(video.publishing.description || '', 'Описание')}
-                  className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2 py-1 rounded transition-colors self-start mt-0.5"
-                >
-                  Копия
-                </button>
-              </div>
-            </div>
-            
-            {/* Tags */}
-            <div>
-              <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
-                Теги
-              </label>
-              <div className="flex gap-1.5">
-                <input
-                  type="text"
-                  value={(video.publishing.tags || []).join(', ')}
-                  readOnly
-                  className="flex-1 bg-[#0d0d14] border border-[#27272f] rounded px-2 py-1 text-xs text-white"
-                />
-                <button
-                  type="button"
-                  onClick={() => copyToClipboard((video.publishing.tags || []).join(', '), 'Теги')}
-                  className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2 py-1 rounded transition-colors"
-                >
-                  Копия
-                </button>
-              </div>
-            </div>
+            )}
           </div>
         )}
         

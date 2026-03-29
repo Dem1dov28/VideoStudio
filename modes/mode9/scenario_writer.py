@@ -1,9 +1,16 @@
 """
-Mode 9 Scenario Writer — Vehicle Building Timelapse.
+Mode 9 Scenario Writer — Vehicle Assembly Timelapse.
 
 Generates sequential assembly stages for vehicle construction timelapse video.
 Each stage represents a transformation from state A to state B.
-Vehicles: Airplane, Car, Tractor
+
+Enhancements based on Mode8 improvements:
+- Detailed vehicle descriptions with visual details and typical features
+- Enhanced locations with atmosphere, dynamic features, camera recommendations
+- Fixed camera specifications for consistent drone/static views
+- State tracking flags for assembly progression validation
+- Structured visual prompts with consistency rules
+- Support for 5-8 assembly stages with proper sequences
 """
 
 from __future__ import annotations
@@ -14,9 +21,138 @@ from typing import Any
 from loguru import logger
 from pydantic import BaseModel
 
+from modes.mode9.architectural_variations import (
+    get_vehicle_variation,
+    build_varied_visual_prompt,
+)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
-# VEHICLE TYPES
+# CAMERA SPECIFICATIONS (Fixed for consistency across all stages)
+# ═══════════════════════════════════════════════════════════════════════════
+
+CAMERA_SPECS: dict[str, dict[str, str]] = {
+    "static_side_elevated": {
+        "name": "static side elevated view",
+        "description": "camera positioned at 90-degree side angle, 20 meters distance, 8 meters elevation, capturing full vehicle profile",
+        "lens": "35mm equivalent, moderate wide angle",
+        "height": "8-10 meters above ground",
+        "angle": "15-degree downward angle",
+        "distance": "20-25 meters from vehicle",
+        "framing": "vehicle occupies 70% of frame horizontally, full length visible",
+        "movement": "STATIC - no camera movement between stages",
+        "best_for": ["factory", "hangar", "construction_site", "industrial_zone"],
+    },
+    "static_front_quarter": {
+        "name": "static front three-quarter view",
+        "description": "camera positioned at 45-degree front angle, 25 meters distance, 6 meters elevation, capturing front and side",
+        "lens": "35mm equivalent, moderate wide angle",
+        "height": "6-8 meters above ground",
+        "angle": "10-degree downward angle",
+        "distance": "25-30 meters from vehicle",
+        "framing": "vehicle occupies 65% of frame, front and side visible",
+        "movement": "STATIC - no camera movement between stages",
+        "best_for": ["factory", "hangar", "parking_lot", "building_roof"],
+    },
+    "drone_elevated": {
+        "name": "elevated drone overview",
+        "description": "drone positioned at 30-degree angle, 40 meters distance, 20 meters elevation, bird's eye perspective",
+        "lens": "28mm equivalent, wide angle",
+        "height": "20-25 meters above ground",
+        "angle": "30-degree downward angle",
+        "distance": "40-50 meters from vehicle",
+        "framing": "vehicle occupies 50% of frame, surroundings visible",
+        "movement": "STATIC - no camera movement between stages",
+        "best_for": ["empty_field", "desert", "ocean_coast", "mountain_valley", "construction_site"],
+    },
+    "ground_level_pan": {
+        "name": "ground level panoramic view",
+        "description": "camera at ground level, 30 meters distance, capturing vehicle against landscape backdrop",
+        "lens": "50mm equivalent, standard",
+        "height": "2-3 meters above ground",
+        "angle": "5-degree upward angle",
+        "distance": "30-40 meters from vehicle",
+        "framing": "vehicle occupies 60% of frame, landscape background prominent",
+        "movement": "STATIC - no camera movement between stages",
+        "best_for": ["empty_field", "desert", "mountain_valley", "snowy_plain"],
+    },
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# LOCATION DYNAMIC FEATURES (Interactive elements for each location type)
+# ═══════════════════════════════════════════════════════════════════════════
+
+LOCATION_DYNAMIC_FEATURES: dict[str, dict[str, Any]] = {
+    "factory": {
+        "environment_interaction": "assembly line and conveyor systems visible, robotic arms in background",
+        "visible_elements": ["конвейерная лента", "промышленные роботы", "подъёмные краны", "освещение цеха", "организованные стеллажи"],
+        "assembly_context": "professional factory environment with organized workflow",
+        "camera_recommendation": "static_side_elevated",
+        "full_vehicle_visibility": "vehicle fully visible from elevated side angle, factory floor extends behind",
+        "dynamic_description": "сборка происходит в современном цеху с конвейером и роботами на заднем плане",
+    },
+    "hangar": {
+        "environment_interaction": "high ceiling with metal trusses, specialized aviation equipment, runway visible through doors",
+        "visible_elements": ["металлические фермы потолка", "авиационное оборудование", "взлётная полоса вдали", "освещение через окна", "инструменты на стенах"],
+        "assembly_context": "aviation hangar with massive space for large vehicle assembly",
+        "camera_recommendation": "static_front_quarter",
+        "full_vehicle_visibility": "vehicle fully visible with hangar depth showing behind",
+        "dynamic_description": "сборка в просторном авиационном ангаре с видом на взлётную полосу",
+    },
+    "shipyard": {
+        "environment_interaction": "dry dock or water visible, massive cranes, other vessels in background, maritime atmosphere",
+        "visible_elements": ["сухой док или вода", "портальные краны", "другие суда", "причал", "морской горизонт"],
+        "assembly_context": "maritime shipyard with water access and heavy lifting equipment",
+        "camera_recommendation": "drone_elevated",
+        "full_vehicle_visibility": "vessel fully visible from elevated angle with water/dock in background",
+        "dynamic_description": "сборка на судостроительной верфи с видом на воду и портовые краны",
+    },
+    "construction_site": {
+        "environment_interaction": "tower cranes, building materials, unfinished structures, urban skyline in distance",
+        "visible_elements": ["башенные краны", "строительные материалы", "незаконченные конструкции", "городской силуэт", "строительная техника"],
+        "assembly_context": "active construction site with ongoing building work",
+        "camera_recommendation": "drone_elevated",
+        "full_vehicle_visibility": "vehicle fully visible with construction activity in background",
+        "dynamic_description": "сборка на активной строительной площадке с кранами и городом на заднем плане",
+    },
+    "empty_field": {
+        "environment_interaction": "open sky, grass field, distant trees, natural horizon",
+        "visible_elements": ["открытое небо", "зелёная трава", "деревья на горизонте", "холмы", "естественное освещение"],
+        "assembly_context": "open outdoor space with natural surroundings",
+        "camera_recommendation": "ground_level_pan",
+        "full_vehicle_visibility": "vehicle fully visible against open landscape",
+        "dynamic_description": "сборка на открытом поле с панорамным видом на природу и горизонт",
+    },
+    "ocean_coast": {
+        "environment_interaction": "waves, beach, rocks, seagulls, ocean horizon, salty breeze atmosphere",
+        "visible_elements": ["волны", "песчаный пляж", "скалы", "чайки", "океанский горизонт", "прибой"],
+        "assembly_context": "coastal location with maritime atmosphere",
+        "camera_recommendation": "drone_elevated",
+        "full_vehicle_visibility": "vehicle fully visible with ocean and beach in background",
+        "dynamic_description": "сборка на побережье океана с видом на волны и пляж",
+    },
+    "desert": {
+        "environment_interaction": "sand dunes, sparse vegetation, bright sun, sharp shadows, extreme heat atmosphere",
+        "visible_elements": ["песчаные дюны", "кактусы", "резкие тени", "яркое солнце", "пустынный пейзаж"],
+        "assembly_context": "desert environment with extreme conditions",
+        "camera_recommendation": "drone_elevated",
+        "full_vehicle_visibility": "vehicle fully visible against desert landscape",
+        "dynamic_description": "сборка в пустынной местности среди песчаных дюн и яркого солнца",
+    },
+    "mountain_valley": {
+        "environment_interaction": "mountain peaks, valley floor, river, pine forest, majestic scenery",
+        "visible_elements": ["горные пики", "долина", "река", "хвойный лес", "величественные виды"],
+        "assembly_context": "mountain valley with dramatic elevation and scenery",
+        "camera_recommendation": "ground_level_pan",
+        "full_vehicle_visibility": "vehicle fully visible with mountains towering behind",
+        "dynamic_description": "сборка в горной долине с величественными пиками и хвойным лесом",
+    },
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# VEHICLE TYPES (Enhanced with detailed descriptions)
 # ═══════════════════════════════════════════════════════════════════════════
 
 VEHICLE_TYPES: dict[str, dict[str, Any]] = {
@@ -24,8 +160,10 @@ VEHICLE_TYPES: dict[str, dict[str, Any]] = {
     "airplane_passenger": {
         "name": "пассажирский самолёт",
         "name_en": "passenger airplane",
-        "visual": "пассажирский самолёт, металлический фюзеляж, крылья с закрылками, хвостовое оперение, реактивные двигатели под крыльями",
-        "materials": "алюминий, титан, композитные материалы, сталь",
+        "description": "Крупное пассажирское воздушное судно для коммерческих авиаперевозок. Многочисленные иллюминаторы вдоль фюзеляжа, мощные реактивные двигатели под крыльями, хвостовое оперение с логотипом авиакомпании. Исторически важный тип транспорта соединяющий континенты.",
+        "visual": "пассажирский самолёт с металлическим фюзеляжем, крылья с закрылками и элеронами, хвостовое оперение с килем и стабилизаторами, четыре или два реактивных двигателя под крыльями, множество иллюминаторов в два ряда",
+        "materials": "авиационный алюминий, титановые сплавы, композитные материалы, высокопрочная сталь, закалённое стекло иллюминаторов",
+        "typical_features": ["многочисленные иллюминаторы", "реактивные двигатели", "хвостовое оперение", "шасси с множеством колёс", "кабина пилотов", "грузовой отсек"],
         "setting": "авиационный ангар, взлётная полоса на заднем плане",
         "setting_en": "aviation hangar, runway in background",
     },
@@ -252,24 +390,30 @@ VEHICLE_TYPES: dict[str, dict[str, Any]] = {
     "industrial_robot": {
         "name": "промышленный робот",
         "name_en": "industrial robot",
-        "visual": "робот-манипулятор, суставы, захват, панель управления",
-        "materials": "алюминий, сервомоторы, электроника",
+        "description": "Промышленный робот-манипулятор для автоматизации производственных процессов. Многосуставная рука с захватом, панель управления, точное позиционирование. Будущее автоматизации производства.",
+        "visual": "промышленный робот-манипулятор с несколькими суставами руки, различные типы захватов на конце, панель управления с дисплеем, основание на платформе или подвешенный к потолку, кабели питания",
+        "materials": "алюминиевые сплавы корпуса, сервомоторы в суставах, электронные контроллеры, редукторы, гибкие кабели",
+        "typical_features": ["суставы руки", "захват", "панель управления", "сервомоторы", "точное позиционирование", "программируемый"],
         "setting": "завод роботов, автоматизированный цех",
         "setting_en": "robotics factory, automated workshop",
     },
     "oil_rig": {
         "name": "буровая установка",
         "name_en": "oil rig",
-        "visual": "нефтяная вышка, буровая колонна, насосы, платформы",
-        "materials": "сталь, специальные сплавы",
+        "description": "Нефтяная буровая вышка для добычи нефти и газа. Высокая башня с буровой колонной, насосы, платформы. Индустриальный гигант добывающей отрасли.",
+        "visual": "высокая нефтяная вышка с буровой колонной и талевой системой, насосные установки, платформы для обслуживания, трубопроводы, резервуары, жилые модули для персонала",
+        "materials": "высокопрочная сталь конструкции, специальные сплавы для агрессивной среды, буровые трубы, гидравлические системы",
+        "typical_features": ["буровая башня", "буровая колонна", "насосы", "платформы", "трубопроводы", "резервуары"],
         "setting": "нефтяное месторождение, буровая площадка",
         "setting_en": "oil field, drilling site",
     },
     "solar_farm": {
         "name": "солнечная панельная ферма",
         "name_en": "solar panel farm",
-        "visual": "солнечные панели на металлических опорах, инверторы, кабели",
-        "materials": "кремний, алюминий, стекло, медь",
+        "description": "Солнечная электростанция с множеством фотоэлектрических панелей на металлических опорах. Инверторы, кабели, система отслеживания солнца. Чистая зелёная энергия.",
+        "visual": "ряды солнечных панелей на металлических опорах под углом к солнцу, инверторные станции, кабельные лотки, система отслеживания солнца, трансформаторная подстанция, ограждение",
+        "materials": "кремниевые панели, алюминиевые опоры, закалённое стекло, медные кабели, инверторы, бетонные фундаменты",
+        "typical_features": ["солнечные панели", "металлические опоры", "инверторы", "кабели", "отслеживание солнца", "трансформатор"],
         "setting": "солнечная электростанция, пустыня",
         "setting_en": "solar power plant, desert",
     },
@@ -277,159 +421,257 @@ VEHICLE_TYPES: dict[str, dict[str, Any]] = {
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# LOCATIONS / SETTINGS
+# LOCATIONS / SETTINGS (Enhanced with descriptions, atmosphere, dynamic features)
 # ═══════════════════════════════════════════════════════════════════════════
+
+# Note: LOCATION_DYNAMIC_FEATURES is defined at the end of this file
+# and imported here to avoid circular reference
 
 LOCATIONS: dict[str, dict[str, Any]] = {
     # 🏗️ ИНДУСТРИАЛЬНЫЕ
     "construction_site": {
         "name": "строительная площадка",
         "name_en": "construction site",
-        "visual": "строительная площадка, краны, строительные материалы, техника",
-        "background": "небоскрёбы на горизонте, стройматериалы, рабочие",
-        "background_en": "skyscrapers on horizon, construction materials, workers",
+        "description": "Активная строительная площадка с башенными кранами, строительными материалами и техникой. Городской пейзаж на заднем плане, динамичная атмосфера постоянного движения.",
+        "visual": "строительная площадка с бетонным основанием, башенные краны на фоне, строительные материалы аккуратно сложены, техника для работы, ограждение по периметру",
+        "background": "небоскрёбы на горизонте, другие строящиеся объекты, городской пейзаж, строительная техника в работе",
+        "background_en": "skyscrapers on horizon, other construction projects, cityscape, construction machinery at work",
+        "atmosphere": "динамичная, строительная, промышленная, активная",
+        "typical_elements": ["башенные краны", "строительные материалы", "техника", "ограждение", "бетонное основание", "рабочие", "городской силуэт"],
+        "camera_recommendation": "drone_elevated",
+        "dynamic_features": {},  # Will be populated after LOCATION_DYNAMIC_FEATURES is defined
     },
     "factory": {
         "name": "завод / производственный цех",
         "name_en": "factory / production workshop",
-        "visual": "современный сборочный цех, конвейерная линия, промышленные роботы",
-        "background": "роботы-манипуляторы, конвейер, запчасти на полках",
-        "background_en": "robotic arms, conveyor belt, parts on shelves",
+        "description": "Современный сборочный цех с конвейерной линией, промышленными роботами-манипуляторами и организованным рабочим пространством. Чистая промышленная среда с хорошим освещением.",
+        "visual": "современный сборочный цех с высоким потолком, конвейерная линия проходит через центр, промышленные роботы на постах, стеллажи с запчастями, яркое освещение",
+        "background": "роботы-манипуляторы на заднем плане, конвейерная лента, запчасти на стеллажах, промышленное оборудование, рабочие в униформе",
+        "background_en": "robotic arms in background, conveyor belt, parts on shelves, industrial equipment, workers in uniform",
+        "atmosphere": "промышленная, организованная, технологичная, чистая",
+        "typical_elements": ["конвейер", "роботы", "стеллажи", "освещение", "рабочие", "оборудование", "организованное пространство"],
+        "camera_recommendation": "static_side_elevated",
+        "dynamic_features": {},
     },
     "shipyard": {
         "name": "верфь",
         "name_en": "shipyard",
-        "visual": "судостроительная верфь, сухие доки, стапели, подъёмные краны",
-        "background": "корабли на разных стадиях сборки, морская вода",
-        "background_en": "ships at various stages, sea water",
+        "description": "Судостроительная верфь с сухими доками, стапелями и мощными подъёмными кранами. Морская вода, промышленная атмосфера, масштабные операции по сборке судов.",
+        "visual": "судостроительная верфь с сухим доком или водой, массивные портальные краны, стапели для сборки, корпуса судов на разных стадиях, промышленные здания верфи",
+        "background": "корабли и суда на разных стадиях сборки, морская вода в доке, портовые краны, горизонт с морем",
+        "background_en": "ships at various assembly stages, sea water in dock, port cranes, horizon with sea",
+        "atmosphere": "морская, промышленная, масштабная, историческая",
+        "typical_elements": ["сухой док", "краны", "корпуса судов", "вода", "стапели", "верфские здания", "причал"],
+        "camera_recommendation": "drone_elevated",
+        "dynamic_features": {},
     },
     "hangar": {
         "name": "авиационный ангар",
         "name_en": "aviation hangar",
-        "visual": "большой промышленный ангар, высокий потолок, металлические фермы",
-        "background": "инструменты на стенах, подъёмные краны, оборудование",
-        "background_en": "tools on walls, overhead cranes, equipment",
+        "description": "Большой промышленный ангар с высоким потолком, металлическими фермами и специализированным оборудованием для авиации. Просторное помещение для сборки и обслуживания летательных аппаратов.",
+        "visual": "большой промышленный ангар с высоким потолком и металлическими фермами, массивные ворота, подъёмные краны под потолком, инструменты на стенах, яркое освещение",
+        "background": "инструменты на стенах, подъёмные краны, авиационное оборудование, взлётная полоса видна через открытые ворота, другие летательные аппараты",
+        "background_en": "tools on walls, overhead cranes, aviation equipment, runway visible through open doors, other aircraft",
+        "atmosphere": "просторная, промышленная, специализированная, точная",
+        "typical_elements": ["металлические фермы", "высокий потолок", "краны", "инструменты", "оборудование", "ворота", "освещение"],
+        "camera_recommendation": "static_front_quarter",
+        "dynamic_features": {},
     },
     "industrial_zone": {
         "name": "индустриальная зона",
         "name_en": "industrial zone",
-        "visual": "промышленная зона, заводы, трубы, склады",
-        "background": "дымящие трубы, грузовики, краны",
-        "background_en": "smoking pipes, trucks, cranes",
+        "description": "Промышленная зона с заводами, дымящими трубами и складами. Интенсивная производственная деятельность, грузовики, краны. Сердце промышленности.",
+        "visual": "промышленная зона с заводскими корпусами, дымящие трубы на фоне, склады, грузовики на территории, краны, железнодорожные пути",
+        "background": "дымящие трубы заводов, грузовики на манёврах, погрузочные краны, железнодорожные вагоны, промышленные здания",
+        "background_en": "smoking factory pipes, trucks maneuvering, loading cranes, railway cars, industrial buildings",
+        "atmosphere": "промышленная, активная, производственная, масштабная",
+        "typical_elements": ["заводы", "трубы", "склады", "грузовики", "краны", "железная дорога", "промышленные здания"],
+        "camera_recommendation": "static_side_elevated",
+        "dynamic_features": {},
     },
     # 🌿 ПРИРОДА
     "empty_field": {
         "name": "пустое поле",
         "name_en": "empty field",
-        "visual": "открытое поле, зелёная трава, чистое небо",
-        "background": "деревья на горизонте, холмы",
-        "background_en": "trees on horizon, hills",
+        "description": "Открытое поле с зелёной травой и чистым небом. Простор, естественное освещение, горизонт с деревьями. Идеально для демонстрации крупной техники в естественных условиях.",
+        "visual": "открытое поле с зелёной травой, ровная поверхность для сборки, чистое голубое небо, естественное солнечное освещение, далёкий горизонт",
+        "background": "деревья на горизонте, холмы вдали, облака в небе, естественный пейзаж, возможно сельскохозяйственные поля",
+        "background_en": "trees on horizon, hills in distance, clouds in sky, natural landscape, possibly agricultural fields",
+        "atmosphere": "открытая, естественная, просторная, свободная",
+        "typical_elements": ["трава", "небо", "горизонт", "деревья", "холмы", "солнце", "пространство"],
+        "camera_recommendation": "ground_level_pan",
+        "dynamic_features": {},
     },
     "forest_clearing": {
         "name": "лесная поляна",
         "name_en": "forest clearing",
-        "visual": "поляна в лесу, деревья вокруг, естественное освещение",
-        "background": "высокие деревья, кустарники",
-        "background_en": "tall trees, bushes",
+        "description": "Поляна в лесу с деревьями по периметру и естественным освещением. Уединённое место для сборки, гармония с природой, свежий воздух.",
+        "visual": "поляна в лесу с ровной площадкой для сборки, высокие деревья окружают поляну по периметру, естественное освещение сквозь кроны, зелёная трава",
+        "background": "высокие деревья по краям поляны, кустарники, лесная чаща, пение птиц, естественная тишина",
+        "background_en": "tall trees at clearing edges, bushes, forest thicket, birdsong, natural silence",
+        "atmosphere": "уединённая, природная, тихая, свежая",
+        "typical_elements": ["деревья", "поляна", "трава", "кустарники", "лес", "природа", "тишина"],
+        "camera_recommendation": "ground_level_pan",
+        "dynamic_features": {},
     },
     "desert": {
         "name": "пустыня",
         "name_en": "desert",
-        "visual": "песчаная пустыня, дюны, яркое солнце",
-        "background": "песчаные холмы, кактусы",
-        "background_en": "sand dunes, cacti",
+        "description": "Песчаная пустыня с дюнами и ярким солнцем. Резкие тени, экстремальные условия, минимум растительности. Испытание техники в суровых условиях.",
+        "visual": "песчаная пустыня с дюнами, ровная площадка для сборки утрамбована, яркое солнце создаёт резкие тени, сухой климат, кактусы и редкие кустарники",
+        "background": "песчаные дюны на горизонте, редкие кактусы, яркое солнце, голубое небо без облаков, сухой воздух",
+        "background_en": "sand dunes on horizon, rare cacti, bright sun, cloudless blue sky, dry air",
+        "atmosphere": "экстремальная, яркая, безмолвная, сухая",
+        "typical_elements": ["песок", "дюны", "солнце", "кактусы", "тень", "жара", "пустынный пейзаж"],
+        "camera_recommendation": "drone_elevated",
+        "dynamic_features": {},
     },
     "mountain_valley": {
         "name": "горная долина",
         "name_en": "mountain valley",
-        "visual": "долина между горами, скалистые вершины, река",
-        "background": "горные пики, облака",
-        "background_en": "mountain peaks, clouds",
+        "description": "Долина между горами со скалистыми вершинами и возможно рекой. Чистый воздух, величественные пейзажи, ощущение масштаба и величия природы.",
+        "visual": "долина между горами с ровной площадкой для сборки, скалистые вершины возвышаются по сторонам, возможно река или ручей, хвойный лес на склонах",
+        "background": "высокие горные пики со снегом, облака окутывают вершины, хвойный лес на склонах, чистый воздух, величественные виды",
+        "background_en": "high mountain peaks with snow, clouds around summits, coniferous forest on slopes, clean air, majestic views",
+        "atmosphere": "величественная, чистая, вдохновляющая, свежая",
+        "typical_elements": ["горы", "пики", "долина", "река", "лес", "скалы", "облака"],
+        "camera_recommendation": "ground_level_pan",
+        "dynamic_features": {},
     },
     "snowy_plain": {
         "name": "снежная равнина",
         "name_en": "snowy plain",
-        "visual": "заснеженная равнина, белый снег, холодное небо",
-        "background": "сугробы, ледяные образования",
-        "background_en": "snowdrifts, ice formations",
+        "description": "Заснеженная равнина с белым снегом и холодным небом. Зимние условия, сугробы, ледяные образования. Красота зимнего пейзажа.",
+        "visual": "заснеженная равнина с утрамбованной площадкой для сборки, белый снег покрывает всё вокруг, холодное зимнее небо, возможны сугробы по краям",
+        "background": "сугробы, ледяные образования, голые деревья на горизонте, серое зимнее небо, снежный пейзаж",
+        "background_en": "snowdrifts, ice formations, bare trees on horizon, gray winter sky, snowy landscape",
+        "atmosphere": "холодная, чистая, тихая, зимняя",
+        "typical_elements": ["снег", "сугробы", "лед", "холод", "зима", "белый пейзаж", "небо"],
+        "camera_recommendation": "ground_level_pan",
+        "dynamic_features": {},
     },
     # 🌆 УРБАН
     "city_outskirts": {
         "name": "городская окраина",
         "name_en": "city outskirts",
-        "visual": "окраина города, здания на горизонте, дороги",
-        "background": "городской силуэт, шоссе",
-        "background_en": "city skyline, highway",
+        "description": "Окраина города с зданиями на горизонте и дорогами. Переходная зона между городом и природой, инфраструктура, развитие.",
+        "visual": "окраина города с открытой площадкой для сборки, здания виднеются на горизонте, дороги и инфраструктура, застройка вдали",
+        "background": "городской силуэт на горизонте, шоссе с движением, новостройки, промышленные объекты, развивающаяся инфраструктура",
+        "background_en": "city skyline on horizon, highway with traffic, new buildings, industrial facilities, developing infrastructure",
+        "atmosphere": "переходная, развивающаяся, городская, открытая",
+        "typical_elements": ["город", "здания", "дороги", "инфраструктура", "шоссе", "новостройки", "горизонт"],
+        "camera_recommendation": "drone_elevated",
+        "dynamic_features": {},
     },
     "parking_lot": {
         "name": "парковка / пустая площадка",
         "name_en": "parking lot / empty area",
-        "visual": "асфальтированная площадка, разметка, ограждения",
-        "background": "зданий поблизости, фонарные столбы",
-        "background_en": "nearby buildings, lamp posts",
+        "description": "Асфальтированная площадка с разметкой и ограждениями. Организованное пространство в городе, удобство доступа, инфраструктура.",
+        "visual": "асфальтированная площадка с разметкой парковочных мест, ограждения по периметру, фонарные столбы, ровная поверхность для сборки",
+        "background": "здания поблизости, фонарные столбы, дорожные знаки, городская инфраструктура, возможно другие припаркованные машины",
+        "background_en": "nearby buildings, lamp posts, road signs, urban infrastructure, possibly other parked vehicles",
+        "atmosphere": "городская, организованная, функциональная, доступная",
+        "typical_elements": ["асфальт", "разметка", "ограждения", "фонари", "здания", "город", "инфраструктура"],
+        "camera_recommendation": "static_front_quarter",
+        "dynamic_features": {},
     },
     "abandoned_industrial": {
         "name": "заброшенный промышленный объект",
         "name_en": "abandoned industrial site",
-        "visual": "старый заброшенный завод, ржавые конструкции, разбитые окна",
-        "background": "разрушенные здания, старый металл",
-        "background_en": "destroyed buildings, old metal",
+        "description": "Старый заброшенный завод с ржавыми конструкциями и разбитыми окнами. Постапокалиптическая атмосфера, ностальгия, заброшенность.",
+        "visual": "старый заброшенный заводской корпус с ржавыми металлическими конструкциями, разбитыми окнами, зарослями, обветшалые здания",
+        "background": "разрушенные здания, ржавый металл, разбитое стекло, заросли травы и кустов, следы былой промышленной мощи",
+        "background_en": "destroyed buildings, rusty metal, broken glass, overgrown grass and bushes, traces of former industrial power",
+        "atmosphere": "заброшенная, постапокалиптическая, ностальгическая, таинственная",
+        "typical_elements": ["ржавчина", "разрушения", "заброшенность", "заросли", "старое оборудование", "разбитые окна"],
+        "camera_recommendation": "static_side_elevated",
+        "dynamic_features": {},
     },
     "building_roof": {
         "name": "крыша здания",
         "name_en": "building roof",
-        "visual": "плоская крыша здания, парапет, вид на город",
-        "background": "городской пейзаж, небо",
-        "background_en": "cityscape, sky",
+        "description": "Плоская крыша здания с парапетом и видом на город. Уникальное городское пространство, панорама, высота.",
+        "visual": "плоская крыша высотного здания с парапетом по краям, ровная поверхность для сборки, вентиляционные выходы, антенны",
+        "background": "панорама города вокруг, небоскрёбы, улицы внизу, небо над головой, городская застройка",
+        "background_en": "city panorama around, skyscrapers, streets below, sky overhead, urban development",
+        "atmosphere": "возвышенная, городская, панорамная, эксклюзивная",
+        "typical_elements": ["крыша", "парапет", "вид на город", "небоскрёбы", "панорама", "высота", "небо"],
+        "camera_recommendation": "static_front_quarter",
+        "dynamic_features": {},
     },
     # 🌊 УНИКАЛЬНЫЕ
     "ocean_coast": {
         "name": "побережье океана",
         "name_en": "ocean coast",
-        "visual": "берег океана, волны, пляж, скалы",
-        "background": "океанский горизонт, чайки",
-        "background_en": "ocean horizon, seagulls",
+        "description": "Берег океана с волнами, пляжем и скалами. Морской горизонт, чайки, свежий бриз. Свобода и широта океанских просторов.",
+        "visual": "берег океана с песчаным пляжем или скалистым побережьем, ровная площадка для сборки над уровнем воды, волны океана, яркое солнце",
+        "background": "бескрайний океанский горизонт, волны с белой пеной, чайки в небе, скалы по берегу, морской бриз",
+        "background_en": "endless ocean horizon, waves with white foam, seagulls in sky, coastal rocks, sea breeze",
+        "atmosphere": "свободная, морская, живописная, освежающая",
+        "typical_elements": ["океан", "волны", "пляж", "скалы", "чайки", "горизонт", "солнце", "бриз"],
+        "camera_recommendation": "drone_elevated",
+        "dynamic_features": {},
     },
     "floating_platform": {
         "name": "плавучая платформа",
         "name_en": "floating platform",
-        "visual": "большая плавучая платформа, понтоны, крепления",
-        "background": "вода, береговая линия",
-        "background_en": "water, shoreline",
+        "description": "Большая плавучая платформа с понтонами и креплениями на воде. Морская или речная база для сборки, инженерное решение.",
+        "visual": "большая плавучая платформа на понтонах, ровная площадка для сборки, крепления и швартовые устройства, ограждения по периметру",
+        "background": "вода вокруг платформы, береговая линия вдали, возможно другие суда или платформы, открытая водная поверхность",
+        "background_en": "water around platform, shoreline in distance, possibly other vessels or platforms, open water surface",
+        "atmosphere": "морская, инженерная, открытая, уникальная",
+        "typical_elements": ["платформа", "понтоны", "вода", "берег", "крепления", "ограждения", "открытое пространство"],
+        "camera_recommendation": "drone_elevated",
+        "dynamic_features": {},
     },
     "island": {
         "name": "остров",
         "name_en": "island",
-        "visual": "остров посреди воды, пляж, растительность",
-        "background": "океан, другие острова",
-        "background_en": "ocean, other islands",
+        "description": "Остров посреди воды с пляжем и растительностью. Изолированное место, тропическая или умеренная атмосфера, уникальная локация.",
+        "visual": "остров с ровной площадкой для сборки, песчаный пляж по периметру, тропическая или лесная растительность, окружён водой",
+        "background": "вода океана или моря вокруг, другие острова на горизонте, небо, природная растительность, пальмы или деревья",
+        "background_en": "ocean or sea water around, other islands on horizon, sky, natural vegetation, palm trees or trees",
+        "atmosphere": "изолированная, тропическая, уникальная, природная",
+        "typical_elements": ["остров", "вода", "пляж", "растительность", "пальмы", "горизонт", "изоляция"],
+        "camera_recommendation": "drone_elevated",
+        "dynamic_features": {},
     },
     "quarry": {
         "name": "карьер",
         "name_en": "quarry",
-        "visual": "открытый карьер, скальные породы, техника",
-        "background": "скальные стены, щебень",
-        "background_en": "rock walls, gravel",
+        "description": "Открытый карьер со скальными породами и техникой. Добывающая промышленность, масштабные земляные работы, сырьевая база.",
+        "visual": "открытый карьер с террасами выработки, скальные породы, площадка для сборки на одном из ярусов, карьерная техника, конвейеры",
+        "background": "скальные стены карьера, террасы выработки, щебень и порода, карьерная техника в работе, промышленная инфраструктура",
+        "background_en": "quarry rock walls, mining terraces, gravel and rock, quarry equipment at work, industrial infrastructure",
+        "atmosphere": "промышленная, масштабная, добывающая, сырьевая",
+        "typical_elements": ["карьер", "скалы", "террасы", "техника", "порода", "щебень", "промышленность"],
+        "camera_recommendation": "drone_elevated",
+        "dynamic_features": {},
     },
     "port": {
         "name": "порт",
         "name_en": "port",
-        "visual": "морской порт, причалы, контейнеры, краны",
-        "background": "грузовые суда, портовые сооружения",
-        "background_en": "cargo ships, port facilities",
+        "description": "Морской порт с причалами, контейнерами и кранами. Логистический узел, грузооборот, международные перевозки. Ворота мира.",
+        "visual": "морской порт с бетонными причалами, контейнерные площадки, портовые краны, площадка для сборки на причале или терминале",
+        "background": "грузовые суда у причалов, портовые краны в работе, контейнеры, складские здания, морская вода, горизонт",
+        "background_en": "cargo ships at berths, port cranes at work, containers, warehouse buildings, sea water, horizon",
+        "atmosphere": "логистическая, морская, активная, международная",
+        "typical_elements": ["причалы", "контейнеры", "краны", "суда", "порт", "вода", "грузоперевозки"],
+        "camera_recommendation": "drone_elevated",
+        "dynamic_features": {},
     },
 }
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ASSEMBLY STAGES (Sequential Transformations)
+# ASSEMBLY STAGES (Sequential Transformations with State Tracking)
 # ═══════════════════════════════════════════════════════════════════════════
 
 ASSEMBLY_STAGES: dict[str, dict[str, Any]] = {
     "empty_space": {
         "name": "пустое пространство",
         "name_en": "empty space",
-        "visual": "пустая сборочная площадка, чистый бетонный пол, инструменты и оборудование на заднем плане",
+        "visual": "пустая сборочная площадка, чистый бетонный пол или ровная поверхность, инструменты и оборудование на заднем плане, подготовленное пространство",
         "start_state": "пустое пространство",
         "start_state_en": "empty space",
         "end_state": "подготовленная площадка",
@@ -444,11 +686,19 @@ ASSEMBLY_STAGES: dict[str, dict[str, Any]] = {
         "time_of_day": "morning",
         "is_peak_moment": False,
         "next": "frame_chassis",
+        # State tracking flags
+        "has_frame": False,
+        "has_engine": False,
+        "has_body": False,
+        "has_wheels": False,
+        "has_interior": False,
+        "has_paint": False,
+        "has_scaffolding": False,
     },
     "frame_chassis": {
         "name": "рамка и шасси",
         "name_en": "frame and chassis",
-        "visual": "металлический каркас, шасси на подъёмниках, видны несущие балки, нет кузова",
+        "visual": "металлический каркас и шасси на подъёмниках, видны несущие балки и рама, нет кузовных панелей, открытая конструкция",
         "start_state": "пустая площадка",
         "start_state_en": "empty area",
         "end_state": "собранное шасси и рама",
@@ -475,11 +725,19 @@ ASSEMBLY_STAGES: dict[str, dict[str, Any]] = {
         "time_of_day": "morning",
         "is_peak_moment": False,
         "next": "engine",
+        # State tracking flags
+        "has_frame": True,
+        "has_engine": False,
+        "has_body": False,
+        "has_wheels": False,
+        "has_interior": False,
+        "has_paint": False,
+        "has_scaffolding": True,
     },
     "engine": {
         "name": "двигатель",
         "name_en": "engine",
-        "visual": "установленный двигатель в отсеке, видны провода и трубки, рама вокруг",
+        "visual": "установленный двигатель в моторном отсеке на шасси, видны провода и трубки подключения, рама вокруг, нет кузовных панелей",
         "start_state": "рамка без двигателя",
         "start_state_en": "frame without engine",
         "end_state": "двигатель установлен",
@@ -506,11 +764,19 @@ ASSEMBLY_STAGES: dict[str, dict[str, Any]] = {
         "time_of_day": "midday",
         "is_peak_moment": True,
         "next": "body_panels",
+        # State tracking flags
+        "has_frame": True,
+        "has_engine": True,
+        "has_body": False,
+        "has_wheels": False,
+        "has_interior": False,
+        "has_paint": False,
+        "has_scaffolding": True,
     },
     "body_panels": {
         "name": "кузовные панели",
         "name_en": "body panels",
-        "visual": "кузовные панели на месте, двери, крылья, крыша — всё ещё без покраски, видны швы",
+        "visual": "кузовные панели установлены на раму, двери, крылья, крыша на месте — всё ещё без покраски, видны сварные швы и стыки",
         "start_state": "шасси с двигателем",
         "start_state_en": "chassis with engine",
         "end_state": "собранный кузов без покраски",
@@ -537,11 +803,19 @@ ASSEMBLY_STAGES: dict[str, dict[str, Any]] = {
         "time_of_day": "midday",
         "is_peak_moment": False,
         "next": "wheels",
+        # State tracking flags
+        "has_frame": True,
+        "has_engine": True,
+        "has_body": True,
+        "has_wheels": False,
+        "has_interior": False,
+        "has_paint": False,
+        "has_scaffolding": True,
     },
     "wheels": {
         "name": "колёса",
         "name_en": "wheels",
-        "visual": "колёса установлены на шасси, видны диски и шины, машина стоит на земле",
+        "visual": "колёса установлены на шасси, видны диски и шины, транспортное средство стоит на земле на своих колёсах, кузов собран",
         "start_state": "кузов на опорах",
         "start_state_en": "body on supports",
         "end_state": "колёса установлены",
@@ -568,42 +842,58 @@ ASSEMBLY_STAGES: dict[str, dict[str, Any]] = {
         "time_of_day": "afternoon",
         "is_peak_moment": False,
         "next": "interior",
+        # State tracking flags
+        "has_frame": True,
+        "has_engine": True,
+        "has_body": True,
+        "has_wheels": True,
+        "has_interior": False,
+        "has_paint": False,
+        "has_scaffolding": False,
     },
     "interior": {
-        "name": "салон",
-        "name_en": "interior",
-        "visual": "собранный салон, сиденья установлены, руль на месте, приборная панель, видны детали интерьера",
-        "start_state": "пустой салон",
-        "start_state_en": "empty interior",
-        "end_state": "полностью собранный интерьер",
-        "end_state_en": "fully assembled interior",
-        "action": "сборка салона и установка сидений",
-        "action_en": "assembling interior and seats",
-        "workers": "сборщики устанавливают сиденья, электрики подключают панель, рабочие монтируют обивку",
-        "workers_en": "assemblers installing seats, electricians connecting dashboard, workers mounting upholstery",
-        "machinery": "пневматические отвёртки, подъёмники для сидений, тестеры",
-        "machinery_en": "pneumatic screwdrivers, seat lifts, testers",
+        "name": "установка интерьера",
+        "name_en": "interior installation",
+        "visual": "вид снаружи транспорта с открытыми дверями, рабочие устанавливают сиденья и панель внутри через дверные проёмы, видны детали интерьера",
+        "start_state": "кузов с открытыми проёмами",
+        "start_state_en": "body with open door frames",
+        "end_state": "интерьер установлен, двери открыты",
+        "end_state_en": "interior installed, doors open",
+        "action": "установка сидений и приборной панели через дверные проёмы",
+        "action_en": "installing seats and dashboard through door openings",
+        "workers": "рабочие загружают сиденья через двери, техники подключают проводку снаружи, сборщики крепят элементы",
+        "workers_en": "workers loading seats through doors, technicians connecting wiring from outside, assemblers securing components",
+        "machinery": "подъёмники для доставки сидений, конвейер подачи деталей",
+        "machinery_en": "lifts delivering seats, parts conveyor",
         "micro_actions": [
-            "сиденье устанавливается на крепления",
-            "электрик подключает проводку панели",
-            "руль устанавливается на колонку",
-            "обивка натягивается на детали",
+            "рабочий проносит сиденье через дверь",
+            "техник подключает разъём из дверного проёма",
+            "деталь интерьера подаётся к двери",
+            "работник виден через открытую дверь",
         ],
         "micro_actions_en": [
-            "seat being mounted on brackets",
-            "electrician connecting dashboard wiring",
-            "steering wheel installed on column",
-            "upholstery being stretched over parts",
+            "worker carrying seat through door opening",
+            "technician connecting harness from doorway",
+            "interior part being delivered to door",
+            "worker visible through open door",
         ],
         "build_intensity": "medium",
         "time_of_day": "afternoon",
         "is_peak_moment": False,
         "next": "paint_finish",
+        # State tracking flags
+        "has_frame": True,
+        "has_engine": True,
+        "has_body": True,
+        "has_wheels": True,
+        "has_interior": True,
+        "has_paint": False,
+        "has_scaffolding": False,
     },
     "paint_finish": {
         "name": "покраска и финиш",
         "name_en": "paint and finish",
-        "visual": "полностью готовый транспорт, блестящая окраска, все детали на месте, чистый и отполированный",
+        "visual": "полностью готовое транспортное средство с блестящей окраской, все детали на месте, чистый и отполированный внешний вид, финальный результат",
         "start_state": "некрашеный корпус",
         "start_state_en": "unpainted body",
         "end_state": "полностью готовый продукт",
@@ -630,41 +920,145 @@ ASSEMBLY_STAGES: dict[str, dict[str, Any]] = {
         "time_of_day": "golden_hour",
         "is_peak_moment": True,
         "next": None,
+        # State tracking flags
+        "has_frame": True,
+        "has_engine": True,
+        "has_body": True,
+        "has_wheels": True,
+        "has_interior": True,
+        "has_paint": True,
+        "has_scaffolding": False,
     },
 }
 
-# Последовательности этапов для разного количества стадий
-# УНИВЕРСАЛЬНЫЕ ДЛЯ ВСЕХ ТРАНСПОРТНЫХ СРЕДСТВ
+# ═══════════════════════════════════════════════════════════════════════════
+# STAGE SEQUENCES FOR 5-8 STAGES (Universal for all vehicle types)
+# ═══════════════════════════════════════════════════════════════════════════
 
-# 5 этапов: сокращённая версия
-DEFAULT_STAGE_SEQUENCE = [
-    "empty_space", 
-    "frame_chassis", 
-    "engine", 
-    "body_panels", 
+# 5 stages: abbreviated version (essential assembly steps)
+STAGE_SEQUENCE_5 = [
+    "empty_space",
+    "frame_chassis",
+    "engine",
+    "body_panels",
     "paint_finish"
 ]
 
-# 6 этапов: стандартная версия
-EXTENDED_STAGE_SEQUENCE = [
-    "empty_space", 
-    "frame_chassis", 
-    "engine", 
-    "body_panels", 
-    "wheels", 
+# 6 stages: standard version (adds wheels)
+STAGE_SEQUENCE_6 = [
+    "empty_space",
+    "frame_chassis",
+    "engine",
+    "body_panels",
+    "wheels",
     "paint_finish"
 ]
 
-# 7 этапов: полная версия
-FULL_STAGE_SEQUENCE = [
-    "empty_space", 
-    "frame_chassis", 
-    "engine", 
-    "body_panels", 
-    "wheels", 
-    "interior", 
+# 7 stages: full version (adds interior)
+STAGE_SEQUENCE_7 = [
+    "empty_space",
+    "frame_chassis",
+    "engine",
+    "body_panels",
+    "wheels",
+    "interior",
     "paint_finish"
 ]
+
+# 8 stages: complete version (all steps)
+STAGE_SEQUENCE_8 = [
+    "empty_space",
+    "frame_chassis",
+    "engine",
+    "body_panels",
+    "wheels",
+    "interior",
+    "paint_finish",
+    "paint_finish"  # Duplicate for 8 stages - can be customized
+]
+
+# Legacy sequences for backward compatibility
+DEFAULT_STAGE_SEQUENCE = STAGE_SEQUENCE_5
+EXTENDED_STAGE_SEQUENCE = STAGE_SEQUENCE_6
+FULL_STAGE_SEQUENCE = STAGE_SEQUENCE_7
+
+
+def get_stage_sequence(num_stages: int) -> list[str]:
+    """
+    Get appropriate stage sequence based on number of stages.
+    
+    Args:
+        num_stages: Number of assembly stages (5-8)
+        
+    Returns:
+        List of stage keys in order
+    """
+    sequences = {
+        5: STAGE_SEQUENCE_5,
+        6: STAGE_SEQUENCE_6,
+        7: STAGE_SEQUENCE_7,
+        8: STAGE_SEQUENCE_8,
+    }
+    
+    # Clamp to valid range
+    num_stages = max(5, min(8, num_stages))
+    return sequences.get(num_stages, STAGE_SEQUENCE_5)
+
+
+def validate_stage_sequence(stage_keys: list[str]) -> list[str]:
+    """
+    Validate stage sequence for logical consistency.
+    Ensures no backward progression in assembly state.
+    
+    Args:
+        stage_keys: List of stage keys to validate
+        
+    Returns:
+        Validated list (or raises ValueError if invalid)
+    """
+    if not stage_keys:
+        raise ValueError("Stage sequence cannot be empty")
+    
+    prev_state = {
+        "has_frame": False,
+        "has_engine": False,
+        "has_body": False,
+        "has_wheels": False,
+        "has_interior": False,
+        "has_paint": False,
+    }
+    
+    errors = []
+    
+    for i, stage_key in enumerate(stage_keys):
+        stage = ASSEMBLY_STAGES.get(stage_key)
+        if not stage:
+            errors.append(f"Unknown stage: {stage_key}")
+            continue
+        
+        current_state = {
+            "has_frame": stage.get("has_frame", False),
+            "has_engine": stage.get("has_engine", False),
+            "has_body": stage.get("has_body", False),
+            "has_wheels": stage.get("has_wheels", False),
+            "has_interior": stage.get("has_interior", False),
+            "has_paint": stage.get("has_paint", False),
+        }
+        
+        # Check for backward progression
+        for key in current_state:
+            if prev_state[key] and not current_state[key]:
+                errors.append(
+                    f"Stage {i} ({stage_key}): {key} disappeared! "
+                    f"Was {prev_state[key]}, now {current_state[key]}"
+                )
+        
+        prev_state = current_state
+    
+    if errors:
+        raise ValueError(f"Stage sequence validation failed:\n" + "\n".join(errors))
+    
+    return stage_keys
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -743,39 +1137,115 @@ def select_location(preferred: str | None = None) -> str:
     return "factory"
 
 
-def get_stage_sequence(num_stages: int) -> list[str]:
-    """Get appropriate stage sequence based on number of stages."""
-    if num_stages <= 5:
-        return DEFAULT_STAGE_SEQUENCE[:num_stages]
-    elif num_stages == 6:
-        return EXTENDED_STAGE_SEQUENCE[:num_stages]
-    else:
-        return FULL_STAGE_SEQUENCE[:num_stages]
-
-
 def build_visual_prompt(
     stage_key: str,
     vehicle_type: str,
     location: str,
+    variation: dict[str, Any] | None = None,
 ) -> str:
-    """Build detailed visual prompt for an assembly stage (ALWAYS in English)."""
+    """
+    Build detailed visual prompt for an assembly stage with structured sections.
+    
+    Args:
+        stage_key: Assembly stage key
+        vehicle_type: Vehicle type key
+        location: Location key
+        variation: Optional vehicle variation from architectural_variations
+        
+    Returns:
+        Structured visual prompt with consistency rules
+    """
     stage = ASSEMBLY_STAGES.get(stage_key)
     vehicle = VEHICLE_TYPES.get(vehicle_type, VEHICLE_TYPES["car_modern"])
     loc = LOCATIONS.get(location, LOCATIONS["factory"])
-
-    workers_en = stage.get("workers_en") if stage else None
-    machinery_en = stage.get("machinery_en") if stage else None
-
-    result = f"""{stage['name_en'].capitalize()} stage. {stage['visual']}.
-Vehicle: {vehicle['name_en']} — {vehicle['visual']}.
-Setting: {loc['name_en']} — {loc['visual']}.
-Materials: {vehicle['materials']}.
-Background: {loc['background_en']}."""
+    
+    if not stage:
+        return f"Assembly stage: {stage_key}"
+    
+    # Get camera specification for location
+    camera_key = loc.get("camera_recommendation", "static_side_elevated")
+    camera_spec = CAMERA_SPECS.get(camera_key, CAMERA_SPECS["static_side_elevated"])
+    
+    # Get dynamic features for location
+    dynamic_features = loc.get("dynamic_features", {})
+    dynamic_desc = dynamic_features.get("dynamic_description", f"assembly at {loc['name_en']}")
+    full_visibility = dynamic_features.get("full_vehicle_visibility", "vehicle fully visible in frame")
+    
+    # Build vehicle description (with variation if available)
+    if variation:
+        vehicle_desc = variation.get("visual_description", vehicle.get("description", vehicle["name_en"]))
+        color_info = f"Color: {variation.get('primary_color', '')} ({variation.get('finish', '')})"
+        accent_info = f"Accents: {', '.join(variation.get('accent_features', [])[:3])}"
+    else:
+        vehicle_desc = vehicle.get("description", vehicle["name_en"])
+        color_info = f"Materials: {vehicle.get('materials', 'metal, composite')}"
+        accent_info = f"Features: {', '.join(vehicle.get('typical_features', [])[:3]) if 'typical_features' in vehicle else ''}"
+    
+    # Get workers and machinery
+    workers_en = stage.get("workers_en")
+    machinery_en = stage.get("machinery_en")
+    
+    # Build structured prompt
+    prompt_parts = [
+        f"STAGE: {stage['name_en'].upper()}",
+        f"Scene: {stage['visual']}",
+        "",
+        "━━━ CAMERA SPECIFICATION (FIXED FOR ALL STAGES) ━━━",
+        f"View: {camera_spec['name']}",
+        f"Specification: {camera_spec['description']}",
+        f"Lens: {camera_spec['lens']}",
+        f"Height: {camera_spec['height']}",
+        f"Angle: {camera_spec['angle']}",
+        f"Distance: {camera_spec['distance']}",
+        f"Framing: {camera_spec['framing']}",
+        f"CRITICAL: {camera_spec['movement']} - use EXACT same position for ALL stages",
+        "",
+        "━━━ CURRENT STATE (MUST MATCH THIS EXACTLY) ━━━",
+        f"Frame/Chassis: {'YES - fully assembled frame visible' if stage.get('has_frame') else 'NO - empty space only'}",
+        f"Engine: {'YES - engine installed in bay' if stage.get('has_engine') else 'NO - no engine yet'}",
+        f"Body Panels: {'YES - body assembled (unpainted)' if stage.get('has_body') else 'NO - no body panels'}",
+        f"Wheels: {'YES - wheels mounted on axles' if stage.get('has_wheels') else 'NO - on supports/jacks'}",
+        f"Interior: {'YES - seats and dashboard installed' if stage.get('has_interior') else 'NO - empty cabin'}",
+        f"Paint/Finish: {'YES - painted and polished' if stage.get('has_paint') else 'NO - unpainted/raw metal'}",
+        f"Scaffolding: {'YES - scaffolding/structure around vehicle' if stage.get('has_scaffolding') else 'NO - no scaffolding'}",
+        "",
+        "━━━ VEHICLE CHARACTER ━━━",
+        f"Type: {vehicle['name_en']}",
+        f"Description: {vehicle_desc[:200]}",
+        f"{color_info}",
+        f"{accent_info}",
+        "",
+        "━━━ LOCATION & SETTING ━━━",
+        f"Location: {loc['name_en']}",
+        f"Environment: {loc.get('description', loc['visual'])[:150]}",
+        f"Background: {loc['background_en']}",
+        f"Full Vehicle Visibility: {full_visibility}",
+        f"Dynamic Elements: {dynamic_desc}",
+        "",
+        "━━━ ASSEMBLY ACTIVITY ━━━",
+    ]
+    
     if workers_en:
-        result += f"\nWorkers: {workers_en}."
+        prompt_parts.append(f"Workers: {workers_en}")
     if machinery_en:
-        result += f"\nMachinery: {machinery_en}."
-    return result
+        prompt_parts.append(f"Machinery: {machinery_en}")
+    
+    prompt_parts.extend([
+        f"Action: {stage['action_en']}",
+        "",
+        "━━━ CRITICAL CONSISTENCY RULES (MUST FOLLOW) ━━━",
+        "1. CAMERA: Use EXACT camera specs above for ALL stages - position never changes",
+        "2. FULL VEHICLE: Entire vehicle structure must be visible in EVERY frame",
+        "3. BACKGROUND: Location elements (sky, buildings, landscape) must remain IDENTICAL",
+        "4. VEHICLE POSITION: The vehicle must stay in the EXACT same location on ground",
+        "5. PROGRESSION: Assembly only moves forward - parts appear, never disappear",
+        "6. FRAME RULE: Once frame appears, it must stay consistent in all following stages",
+        "7. ENGINE RULE: Once engine is installed, it remains visible in all stages",
+        "8. BODY RULE: Once body panels are on, they stay on (just get painted)",
+        "9. FINAL STAGE: Complete painted vehicle, all parts installed, NO scaffolding",
+    ])
+    
+    return "\n".join(prompt_parts)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

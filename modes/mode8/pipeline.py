@@ -94,15 +94,17 @@ async def run_mode8_pipeline(
         output_dir=clips_dir,
         session_id=session_id,
         language=language,
+        use_contextual=True,  # Enable new contextual prompt generation
+        generate_preview=True,  # Enable clickbait preview generation
     )
 
     valid_paths = [p for p in video_paths if p and Path(p).exists()]
     if not valid_paths:
-        raise RuntimeError("[Mode8] No keyframe video clips generated")
+        raise RuntimeError("[Mode8] No video clips generated")
 
-    # Keyframe: N images produce N-1 videos (transitions between stages)
-    expected_videos = len(stages) - 1 if len(stages) > 1 else 1
-    logger.success(f"[Mode8] Generated {len(valid_paths)}/{expected_videos} keyframe video clips")
+    # N+1 images produce N videos: N-1 keyframe transitions (between construction stages) + 1 bonus drone shot (construction → aerial showcase)
+    expected_videos = len(stages)  # N-1 keyframe + 1 drone
+    logger.success(f"[Mode8] Generated {len(valid_paths)}/{expected_videos} videos (includes final drone showcase)")
 
     # Step 3: Assemble final video
     await checkpoint(control)
@@ -110,36 +112,74 @@ async def run_mode8_pipeline(
 
     output_path = videos_dir / f"video_{session_id}.mp4"
 
+    # Get preview path from enriched scenario if available
+    preview_path = enriched_scenario.get("preview_path")
+    
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(
+    assembled_path, video_duration = await loop.run_in_executor(
         None,
         functools.partial(
             assemble_mode8_video,
             valid_paths,
             output_path,
             title=title,
+            preview_image_path=preview_path,  # Pass preview to assembler
+            preview_duration=0.3,  # Show preview for 0.3 seconds at end
         ),
     )
 
-    video_path = str(output_path.resolve())
+    video_path = str(assembled_path.resolve())
+    logger.success(f"[Mode8] Final video duration: {video_duration:.2f}s")
 
-    # Step 4: Generate publishing metadata (Title, Description, Hashtags, Tags)
-    logger.info("Step 4/4 - Generating Publishing Metadata...")
-    publishing = await generate_publishing_metadata(
+    # Step 4: Generate clickbait title with real duration + publishing metadata
+    logger.info("Step 4/4 - Generating Clickbait Title + Publishing Metadata (RU & EN)...")
+    
+    from modes.mode8.clickbait_titles import generate_clickbait_title
+    
+    # Generate clickbait title using real video duration
+    clickbait_title_ru = generate_clickbait_title(
+        content_type="house",
+        style_or_type=house_style_name,
+        location=location_name,
+        duration_seconds=video_duration,
+    )
+    logger.success(f"[Mode8] Clickbait title: {clickbait_title_ru}")
+    
+    # Generate full publishing metadata with clickbait title
+    publishing_ru = await generate_publishing_metadata(
         house_style=house_style_name,
         location=location_name,
         stages=stages,
-        title=title,
-        language=language,
+        title=clickbait_title_ru,  # Use clickbait title
+        language="ru",
     )
+    publishing_en = await generate_publishing_metadata(
+        house_style=house_style_name,
+        location=location_name,
+        stages=stages,
+        title=clickbait_title_ru,  # Same title for EN version
+        language="en",
+    )
+    
+    # Combine both versions with clickbait title
+    publishing = {
+        "ru": {
+            "title": clickbait_title_ru,
+            **publishing_ru,  # Merge rest of RU metadata
+        },
+        "en": {
+            "title": clickbait_title_ru,  # Use same Russian clickbait title for EN
+            **publishing_en,  # Merge rest of EN metadata
+        },
+    }
 
     # Record in history
     from agents.topics_history import mark_topic_used
     mark_topic_used(
-        topic=f"[Timelapse] {title}",
+        topic=f"[Timelapse] {clickbait_title_ru}",
         session_id=session_id,
-        video_path=str(output_path),
-        video_angle=f"style={house_style_name},location={location_name},stages={len(stages)}",
+        video_path=str(assembled_path),
+        video_angle=f"style={house_style_name},location={location_name},stages={len(stages)},duration={video_duration:.2f}s",
         publishing=publishing,
     )
 

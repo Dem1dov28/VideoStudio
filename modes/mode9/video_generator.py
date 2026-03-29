@@ -30,6 +30,7 @@ from agents.content_generator.fastgen_scraper import (
     generate_video_from_keyframes,
 )
 from config import settings
+from modes.clickbait_preview import generate_clickbait_preview
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -279,16 +280,17 @@ def _build_image_prompt(
 
     title_line = f"STAGE: {stage_name_en.upper()} — construction stage {index + 1}"
 
-    prompt = f"""Create a photorealistic still image for a house construction timelapse video.
+    prompt = f"""Create a photorealistic still image for a vehicle assembly timelapse video.
 
 {title_line}
 
 ━━━ CRITICAL: BACKGROUND STAYS THE SAME! ━━━
-The BACKGROUND (sky, trees, neighboring houses, street, landscape) MUST REMAIN EXACTLY THE SAME across all stages!
-- Same sky, same clouds position
-- Same trees, same grass, same ground
-- Same neighboring buildings, same street
-- ONLY THE HOUSE CHANGES — background is FROZEN!
+The BACKGROUND (sky, buildings, hangar walls, equipment, landscape) MUST REMAIN EXACTLY THE SAME across all stages!
+- Same sky, same lighting
+- Same location elements, same ground
+- Same equipment in background, same tools on walls
+- ONLY THE VEHICLE ASSEMBLY PROGRESSES — background is FROZEN!
+- Camera angle and perspective MUST match previous stage exactly
 - This is essential for smooth timelapse video.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -307,7 +309,7 @@ STYLE: Photorealistic, shot on smartphone camera, natural lighting, authentic co
 
 {title_line}
 
-HOUSE STYLE: {style_visual['visual']}
+VEHICLE TYPE: {style_visual['visual']}
 Features: {style_visual['features']}
 
 LOCATION: {loc_visual['visual']}
@@ -317,24 +319,33 @@ SCENE DESCRIPTION:
 {visual_prompt}
 
 COMPOSITION:
-- Wide shot showing the entire building site
+- Wide shot showing the entire assembly area
 - Vertical 9:16 aspect ratio (TikTok/Reels/Shorts format)
-- Camera positioned at consistent angle (same perspective as other stages)
+- Camera positioned at EXACTLY the same angle as previous stage (critical for timelapse!)
 - Natural daylight, sun at ~45 degrees
 - Realistic shadows and lighting
-- Construction materials visible: concrete, bricks, wood, tools, equipment
-- Real textures: rough concrete, brick patterns, dirt, grass
+- Assembly materials visible: metal parts, tools, equipment, machinery
+- Real textures: metallic surfaces, concrete floor, industrial elements
 - WORKERS visible if appropriate for this stage
-- CONSTRUCTION EQUIPMENT visible if appropriate (cranes, trucks, excavators)
+- ASSEMBLY EQUIPMENT visible if appropriate (lifts, cranes, tools)
 
 CRITICAL REQUIREMENTS:
-- This MUST look like a REAL PHOTO from a construction site
+- This MUST look like a REAL PHOTO from an assembly facility
 - Imperfect lighting, realistic proportions
-- Authentic construction site details
+- Authentic vehicle assembly details
 - No artificial or rendered look
 - Natural colors, not oversaturated
 - If previous stage image is provided as reference, match the EXACT camera angle and perspective
-- BACKGROUND = FROZEN (only house evolves)"""
+- BACKGROUND = FROZEN (only vehicle assembly progresses)
+- Camera NEVER moves inside the vehicle — ALWAYS external view
+
+━━━ CRITICAL: NO INTERIOR SHOTS ━━━
+- NEVER show views from inside the vehicle
+- NEVER show the vehicle cabin from inside
+- ALWAYS show the vehicle from OUTSIDE
+- Camera ALWAYS stays external to the vehicle
+- This is essential for timelapse consistency
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
 
     return prompt
 
@@ -477,7 +488,7 @@ SPECIFIC MICRO-ACTIONS VISIBLE:
 
 {transformation_title}
 
-HOUSE STYLE: {style_visual['visual']}
+VEHICLE TYPE: {style_visual['visual']}
 LOCATION: {loc_visual['visual']}
 {peak_section}
 ━━━ CRITICAL: SHOW THE WORK, NOT JUST THE RESULT ━━━
@@ -506,6 +517,15 @@ MAIN ACTIVITY: {action}
 - Only the construction progresses
 - SUBTLE natural micro-motion: tiny, almost imperceptible camera vibration
 - This micro-motion makes footage feel REAL, not CGI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+━━━ CRITICAL: NO INTERIOR SHOTS ━━━
+- NEVER show views from inside the vehicle
+- NEVER show the vehicle cabin from inside
+- ALWAYS show the vehicle from OUTSIDE
+- Interior components are installed through open doors/windows
+- Camera ALWAYS stays external to the vehicle
+- This ensures timelapse consistency across all stages
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ━━━ MOTION RULES (MANDATORY) ━━━
@@ -599,6 +619,7 @@ def _build_keyframe_video_prompt(
 SUBJECT: {action}. Workers: {workers_short}. Equipment: {machinery_short}.
 
 CAMERA: Locked-off tripod, static frame. CRITICAL: camera must not move.
+NO INTERIOR SHOTS: Always show vehicle from OUTSIDE, never from inside.
 TEMPORAL: Time-lapse, forward motion ONLY, step-by-step progress.
 
 TRANSITION: "{start_state}" → "{end_state}".
@@ -613,6 +634,84 @@ TECHNICAL: Vertical 9:16, 1080x1920, cinematic, photorealistic."""
     return prompt
 
 
+def _build_drone_showcase_image_prompt(
+    scenario: dict[str, Any],
+    language: str = "ru",
+) -> str:
+    """
+    Build a prompt for generating DRONE SHOWCASE IMAGE (end frame for drone video).
+    
+    PURPOSE: Create a beautiful aerial view showing vehicle + full workshop/factory context.
+    
+    KEY REQUIREMENTS:
+    - SAME vehicle (identical design, materials, colors)
+    - DIFFERENT camera angle (higher elevation, wider view)
+    - Show FULL environment: workshop, factory floor, equipment, surroundings
+    - Cinematic industrial photography quality
+    """
+    vehicle_type = scenario.get("vehicle_type", "car_modern")
+    location = scenario.get("location", "factory")
+
+    style_visual = VEHICLE_TYPE_VISUALS.get(vehicle_type, VEHICLE_TYPE_VISUALS["car_modern"])
+    loc_visual = LOCATION_VISUALS.get(location, LOCATION_VISUALS["factory"])
+
+    # Drone showcase image prompt - aerial view with full facility context
+    prompt = f"""━━━ ★★★ DRONE SHOWCASE IMAGE ★★★ ━━━
+PURPOSE: Create the FINAL FRAME for a cinematic drone showcase video.
+This image will be the END POINT of a smooth camera movement from assembly view to aerial showcase.
+
+━━━ CRITICAL: VEHICLE MUST REMAIN IDENTICAL ━━━
+The vehicle must be EXACTLY the same as in the reference image:
+- SAME design, architecture, materials, colors
+- SAME proportions, details, finish
+- DO NOT change the vehicle itself — ONLY change the camera viewpoint
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SUBJECT: {style_visual['visual']}
+LOCATION CONTEXT: {loc_visual['visual']}
+
+━━━ CAMERA ANGLE: ELEVATED DRONE VIEW ━━━
+- HIGH ELEVATION: 20-40 meters above ground (bird's eye perspective)
+- WIDE FIELD OF VIEW: Show entire vehicle + full facility context
+- ANGLED DOWNWARD: Camera tilted down ~30-45 degrees
+- CINEMATIC COMPOSITION: Rule of thirds, balanced framing
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+━━━ WHAT TO SHOW (VEHICLE + ENVIRONMENT) ━━━
+PRIMARY FOCUS: The completed vehicle (same as reference)
+ENVIRONMENT TO INCLUDE:
+- Full workshop or factory floor space
+- Industrial equipment, tools in background
+- Lighting rigs, ceiling structures
+- Floor markings, work areas
+- Storage areas, shelves with parts
+- Other vehicles or components (if appropriate)
+- Facility architecture (windows, doors, structural elements)
+
+The goal is to show the vehicle IN ITS FULL INDUSTRIAL CONTEXT.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+LIGHTING: Industrial golden hour or professional studio lighting
+- Warm, directional light revealing form and depth
+- Beautiful reflections on vehicle surface
+- Professional automotive/industrial photography aesthetic
+
+STYLE: Ultra photorealistic, cinematic industrial photography
+- Shot on professional drone or high-end camera
+- High resolution, sharp details
+- Rich colors, excellent dynamic range
+- Premium marketing photography quality
+- Emotional, aspirational atmosphere
+
+TECHNICAL: Vertical 9:16, 1080x1920, ultra detailed, photorealistic.
+
+SAFETY: Generic content ONLY. NO brands, logos, copyrighted material.
+
+GOAL: Create a stunning aerial showcase image that reveals the full beauty of the vehicle and its industrial surroundings."""
+
+    return prompt
+
+
 def _build_final_drone_video_prompt(
     scenario: dict[str, Any],
     language: str = "ru",
@@ -622,13 +721,18 @@ def _build_final_drone_video_prompt(
     
     PURPOSE: Emotional payoff, show full result clearly, increase retention.
     
-    KEY PRINCIPLE: NO MORE BUILDING — ONLY PRESENTATION
+    KEY PRINCIPLE: NO MORE ASSEMBLY — ONLY PRESENTATION
     
     DRONE SHOT STYLE (randomly selected):
     - Slow pull-back (отдаление)
     - Orbit (облет вокруг транспорта)
     - Rise-up (подъём вверх)
     - Diagonal fly-by (плавный пролёт сбоку)
+    
+    TWO-FRAME TRANSITION:
+    - START FRAME: Last assembly stage image (ground-level view)
+    - END FRAME: Drone showcase image (elevated aerial view)
+    - VIDEO: Smooth camera movement from start to end frame
     """
     vehicle_type = scenario.get("vehicle_type", "car_modern")
     location = scenario.get("location", "factory")
@@ -638,13 +742,13 @@ def _build_final_drone_video_prompt(
 
     # Random movement selection for variety
     movements = [
-        "slow pull-back: camera starts close to vehicle, gently moves backward and upward, revealing the full vehicle",
-        "smooth orbit: camera circles around the vehicle at medium height, showing all angles",
-        "rise-up reveal: camera starts low near ground, slowly rises upward while pulling back",
-        "diagonal fly-by: camera passes alongside the vehicle diagonally, showing front and side views",
+        "slow pull-back and upward: camera starts at ground-level assembly view, gently moves backward and rises to elevated aerial position, revealing the full vehicle and facility",
+        "smooth orbit with elevation gain: camera circles around the vehicle while ascending from ground level to bird's eye view, showing all angles",
+        "rise-up reveal: camera starts low near ground at assembly viewpoint, slowly rises upward to high aerial position while pulling back",
+        "diagonal fly-back: camera passes alongside the vehicle diagonally while moving backward and upward from assembly view to aerial overview",
     ]
     selected_movement = random.choice(movements)
-    
+
     # Time of day for cinematic lighting
     times_of_day = [
         "golden hour sunset, warm orange glow, long dramatic shadows, beautiful reflections on paint",
@@ -653,8 +757,17 @@ def _build_final_drone_video_prompt(
     ]
     selected_time = random.choice(times_of_day)
 
-    # FINAL SHOWCASE PROMPT - premium cinematic presentation
-    prompt = f"""A cinematic drone showcase of the COMPLETED vehicle. This is the FINAL RESULT — NO assembly, NO workers, NO machinery.
+    # TWO-FRAME TRANSITION PROMPT
+    # CRITICAL: This video transitions FROM assembly view TO aerial showcase
+    prompt = f"""━━━ ★★★ TRANSITION: ASSEMBLY → AERIAL SHOWCASE ★★★ ━━━
+THIS VIDEO SHOWS A SMOOTH CAMERA MOVEMENT BETWEEN TWO FRAMES:
+- START FRAME: Assembly workshop view (ground-level, human perspective)
+- END FRAME: Beautiful aerial showcase view (elevated drone perspective)
+
+The video MUST smoothly transition from the start frame to the end frame.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+A cinematic drone showcase of the COMPLETED vehicle. This is the FINAL RESULT — NO assembly, NO workers, NO machinery.
 
 SUBJECT: {style_visual['visual']}
 LOCATION: {loc_visual['visual']}
@@ -668,40 +781,45 @@ NO transformation.
 ONLY the finished, beautiful result.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-CAMERA MOVEMENT: {selected_movement}
-- Smooth, continuous drone motion
-- No sudden movements, no cuts
-- Natural camera drift
-- Subtle parallax effect between foreground and background
+━━━ CAMERA MOVEMENT: SMOOTH TRANSITION ━━━
+{selected_movement}
 
-FRAMING:
-- Vehicle is always the main focus
-- Environment fully visible (surroundings, floor, background)
-- Cinematic wide shot composition
-- Rule of thirds for premium look
+KEY REQUIREMENTS:
+- Video STARTS from the assembly viewpoint (start frame)
+- Video ENDS at the aerial showcase viewpoint (end frame)
+- Movement must be SMOOTH, GRADUAL, and CINEMATIC
+- No sudden jumps or cuts
+- Natural, flowing camera motion
+- The vehicle remains IDENTICAL throughout — only camera position changes
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FRAMING EVOLUTION:
+- START: Ground-level view focused on vehicle
+- MIDDLE: Gradual ascent revealing more surroundings
+- END: High aerial overview showing full facility + context
 
 LIGHTING: {selected_time}
 - Realistic shadows consistent with scene
 - Beautiful reflections on vehicle surface
-- Professional automotive photography quality
+- Professional automotive/industrial photography quality
 
 ENVIRONMENT MOTION:
 - Slight ambient movement
 - Natural environmental life
-- Professional showcase atmosphere
+- Subtle industrial atmosphere
 
 STYLE:
 - Ultra realistic
 - Cinematic
 - Calm and satisfying
-- Premium automotive showcase quality
+- Premium showcase quality
 - Emotional payoff for viewer
 
 TECHNICAL: Vertical 9:16, 1080x1920, cinematic drone footage, smooth motion.
 
 SAFETY: Generic content ONLY. NO brands, logos, copyrighted material.
 
-GOAL: Showcase the final result in a premium, beautiful, cinematic way as if filmed by a professional drone operator."""
+GOAL: Create a stunning, smooth transition that reveals the full beauty of the completed vehicle from an aerial perspective."""
 
     return prompt
 # ═══════════════════════════════════════════════════════════════════════════
@@ -829,6 +947,7 @@ async def generate_vehicle_videos(
     output_dir: Path,
     session_id: str,
     language: str = "ru",
+    generate_preview: bool = True,  # NEW: Generate clickbait social media preview
 ) -> tuple[list[Path | None], dict[str, Any]]:
     """
     Generate vehicle assembly timelapse video clips via FastGen.
@@ -845,6 +964,10 @@ async def generate_vehicle_videos(
        - Video 1: transition from stage_1 to stage_2
        - ...
        - Video N-1: transition from stage_(N-1) to stage_N
+
+    3. BONUS: Clickbait preview generation for social media (optional):
+       - Uses last frame as reference
+       - Generates eye-catching thumbnail for maximum CTR
 
     Returns:
         Tuple of (list of video paths, enriched scenario)
@@ -910,6 +1033,34 @@ async def generate_vehicle_videos(
                 logger.warning(f"[Mode9] Stage {i + 2} will have no reference image!")
 
     # ═══════════════════════════════════════════════════════════════════════
+    # STEP 1c: Generate DRONE SHOWCASE IMAGE (end frame for drone video)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    drone_showcase_image: Path | None = None
+    final_frame = ref_image_paths[-1] if ref_image_paths else None
+    
+    if final_frame and Path(final_frame).exists():
+        logger.info("[Mode9] Generating DRONE SHOWCASE IMAGE (aerial view for drone video end frame)...")
+        
+        drone_image_prompt = _build_drone_showcase_image_prompt(scenario, language)
+        
+        # Generate with reference (to preserve vehicle design)
+        drone_showcase_image = await _generate_single_image_with_ref(
+            prompt=drone_image_prompt,
+            output_dir=images_dir,
+            index=len(scenes),  # Index after all stages
+            reference_image_paths=[Path(final_frame)],  # Use last frame as reference
+        )
+        
+        if drone_showcase_image and Path(drone_showcase_image).exists():
+            logger.success(f"[Mode9] Drone showcase image: {drone_showcase_image.name}")
+        else:
+            logger.warning("[Mode9] Failed to generate drone showcase image, will use fallback")
+            drone_showcase_image = None
+    else:
+        logger.warning("[Mode9] Skipping drone showcase image: final assembly frame not available")
+
+    # ═══════════════════════════════════════════════════════════════════════
     # STEP 2: KEYFRAME video generation (transition between stages)
     # ═══════════════════════════════════════════════════════════════════════
     
@@ -960,7 +1111,7 @@ async def generate_vehicle_videos(
         )
         video_tasks.append(task)
     
-    # 2b: Generate BONUS DRONE SHOT video (uses only last frame as reference)
+    # 2b: Generate BONUS DRONE SHOT video (transition from assembly view to aerial showcase)
     # This is ADDITIONAL final showcase, NOT a replacement for assembly video
     final_frame_index = len(scenes) - 1
     final_frame = ref_image_paths[final_frame_index] if final_frame_index < len(ref_image_paths) else None
@@ -970,20 +1121,66 @@ async def generate_vehicle_videos(
         
         drone_prompt = _build_final_drone_video_prompt(scenario, language)
         
-        # Use single reference image (final frame) for drone shot
-        drone_task = _generate_single_video(
-            index=num_keyframe_videos,
-            prompt=drone_prompt,
-            reference_image_paths=[Path(final_frame)],
-            output_dir=output_dir,
-        )
+        # Use TWO frames for better quality: assembly view → aerial showcase
+        if drone_showcase_image and Path(drone_showcase_image).exists():
+            # NEW APPROACH: Keyframe video with start + end frames
+            drone_task = _generate_keyframe_video(
+                index=num_keyframe_videos,
+                prompt=drone_prompt,
+                start_frame=Path(final_frame),           # Last assembly stage
+                end_frame=Path(drone_showcase_image),   # Aerial showcase view
+                output_dir=output_dir,
+            )
+            logger.debug(f"[Mode9] Drone video using two-frame transition: {final_frame.name} → {drone_showcase_image.name}")
+        else:
+            # FALLBACK: Single reference image (old approach, lower quality)
+            logger.warning("[Mode9] Drone showcase image not available, using single-frame fallback")
+            drone_task = _generate_single_video(
+                index=num_keyframe_videos,
+                prompt=drone_prompt,
+                reference_image_paths=[Path(final_frame)],
+                output_dir=output_dir,
+            )
+        
         video_tasks.append(drone_task)
+        
+        # [NEW] Generate CLICKBAIT PREVIEW in PARALLEL with drone shot
+        # Preview uses the same final frame but doesn't block video generation
+        if generate_preview:
+            from modes.clickbait_preview import generate_clickbait_preview as gen_preview
+            preview_output_dir = output_dir / "previews"
+            preview_output_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Start preview generation in background (non-blocking)
+            preview_task = gen_preview(
+                final_frame_path=Path(final_frame),
+                scenario=scenario,  # Use original scenario, not enriched
+                output_dir=preview_output_dir,
+                mode="vehicle",
+                style_key="dramatic_reveal",
+                language="en",
+            )
+            # Add to tasks list but track separately
+            video_tasks.append(preview_task)  # Will be gathered with videos
     else:
         logger.warning(f"[Mode9] Skipping BONUS DRONE SHOT: final frame not available")
         video_tasks.append(asyncio.create_task(asyncio.sleep(0)))  # Placeholder
 
     # Generate ALL videos in parallel
     video_paths = await asyncio.gather(*video_tasks, return_exceptions=True)
+    
+    # Separate video results from preview result (last task might be preview)
+    preview_path = None
+    if generate_preview and len(video_paths) > num_total_videos:
+        # Last item is preview result
+        preview_result = video_paths.pop()  # Remove and get preview
+        if isinstance(preview_result, Path):
+            preview_path = preview_result
+            logger.success(f"[Mode9] Clickbait preview generated: {preview_result.name}")
+        elif isinstance(preview_result, Exception):
+            logger.error(f"[Mode9] Preview generation failed: {preview_result}")
+        else:
+            logger.warning("[Mode9] Preview generation returned None")
 
     # Handle results
     valid_paths: list[Path | None] = []
@@ -1015,7 +1212,11 @@ async def generate_vehicle_videos(
     ref_count = sum(1 for p in ref_image_paths if p and Path(p).exists())
     logger.success(
         f"[Mode9] Generated {ref_count}/{len(scenes)} reference images "
-        f"and {valid_count}/{num_videos} keyframe videos"
+        f"and {valid_count}/{num_total_videos} videos ({num_keyframe_videos} keyframe + 1 drone)"
     )
-
+    
+    # Add preview path to enriched scenario if generated
+    if preview_path:
+        enriched_scenario["preview_path"] = str(preview_path)
+    
     return valid_paths, enriched_scenario

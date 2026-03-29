@@ -17,12 +17,17 @@ const LEVEL_PREFIX = {
   ERROR:   '✗',
 };
 
-export default function LogConsole({ logs, className }) {
+export default function LogConsole({ logs, className, sessionId }) {
   const bottomRef = useRef(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
+
+  // Получаем уникальные session_id из логов для отображения
+  const uniqueSessions = [...new Set(logs.filter(l => l.session_id).map(l => l.session_id))];
+  const displaySessionId = sessionId || (uniqueSessions.length === 1 ? uniqueSessions[0] : null);
+  const sessionLabel = displaySessionId ? displaySessionId.slice(-8) : 'pipeline';
 
   return (
     <div className={clsx(
@@ -36,7 +41,7 @@ export default function LogConsole({ logs, className }) {
           <div className="w-3 h-3 rounded-full bg-[#febc2e]" />
           <div className="w-3 h-3 rounded-full bg-[#28c840]" />
         </div>
-        <span className="text-xs text-[#52525b] font-mono ml-2">pipeline.log</span>
+        <span className="text-xs text-[#52525b] font-mono ml-2">{sessionLabel}.log</span>
         <span className="ml-auto text-[10px] text-[#3f3f50] font-mono">{logs.length} lines</span>
       </div>
 

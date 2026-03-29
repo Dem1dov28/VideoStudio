@@ -32,10 +32,10 @@ class Settings(BaseSettings):
     # Email и пароль для fast-gen.ai (для Playwright авторизации)
     fastgen_email: str = Field("", alias="FASTGEN_EMAIL")
     fastgen_password: str = Field("", alias="FASTGEN_PASSWORD")
-    # Сколько видео генерировать параллельно (каждое в своём окне браузера). 10 = все сразу.
-    fastgen_video_parallel_workers: int = Field(10, alias="FASTGEN_VIDEO_PARALLEL_WORKERS")
-    # Сколько изображений генерировать параллельно (Mode 1 и др.). 5 = до 5 одновременно.
-    fastgen_image_parallel_workers: int = Field(5, alias="FASTGEN_IMAGE_PARALLEL_WORKERS")
+    # Сколько видео генерировать параллельно (каждое в своём окне браузера). 12 = все сразу.
+    fastgen_video_parallel_workers: int = Field(15, alias="FASTGEN_VIDEO_PARALLEL_WORKERS")
+    # Сколько изображений генерировать параллельно (Mode 1 и др.). 15 = до 15 одновременно.
+    fastgen_image_parallel_workers: int = Field(15, alias="FASTGEN_IMAGE_PARALLEL_WORKERS")
 
     # ── HuggingFace (fallback, free) ──────────────────────────────────────────
     hf_token: str = Field("", alias="HF_TOKEN")

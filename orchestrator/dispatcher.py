@@ -23,7 +23,7 @@ from orchestrator.pipelines.mode1 import run_mode1_pipeline
 from orchestrator.swarm_graph import _SWARM_AVAILABLE, run_swarm_pipeline
 
 
-async def run_pipeline(
+async def _run_pipeline_wrapped(
     topic: str | None = None,
     num_scenes: int = 5,
     use_swarm: bool = True,
@@ -57,7 +57,7 @@ async def run_pipeline(
     mode9_num_stages: int = 5,
     control: dict | None = None,
 ) -> dict[str, Any]:
-    """Route to the appropriate pipeline by mode."""
+    """Internal pipeline runner with session context."""
     from pipeline_control import checkpoint
 
     # Mode 9: Vehicle Assembly Timelapse
@@ -217,3 +217,88 @@ async def run_pipeline(
         reference_image_path=reference_image_path,
         control=control,
     )
+
+
+async def run_pipeline(
+    topic: str | None = None,
+    num_scenes: int = 5,
+    use_swarm: bool = True,
+    session_id: str | None = None,
+    local_only: bool = False,
+    auto_topic: bool = False,
+    use_scenario: bool = True,
+    show_subtitles: bool = True,
+    use_fact_check: bool = True,
+    fact_check_strict: bool = False,
+    prebuilt_scenario: dict | None = None,
+    mode: int = 1,
+    language: str = "ru",
+    custom_title_bg_path: str | None = None,
+    custom_outro_bg_path: str | None = None,
+    reference_image_path: str | None = None,
+    mode3_start_image_path: str | None = None,
+    mode3_end_image_path: str | None = None,
+    mode3_topic: str | None = None,
+    mode4_quote: str | None = None,
+    mode4_person_name: str | None = None,
+    mode4_photo_path: str | None = None,
+    mode6_num_characters: int = 3,
+    mode7_keyboards: list[str] | None = None,
+    mode7_animal_type: str | None = None,
+    mode8_house_style: str | None = None,
+    mode8_location: str | None = None,
+    mode8_num_stages: int = 5,
+    mode9_vehicle_type: str | None = None,
+    mode9_location: str | None = None,
+    mode9_num_stages: int = 5,
+    control: dict | None = None,
+) -> dict[str, Any]:
+    """Route to the appropriate pipeline by mode with session context."""
+    # Bind session_id к глобальному logger для всех логов пайплайна
+    # Это гарантирует, что все вызовы logger.info() внутри пайплайнов получат session_id
+    session_id = session_id or str(int(time.time() * 1000))
+    bound_logger = logger.bind(session_id=session_id)
+    
+    # Временно заменяем глобальный logger на bound_logger
+    import loguru
+    original_logger = loguru.logger
+    loguru.logger = bound_logger
+    
+    try:
+        return await _run_pipeline_wrapped(
+            topic=topic,
+            num_scenes=num_scenes,
+            use_swarm=use_swarm,
+            session_id=session_id,
+            local_only=local_only,
+            auto_topic=auto_topic,
+            use_scenario=use_scenario,
+            show_subtitles=show_subtitles,
+            use_fact_check=use_fact_check,
+            fact_check_strict=fact_check_strict,
+            prebuilt_scenario=prebuilt_scenario,
+            mode=mode,
+            language=language,
+            custom_title_bg_path=custom_title_bg_path,
+            custom_outro_bg_path=custom_outro_bg_path,
+            reference_image_path=reference_image_path,
+            mode3_start_image_path=mode3_start_image_path,
+            mode3_end_image_path=mode3_end_image_path,
+            mode3_topic=mode3_topic,
+            mode4_quote=mode4_quote,
+            mode4_person_name=mode4_person_name,
+            mode4_photo_path=mode4_photo_path,
+            mode6_num_characters=mode6_num_characters,
+            mode7_keyboards=mode7_keyboards,
+            mode7_animal_type=mode7_animal_type,
+            mode8_house_style=mode8_house_style,
+            mode8_location=mode8_location,
+            mode8_num_stages=mode8_num_stages,
+            mode9_vehicle_type=mode9_vehicle_type,
+            mode9_location=mode9_location,
+            mode9_num_stages=mode9_num_stages,
+            control=control,
+        )
+    finally:
+        # Восстанавливаем оригинальный logger
+        loguru.logger = original_logger

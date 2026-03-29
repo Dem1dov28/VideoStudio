@@ -100,7 +100,9 @@ def assemble_mode9_video(
     speed_multiplier: float = 1.5,   # 1.5x speed for viral dynamics
     use_speed_ramping: bool = True,  # Cinematic speed variation
     final_hold_duration: float = 1.5,  # Hold last frame for retention
-) -> Path:
+    preview_image_path: Path | str | None = None,  # NEW: Clickbait preview to append
+    preview_duration: float = 0.3,  # Preview display duration (seconds)
+) -> tuple[Path, float]:
     """
     Assemble final vehicle assembly timelapse video.
 
@@ -116,6 +118,11 @@ def assemble_mode9_video(
         speed_multiplier: Base speed multiplier (default 1.5x for dynamics)
         use_speed_ramping: Apply cinematic speed variation (slow start/end, fast middle)
         final_hold_duration: Hold last frame for better retention (default 1.5s)
+        preview_image_path: Path to clickbait preview image to append at end (optional)
+        preview_duration: How long to show preview at end (default 0.3s)
+
+    Returns:
+        Tuple of (output_path, final_duration_seconds)
     """
     target_w, target_h = settings.video_resolution
     fps = settings.video_fps
@@ -281,5 +288,52 @@ def assemble_mode9_video(
             except Exception:
                 pass
 
-    logger.success(f"[Mode9 Assembler] Done -> {output_path}")
-    return output_path
+    logger.success(f"[Mode9 Assembler] Done -> {output_path} (duration: {final.duration:.2f}s)")
+    
+    # ═══════════════════════════════════════════════════════════════════════
+    # APPEND CLICKBAIT PREVIEW (OPTIONAL)
+    # ═══════════════════════════════════════════════════════════════════════
+    
+    if preview_image_path and Path(preview_image_path).exists():
+        try:
+            logger.info(f"[Mode9 Assembler] Appending clickbait preview ({preview_duration}s)...")
+            
+            from PIL import Image
+            from moviepy import ImageClip, concatenate_videoclips
+            
+            # Load preview image and resize to match video
+            preview_img = Image.open(str(preview_image_path))
+            preview_clip = ImageClip(np.array(preview_img)).with_duration(preview_duration).with_fps(fps)
+            preview_clip = preview_clip.resized((target_w, target_h))
+            
+            # Concatenate with main video
+            final_with_preview = concatenate_videoclips([final, preview_clip], method="compose")
+            
+            # Preserve audio from main video (preview will be silent or can add sound effect)
+            final_with_preview = final_with_preview.with_audio(final.audio if final.audio else None)
+            
+            # Re-render with preview
+            temp_output = output_path.parent / f"{output_path.stem}_with_preview{output_path.suffix}"
+            final_with_preview.write_videofile(
+                str(temp_output),
+                fps=fps,
+                codec="libx264",
+                audio_codec="aac",
+                threads=4,
+                preset="fast",
+                logger=None,
+            )
+            
+            # Replace original with preview version
+            output_path.unlink(missing_ok=True)
+            temp_output.rename(output_path)
+            
+            final_with_preview.close()
+            preview_clip.close()
+            
+            logger.success(f"[Mode9 Assembler] Preview appended -> {output_path} (+{preview_duration}s)")
+            
+        except Exception as e:
+            logger.error(f"[Mode9 Assembler] Preview append failed: {e}")
+    
+    return output_path, float(final.duration) + (preview_duration if preview_image_path and Path(preview_image_path).exists() else 0)

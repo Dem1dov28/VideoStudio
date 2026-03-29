@@ -348,7 +348,7 @@ export default function Progress() {
       </AnimatePresence>
 
       {/* Log console */}
-      <LogConsole logs={logs} className="mb-4" />
+      <LogConsole logs={logs} className="mb-4" sessionId={sid} />
     </div>
   );
 }

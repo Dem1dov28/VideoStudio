@@ -32,26 +32,16 @@ OUTPUT STRUCTURE:
 - First 2 words must be strong keywords related to construction (e.g. "House Build", "Build Timelapse", "From Nothing")
 - Clearly reflect transformation (before → after)
 - Max 1 emoji at the end (relevant to construction)
-- Max 2-3 hashtags at the end (no spam)
+- Always end with exactly 2 hashtags: #timelapse #beforeafter
 
 2. DESCRIPTION
 - First line: 1 short sentence describing the transformation (e.g. from empty land to house)
 - Then naturally include 4-5 keywords:
   (construction timelapse, building process, house build, before after, transformation)
 - Text must read naturally, not like keyword spam
-
-3. HASHTAGS (separate block)
-- Add 4-5 relevant hashtags only
-- Focus on niche:
-  #construction #timelapse #beforeafter #building #satisfying
-
-4. TAGS (for YouTube Studio)
-- 10-15 tags
-- Mix of:
-  - specific (house construction timelapse)
-  - general (construction, building)
-  - viral (satisfying, transformation)
-  - include channel name
+- At the end of description, always add exactly these 5 hashtags:
+  - For Russian: #housebuilding #дома #buildingprocess #timelapse #beforeafter
+  - For English: #housebuilding #home #buildingprocess #timelapse #beforeafter
 
 CONTENT RULES:
 
@@ -66,7 +56,6 @@ OUTPUT FORMAT (JSON):
 {{
   "title": "...",
   "description": "...",
-  "hashtags": ["#tag1", "#tag2", ...],
   "tags": ["tag1", "tag2", ...]
 }}
 
@@ -78,30 +67,28 @@ Language: {language}
 FALLBACK_TEMPLATES = {
     "ru": {
         "titles": [
-            "Строительство дома: от пустого участка до готового {style} 🏠 #строительство #таймлапс",
-            "{style} за 60 секунд: полная стройка #timelapse #construction",
-            "От земли до дома: {style} в {location} 🔨 #строительство",
-            "Таймлапс стройки: как построили {style} #building #satisfying",
+            "Строительство дома: от пустого участка до готового {style} 🏠 #timelapse #beforeafter",
+            "{style} за 60 секунд: полная стройка #timelapse #beforeafter",
+            "От земли до дома: {style} в {location} 🔨 #timelapse #beforeafter",
+            "Таймлапс стройки: как построили {style} #timelapse #beforeafter",
         ],
         "descriptions": [
-            "Смотрите как из пустого участка рождается красивый дом. Полный процесс строительства в таймлапсе!",
-            "От котлована до крыши — весь процесс постройки дома за минуту. Удовольствие для глаз!",
+            "Смотрите как из пустого участка рождается красивый дом. Полный процесс строительства в таймлапсе! #housebuilding #дома #buildingprocess #timelapse #beforeafter",
+            "От котлована до крыши — весь процесс постройки дома за минуту. Удовольствие для глаз! #housebuilding #дома #buildingprocess #timelapse #beforeafter",
         ],
-        "hashtags": ["#строительство", "#таймлапс", "#дом", "#стройка", "#satisfying"],
         "tags": ["строительство дома", "таймлапс", "строительство", "дом", "стройка", "satisfying", "timelapse", "постройка", "renovation", "building"],
     },
     "en": {
         "titles": [
-            "House Build: From Empty Land to {style} 🏠 #construction #timelapse",
-            "{style} Build Timelapse: Complete Construction #satisfying",
-            "From Nothing to {style}: Full Build Process 🔨 #construction",
-            "House Construction Timelapse: {style} in {location} #building",
+            "House Build: From Empty Land to {style} 🏠 #timelapse #beforeafter",
+            "{style} Build Timelapse: Complete Construction #timelapse #beforeafter",
+            "From Nothing to {style}: Full Build Process 🔨 #timelapse #beforeafter",
+            "House Construction Timelapse: {style} in {location} #timelapse #beforeafter",
         ],
         "descriptions": [
-            "Watch a beautiful house rise from an empty plot. Full construction process in timelapse!",
-            "From foundation to roof - the entire house building process in one minute. Satisfying to watch!",
+            "Watch a beautiful house rise from an empty plot. Full construction process in timelapse! #housebuilding #home #buildingprocess #timelapse #beforeafter",
+            "From foundation to roof - the entire house building process in one minute. Satisfying to watch! #housebuilding #home #buildingprocess #timelapse #beforeafter",
         ],
-        "hashtags": ["#construction", "#timelapse", "#housebuild", "#beforeafter", "#satisfying"],
         "tags": ["house construction timelapse", "building process", "construction", "house build", "before after", "satisfying", "transformation", "timelapse", "home building", "construction site"],
     },
 }
@@ -125,13 +112,11 @@ def _generate_fallback_metadata(
     generated_title = title_template.format(style=style_name, location=loc_name)
     
     description = random.choice(templates["descriptions"])
-    hashtags = templates["hashtags"]
     tags = templates["tags"]
     
     return {
         "title": generated_title,
         "description": description,
-        "hashtags": hashtags,
         "tags": tags,
     }
 
@@ -154,7 +139,7 @@ async def generate_publishing_metadata(
         language: Output language ("ru" or "en")
 
     Returns:
-        dict with title, description, hashtags, tags
+        dict with title, description, tags
     """
     # Ensure we always return valid metadata - wrap everything in try-except
     try:
@@ -201,9 +186,9 @@ async def generate_publishing_metadata(
     except Exception as e:
         # Ultimate fallback if anything fails
         logger.error(f"[Mode8 Publishing] All methods failed: {e}")
+        lang_hashtags = "#housebuilding #дома #buildingprocess #timelapse #beforeafter" if language == "ru" else "#housebuilding #home #buildingprocess #timelapse #beforeafter"
         return {
-            "title": f"House Building Timelapse {house_style or ''} {location or ''}".strip(),
-            "description": "Watch the complete house building process in this satisfying timelapse.",
-            "hashtags": ["#construction", "#timelapse", "#housebuild", "#satisfying"],
+            "title": f"House Building Timelapse {house_style or ''} {location or ''} #timelapse #beforeafter".strip(),
+            "description": f"Watch the complete house building process in this satisfying timelapse. {lang_hashtags}",
             "tags": ["house construction", "timelapse", "building", "satisfying"],
         }
