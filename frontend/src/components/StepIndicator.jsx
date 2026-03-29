@@ -30,7 +30,7 @@ function detectStep(logs) {
   }
 
   // Done
-  if (joined.includes('LOCAL ONLY mode') || joined.includes('Pipeline DONE') || joined.includes('Mode 3 Pipeline DONE') || joined.includes('Mode 5 Pipeline DONE') || joined.includes('Mode 6 Pipeline DONE') || joined.includes('Mode 7 Pipeline DONE') || joined.includes('Mode 8 Pipeline DONE')) return STEPS.length - 1;
+  if (joined.includes('LOCAL ONLY mode') || joined.includes('Pipeline DONE') || joined.includes('Mode 3 Pipeline DONE') || joined.includes('Mode 5 Pipeline DONE') || joined.includes('Mode 6 Pipeline DONE') || joined.includes('Mode 7 Pipeline DONE') || joined.includes('Mode 8 Pipeline DONE') || joined.includes('Mode 9 Pipeline DONE') || joined.includes('Mode 10 Pipeline DONE')) return STEPS.length - 1;
   // Video assembly (Mode 2 + Mode 3)
   if (
     joined.includes('Video Editor Agent') ||
@@ -73,6 +73,7 @@ function detectStep(logs) {
   // Mode 7: two clips (prompt → images → video)
   if (joined.includes('Mode7') || joined.includes('Mode 7 Pipeline')) return 3;
   if (joined.includes('Mode8') || joined.includes('Mode 8 Pipeline')) return 3;
+  if (joined.includes('Mode10') || joined.includes('Mode 10 Pipeline')) return 3;
   // Fact miner
   if (
     joined.includes('Fact Miner Agent') ||

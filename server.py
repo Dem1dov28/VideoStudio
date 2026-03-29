@@ -55,6 +55,12 @@ class _SessionSink:
 def _session_topic_from_request(req: "StartRequest") -> str:
     """Короткая подпись сессии для списка «В работе» и статуса."""
     m = getattr(req, "mode", None)
+    if m == 10:
+        bt = (getattr(req, "mode10_beach_type", None) or "").strip()
+        cs = (getattr(req, "mode10_coast_setting", None) or "").strip()
+        if bt or cs:
+            return f"Уборка пляжа: {bt or '?'} / {cs or '?'}"[:100]
+        return "Уборка пляжа (таймлапс)"
     if m == 8:
         hs = (getattr(req, "mode8_house_style", None) or "").strip()
         loc = (getattr(req, "mode8_location", None) or "").strip()
@@ -136,6 +142,9 @@ async def _run_pipeline_task(
             mode9_vehicle_type=getattr(req, "mode9_vehicle_type", None),
             mode9_location=getattr(req, "mode9_location", None),
             mode9_num_stages=getattr(req, "mode9_num_stages", 5),
+            mode10_beach_type=getattr(req, "mode10_beach_type", None),
+            mode10_coast_setting=getattr(req, "mode10_coast_setting", None),
+            mode10_num_stages=getattr(req, "mode10_num_stages", 5),
             control=control,
         )
 
@@ -283,6 +292,10 @@ class StartRequest(BaseModel):
     mode9_vehicle_type: str | None = None  # "airplane_passenger", "airplane_private", "car_modern", "car_sport", "truck_cargo", "tractor", "excavator", "ship_cargo", "yacht", "helicopter", "drone", and 21 more...
     mode9_location: str | None = None  # "construction_site", "factory", "shipyard", "hangar", "empty_field", "forest_clearing", "desert", "mountain_valley", "city_outskirts", "port", and 9 more...
     mode9_num_stages: int = 5
+    # Mode 10: уборка пляжа (таймлапс, как mode 8)
+    mode10_beach_type: str | None = None
+    mode10_coast_setting: str | None = None
+    mode10_num_stages: int = 5
 
     @field_validator("mode4_only_lang", mode="before")
     @classmethod
@@ -315,7 +328,7 @@ def _validate_start_request(req: StartRequest) -> None:
     elif req.mode == 5:
         if not req.topic or not req.topic.strip():
             raise HTTPException(400, "Mode 5: введите тему для длинного видео")
-    elif req.mode in (6, 7, 8, 9):
+    elif req.mode in (6, 7, 8, 9, 10):
         pass
     elif not req.topic and not req.auto_topic:
         raise HTTPException(400, "Provide 'topic' or set 'auto_topic: true'")

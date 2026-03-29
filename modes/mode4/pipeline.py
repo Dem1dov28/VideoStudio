@@ -79,11 +79,17 @@ async def run_mode4_pipeline(
         video_prompts = [vp_en]
         scripts = [script_en]
         subtitle_texts = [quote_caption_en] if show_subtitles else [""]
+        spoken_for_subs = [script_en]
+        authors_for_subs = [person_name_en]
+        whisper_langs = ["en"]
         out_names = ["video_en.mp4"]
     elif ol == "ru":
         video_prompts = [vp_ru]
         scripts = [script_ru]
         subtitle_texts = [quote_caption_ru] if show_subtitles else [""]
+        spoken_for_subs = [script_ru]
+        authors_for_subs = [person_name]
+        whisper_langs = ["ru"]
         out_names = ["video_ru.mp4"]
     else:
         video_prompts = [vp_ru, vp_en]
@@ -91,6 +97,9 @@ async def run_mode4_pipeline(
         subtitle_texts = (
             [quote_caption_ru, quote_caption_en] if show_subtitles else ["", ""]
         )
+        spoken_for_subs = [script_ru, script_en]
+        authors_for_subs = [person_name, person_name_en]
+        whisper_langs = ["ru", "en"]
         out_names = ["video_ru.mp4", "video_en.mp4"]
 
     voice_desc = prompt_data.get("voice_description") or ""
@@ -123,7 +132,8 @@ async def run_mode4_pipeline(
     for i, (clip_path, sub) in enumerate(zip(valid_paths, subs)):
         out_name = out_names[i] if i < len(out_names) else f"video_{i}.mp4"
         out_path = session_dir / out_name
-        use_static_caption = bool(sub and str(sub).strip())
+        # Субтитры: караоке по Whisper + золотое слово; полная подпись «"…" – Автор» при фолбэке
+        use_static_caption = not bool(show_subtitles and sub and str(sub).strip())
         await loop.run_in_executor(
             None,
             functools.partial(
@@ -132,6 +142,18 @@ async def run_mode4_pipeline(
                 [sub],
                 out_path,
                 use_static_caption,
+                # Один клип в вызове → в assembler индекс всегда 0; передаём только строку этого ролика (RU/EN).
+                spoken_scripts=(
+                    [spoken_for_subs[i]]
+                    if show_subtitles and i < len(spoken_for_subs)
+                    else None
+                ),
+                authors=(
+                    [authors_for_subs[i]]
+                    if show_subtitles and i < len(authors_for_subs)
+                    else None
+                ),
+                whisper_languages=[whisper_langs[i]] if show_subtitles else None,
             ),
         )
         output_paths.append(out_path)

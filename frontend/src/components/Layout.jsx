@@ -10,7 +10,7 @@ const NAV = [
   { to: '/topics',  icon: RiBookmarkLine,  label: 'Темы' },
 ];
 
-const MODE_LABELS = { 1: '5 фактов', 2: 'Почему X?', 3: 'Реставрация', 4: 'Цитата', 5: 'Длинные', 6: 'Релакс', 7: '2 клипа', 8: 'Было→стало' };
+const MODE_LABELS = { 1: '5 фактов', 2: 'Почему X?', 3: 'Реставрация', 4: 'Цитата', 5: 'Длинные', 6: 'Релакс', 7: '2 клипа', 8: 'Было→стало', 9: 'Keyframe', 10: 'Пляж' };
 
 export default function Layout({ children }) {
   const { pathname } = useLocation();

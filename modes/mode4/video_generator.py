@@ -14,13 +14,9 @@ from agents.content_generator.fastgen_scraper import (
 )
 from config import settings
 
-_STYLE_SUFFIX = ", 9:16 portrait, photorealistic, no AI artifacts"
+from modes.mode4.quote_format import dashes_to_commas_for_voice
 
-# Одинаково для RU/EN — удерживает лицо от референса, пока текст промпта не «перетянет» модель.
-_REF_ID_GUARD = (
-    "The person's face and identity must exactly match the uploaded reference image only; "
-    "do not synthesize a different face. "
-)
+_STYLE_SUFFIX = ", 9:16 portrait, photorealistic, no AI artifacts"
 
 
 def _enrich_prompt(prompt: str, voice_description: str, script: str) -> str:
@@ -43,7 +39,8 @@ def _enrich_prompt(prompt: str, voice_description: str, script: str) -> str:
         if not any(w in base_lower for w in words if len(w) > 3):
             base = base + f". Voice: {voice_clean}"
 
-    return base + _STYLE_SUFFIX
+    # Озвучка FastGen плохо читает тире — в промпт уходят запятые; субтитры без изменений
+    return dashes_to_commas_for_voice(base + _STYLE_SUFFIX)
 
 
 async def generate_quote_videos(
@@ -74,7 +71,7 @@ async def generate_quote_videos(
     enriched: list[str] = []
     for i, prompt in enumerate(video_prompts):
         script = scripts[i] if i < len(scripts) else ""
-        enriched.append(_REF_ID_GUARD + _enrich_prompt(prompt, voice_description, script))
+        enriched.append(_enrich_prompt(prompt, voice_description, script))
 
     # Два языка (RU+EN) — два окна FastGen параллельно (как _run_fastgen_video_sync)
     if len(enriched) == 2:

@@ -715,9 +715,38 @@ class FastGenScraper:
         self._context = None
         self._page = None
 
+    async def _recover_page_in_same_browser(self) -> bool:
+        """
+        Вкладка закрылась, но процесс Chromium ещё жив — открываем новую вкладку в том же окне,
+        без stop()+start() (иначе пользователь видит «закрыли окно и открыли новое»).
+        """
+        try:
+            br = self._browser
+            ctx = self._context
+            if not br or not ctx:
+                return False
+            try:
+                if not br.is_connected():
+                    return False
+            except Exception:
+                return False
+            if self._page is not None:
+                try:
+                    await self._page.close()
+                except Exception:
+                    pass
+            self._page = await ctx.new_page()
+            self._authenticated = False
+            self._prompt_selector = None
+            logger.info("[FastGen] Новая вкладка в том же браузере (Chromium не перезапускаем)")
+            return True
+        except Exception as e:
+            logger.warning(f"[FastGen] Не удалось открыть вкладку в том же браузере: {e}")
+            return False
+
     async def _restart_playwright_session(self) -> None:
-        """Новый браузер после закрытия вкладки / краша / ручного закрытия окна."""
-        logger.warning("[FastGen] Restarting Playwright session (page or browser was closed) ...")
+        """Полный перезапуск Chromium — только если браузер мёртв или нельзя восстановить вкладку."""
+        logger.warning("[FastGen] Restarting Playwright session (full browser restart) ...")
         await self.stop()
         self._authenticated = False
         self._prompt_selector = None
@@ -1629,7 +1658,8 @@ class FastGenScraper:
                 logger.info("[FastGen] Video generation cancelled before attempt")
                 return None
             if self._page is None or self._page.is_closed():
-                await self._restart_playwright_session()
+                if not await self._recover_page_in_same_browser():
+                    await self._restart_playwright_session()
 
             page = self._page
             assert page is not None

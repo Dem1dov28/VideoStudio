@@ -65,6 +65,7 @@ const MODES = [
   { id: 7, label: 'ASMR Keyboard', desc: 'Животные нажимают клавиши: мёд, желе, лёд, шоколад', icon: '🐱' },
   { id: 8, label: 'House Timelapse', desc: 'Строительство дома: пустой участок → готовый дом', icon: '🏗️' },
   { id: 9, label: 'Vehicle Assembly', desc: 'Сборка транспорта: рама → двигатель → кузов → готовый автомобиль', icon: '🚗' },
+  { id: 10, label: 'Уборка пляжа', desc: 'Timelapse: грязный пляж → уборка → чистый берег', icon: '🏖️' },
 ];
 
 const KEYBOARD_LABELS = {
@@ -120,9 +121,13 @@ export default function Generate() {
   const [mode8StartFrame, setMode8StartFrame] = useState(null);
   const [mode8EndFrame, setMode8EndFrame] = useState(null);
   // Mode 9: Vehicle Assembly Timelapse
-  const [mode9VehicleType, setMode9VehicleType] = useState('random'); // 'random', 'airplane_passenger', 'car_modern', 'tractor', etc.
-  const [mode9Location, setMode9Location] = useState('random'); // 'random', 'construction_site', 'factory', 'shipyard', etc.
+  const [mode9VehicleType, setMode9VehicleType] = useState('random');
+  const [mode9Location, setMode9Location] = useState('random');
   const [mode9NumStages, setMode9NumStages] = useState(5);
+  // Mode 10: beach cleanup timelapse
+  const [mode10BeachType, setMode10BeachType] = useState('tropical');
+  const [mode10CoastSetting, setMode10CoastSetting] = useState('morning_calm');
+  const [mode10NumStages, setMode10NumStages] = useState(5);
 
   /* scenario editing state */
   const [step, setStep]             = useState('select_mode');   // 'select_mode' | 'form' | 'generating_scenario' | 'editing' | 'launching'
@@ -302,6 +307,35 @@ export default function Generate() {
         mode8_use_keyframes: mode8UseKeyframes,
         mode8_start_frame_path: mode8UseKeyframes ? mode8StartFrame?.path : null,
         mode8_end_frame_path: mode8UseKeyframes ? mode8EndFrame?.path : null,
+      };
+      const res = await api.startPipeline(payload);
+      setStep('form');
+      setStartedSession(res.session_id);
+    } catch (e) {
+      setError(e.message);
+      setStep('form');
+    }
+  }
+
+  /* Mode 10: уборка пляжа — прямой запуск (как mode 8 без keyframes) */
+  async function handleMode10Launch() {
+    setError('');
+    setStep('launching');
+    try {
+      const payload = {
+        topic: null,
+        auto_topic: false,
+        num_scenes: mode10NumStages,
+        use_scenario: false,
+        local_only: localOnly,
+        show_subtitles: false,
+        show_watermark: false,
+        scenario: null,
+        mode: 10,
+        language: lang,
+        mode10_beach_type: mode10BeachType === 'random' ? null : mode10BeachType,
+        mode10_coast_setting: mode10CoastSetting === 'random' ? null : mode10CoastSetting,
+        mode10_num_stages: mode10NumStages,
       };
       const res = await api.startPipeline(payload);
       setStep('form');
@@ -517,7 +551,7 @@ export default function Generate() {
             {/* Header */}
             <div className="mb-6">
               <h1 className="text-2xl font-bold text-white mb-1">
-                {mode === 3 ? 'Реставрация дома' : mode === 4 ? 'Цитата + фото' : mode === 5 ? 'Длинные видео' : mode === 6 ? 'Cartoon Drama' : mode === 7 ? 'ASMR Keyboard' : mode === 8 ? 'House Timelapse' : mode === 9 ? 'Vehicle Assembly' : 'Создать видео'}
+                {mode === 3 ? 'Реставрация дома' : mode === 4 ? 'Цитата + фото' : mode === 5 ? 'Длинные видео' : mode === 6 ? 'Cartoon Drama' : mode === 7 ? 'ASMR Keyboard' : mode === 8 ? 'House Timelapse' : mode === 9 ? 'Vehicle Assembly' : mode === 10 ? 'Уборка пляжа' : 'Создать видео'}
               </h1>
               <p className="text-[#71717a] text-sm">
                 {mode === 3
@@ -534,7 +568,9 @@ export default function Generate() {
                             ? 'Timelapse видео: пустой участок → фундамент → стены → крыша → готовый дом. Фотореалистичный стиль, как снято на смартфон.'
                             : mode === 9
                               ? 'Timelapse сборки транспорта: рама → двигатель → кузов → колёса → готовый автомобиль/самолёт/трактор. Фотореалистичный стиль.'
-                              : 'AI-агенты напишут сценарий, сгенерируют изображения и смонтируют видео.'}
+                              : mode === 10
+                                ? 'Timelapse уборки: загрязнённый пляж → сбор мусора, грабли, техника → чистый берег. Тот же пайплайн, что у стройки дома, но сюжет — экология.'
+                                : 'AI-агенты напишут сценарий, сгенерируют изображения и смонтируют видео.'}
               </p>
             </div>
 
@@ -1425,6 +1461,98 @@ export default function Generate() {
                   </p>
                 </div>
               </div>
+            ) : mode === 10 ? (
+              <div className="space-y-4">
+                <div className="card p-5">
+                  <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
+                    Тип пляжа
+                  </label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      { key: 'random', label: '🎲 Случайный' },
+                      { key: 'tropical', label: '🌴 Тропики' },
+                      { key: 'urban', label: '🏙️ Городской' },
+                      { key: 'rocky_cove', label: '🪨 Бухта' },
+                      { key: 'resort', label: '🏖️ Курорт' },
+                      { key: 'wild', label: '🌾 Дикий' },
+                    ].map(opt => (
+                      <button
+                        key={opt.key}
+                        type="button"
+                        onClick={() => setMode10BeachType(opt.key)}
+                        className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                          mode10BeachType === opt.key
+                            ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                            : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="card p-5">
+                  <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
+                    Свет и погода у берега
+                  </label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      { key: 'random', label: '🎲 Случайно' },
+                      { key: 'morning_calm', label: '🌅 Утро' },
+                      { key: 'midday_bright', label: '☀️ Полдень' },
+                      { key: 'golden_hour', label: '🌇 Золотой час' },
+                      { key: 'overcast_soft', label: '☁️ Пасмурно' },
+                      { key: 'breezy', label: '💨 Ветер' },
+                    ].map(opt => (
+                      <button
+                        key={opt.key}
+                        type="button"
+                        onClick={() => setMode10CoastSetting(opt.key)}
+                        className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                          mode10CoastSetting === opt.key
+                            ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                            : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="card p-5">
+                  <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
+                    Количество стадий уборки
+                  </label>
+                  <div className="flex gap-2">
+                    {[5, 6, 7, 8].map(n => (
+                      <button
+                        key={n}
+                        type="button"
+                        onClick={() => setMode10NumStages(n)}
+                        className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                          mode10NumStages === n
+                            ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                            : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                        }`}
+                      >
+                        {n} стадий
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-[#52525b] mt-3">
+                    Каждая стадия — отдельный фрагмент: мусор → сбор → просев/грабли → вывоз → чистый пляж (по выбранному числу шагов).
+                  </p>
+                </div>
+
+                <div className="card p-4 bg-gradient-to-br from-cyan-900/20 to-teal-900/10 border-cyan-700/30">
+                  <div className="text-sm font-semibold text-cyan-300 mb-2">🏖️ Уборка пляжа</div>
+                  <p className="text-xs text-[#a1a1aa]">
+                    Timelapse в духе съёмки на телефон: волонтёры, мешки, грабли, иногда техника. Звук и музыка в спокойном морском ключе.
+                  </p>
+                </div>
+              </div>
             ) : mode === 4 ? (
               <div className="space-y-4">
                 <div className="card p-5">
@@ -1692,7 +1820,7 @@ export default function Generate() {
                     className="overflow-hidden"
                   >
                     <div className="px-5 pb-5 border-t border-[#27272f] pt-4 space-y-4">
-                      {mode !== 3 && mode !== 4 && mode !== 6 && mode !== 7 && mode !== 8 && mode !== 9 && (
+                      {mode !== 3 && mode !== 4 && mode !== 6 && mode !== 7 && mode !== 8 && mode !== 9 && mode !== 10 && (
                       <div>
                         <div className="flex justify-between mb-2">
                           <label className="text-xs font-medium text-[#a1a1aa]">Количество сцен</label>
@@ -1717,7 +1845,7 @@ export default function Generate() {
                         <Toggle value={localOnly} onChange={setLocalOnly} />
                       </div>
 
-                      {((mode !== 3 && mode !== 5 && mode !== 7 && mode !== 8 && mode !== 9) || mode === 4) ? (
+                      {((mode !== 3 && mode !== 5 && mode !== 7 && mode !== 8 && mode !== 9 && mode !== 10) || mode === 4) ? (
                       <div className="flex items-center justify-between">
                         <div>
                           <div className="text-sm font-medium text-[#e4e4f0]">Субтитры</div>
@@ -1729,7 +1857,7 @@ export default function Generate() {
                       </div>
                       ) : null}
 
-                      {mode !== 3 && mode !== 4 && mode !== 7 && mode !== 8 && mode !== 9 && (
+                      {mode !== 3 && mode !== 4 && mode !== 7 && mode !== 8 && mode !== 9 && mode !== 10 && (
                       <div>
                         <div className="text-sm font-medium text-[#e4e4f0] mb-2">Язык субтитров</div>
                         <div className="text-xs text-[#71717a] mb-2">Язык озвучки и текста на видео</div>
@@ -1840,6 +1968,15 @@ export default function Generate() {
                   <RiSparklingLine className="text-lg" />
                   Сгенерировать timelapse
                 </button>
+              ) : mode === 10 ? (
+                <button
+                  onClick={handleMode10Launch}
+                  disabled={isLoading}
+                  className="btn-primary flex-1 flex items-center justify-center gap-2 text-base py-4"
+                >
+                  <RiSparklingLine className="text-lg" />
+                  Сгенерировать timelapse
+                </button>
               ) : mode === 8 ? (
                 <button
                   onClick={handleMode8Launch}
@@ -1919,7 +2056,7 @@ export default function Generate() {
               )}
             </div>
 
-            {mode !== 3 && mode !== 4 && mode !== 6 && mode !== 7 && mode !== 8 && mode !== 9 && (
+            {mode !== 3 && mode !== 4 && mode !== 6 && mode !== 7 && mode !== 8 && mode !== 9 && mode !== 10 && (
             <p className="text-center text-xs text-[#52525b]">
               «Написать сценарий» — посмотреть и отредактировать перед генерацией
             </p>
