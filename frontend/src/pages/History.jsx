@@ -367,6 +367,61 @@ Tags: ${(en?.tags || []).join(', ')}`;
                     <p className="text-[#71717a] text-sm">Нет данных для публикации</p>
                   </div>
                 )}
+                
+                {/* Download and Regenerate buttons */}
+                <div className="p-4 flex flex-col gap-2 border-t border-[#27272f]">
+                  <div className="flex gap-2">
+                    <a
+                      href={api.videoUrl(selected?.session_id, selected?.filename)}
+                      download
+                      className="btn-primary flex items-center gap-2 text-sm flex-1 justify-center"
+                    >
+                      ⬇ Скачать
+                    </a>
+                  </div>
+                  {selected?.can_regenerate && (
+                    <button
+                      type="button"
+                      disabled={regenBusy}
+                      onClick={async () => {
+                        if (!selected?.session_id) return;
+                        const fn = (selected.filename || '').toLowerCase();
+                        const enOnly = fn === 'video_en.mp4';
+                        const ruOnly = fn === 'video_ru.mp4';
+                        const msg = enOnly
+                          ? 'Перегенерировать только английскую версию? Файлы этой сессии будут удалены, затем создастся новая сессия с одним EN-роликом.'
+                          : ruOnly
+                            ? 'Перегенерировать только русскую версию? Файлы этой сессии будут удалены, затем создастся новая сессия с одним RU-роликом.'
+                            : 'Перегенерировать это видео с теми же параметрами? Текущие файлы сессии будут удалены.';
+                        if (!confirm(msg)) return;
+                        setRegenBusy(true);
+                        try {
+                          const res = await api.regenerateVideo(selected.session_id, {
+                            filename: selected.filename || undefined,
+                          });
+                          const newSid = res?.session_id;
+                          if (newSid) {
+                            setSelected(null);
+                            navigate(`/run/${newSid}`);
+                          }
+                        } catch (e) {
+                          alert(e.message || 'Не удалось запустить перегенерацию');
+                        } finally {
+                          setRegenBusy(false);
+                        }
+                      }}
+                      className="btn-secondary flex items-center justify-center gap-2 text-sm w-full"
+                    >
+                      <RiRestartLine className="text-lg" />
+                      {regenBusy ? 'Запуск…' : 'Перегенерировать'}
+                    </button>
+                  )}
+                  {selected && !selected.can_regenerate && (
+                    <p className="text-[10px] text-[#52525b] text-center leading-snug">
+                      Перегенерация недоступна: нет сохранённых параметров (создайте ролик ещё раз после обновления — дальше кнопка появится).
+                    </p>
+                  )}
+                </div>
               </div>
             </motion.div>
           </motion.div>
