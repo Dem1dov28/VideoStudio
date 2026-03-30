@@ -122,6 +122,7 @@ async def generate_intro_video_for_topic(
     scenes: list[dict],
     output_dir: Path,
     reference_image_path: str | None = None,
+    cancel_event=None,
 ) -> Path | None:
     """
     Generate a thematic intro video from the video topic (FastGen only).
@@ -134,7 +135,9 @@ async def generate_intro_video_for_topic(
     output_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"[Mode2 Video] Generating thematic intro from topic: {prompt[:60]}...")
     ref_path = reference_image_path if reference_image_path and Path(reference_image_path).exists() else None
-    paths = await generate_videos_fastgen([prompt], output_dir, reference_image_path=ref_path)
+    paths = await generate_videos_fastgen(
+        [prompt], output_dir, reference_image_path=ref_path, cancel_event=cancel_event
+    )
     if paths and paths[0] and paths[0].exists():
         logger.success(f"[Mode2 Video] Intro video saved: {paths[0].name}")
         return paths[0]
@@ -183,7 +186,7 @@ async def download_videos_for_scenes(
         if reference_image_path and Path(reference_image_path).exists():
             ref_path = reference_image_path
         paths = await generate_videos_fastgen(
-            prompts, output_dir, reference_image_path=ref_path
+            prompts, output_dir, reference_image_path=ref_path, cancel_event=cancel_event
         )
         result: list[dict] = []
         for i, scene in enumerate(scenes_to_fetch):

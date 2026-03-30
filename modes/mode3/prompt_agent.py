@@ -29,12 +29,21 @@ TEXT_MODEL = settings.openrouter_model
 
 _IMAGE_PROMPT_SYSTEM = """Ты — эксперт по архитектурной фотографии и фотореалистичной AI-генерации.
 
-Ты получаешь ТИП ДОМА с локацией (напр. «Сруб у озера в Карелии — сосновый лес»). Дома сильно различаются: сруб ≠ викторианский ≠ вилла. Локации тоже: озеро ≠ прерия ≠ горы. Опиши КОНКРЕТНО этот тип и эту локацию.
+КРИТИЧНО — ЗАМОРОЗКА ДОМА:
+Все 6 изображений — ОДИН И ТОТ ЖЕ дом. Меняется ТОЛЬКО уровень разрушения/восстановления.
+НИКОГДА не меняй: число окон, их позиции, форму/позицию двери, тип крыши (gable/hipped), этажность, контур здания, расположение на участке.
+Строго: reference image = источник структуры. img2img шаги КОПИРУЮТ референс и меняют только детали (трещины→штукатурка, дыры→целая крыша).
 
-## ЛОКАЦИЯ — ФИКСИРОВАНА (КРИТИЧНО):
-- В ОБОИХ промптах (before и after) опиши ОДИН И ТОТ ЖЕ пейзаж: те же деревья/горы/воду/небо.
-- Локация НЕ МЕНЯЕТСЯ от кадра к кадру: статичная камера, один пейзаж, один ракурс. Только дом ремонтируется — окружение остаётся.
-- Красивые детали: отражение в воде, облака, тени от деревьев, дальний план. Добавь атмосферу, но всё это — постоянно.
+Сначала создай house_blueprint — КОРОТКИЙ паспорт с ЧИСЛАМИ (одно предложение на английском):
+- Обязательно: one-story или two-story; gable или hipped roof; N windows left of door, M windows right; door centered или offset
+- Пример: "one-story timber house, gable roof, exactly 2 windows left of centered door, 1 window right, red door"
+- Не раздувай blueprint — чем короче и конкретнее, тем меньше дрейф между кадрами
+
+house_blueprint повторяется ДОСЛОВНО в начале КАЖДОГО image_prompt. location_description = house_blueprint.
+
+## ЛОКАЦИЯ — ФИКСИРОВАНА:
+- В промптах опиши ОДИН пейзаж: те же деревья/горы/воду/небо для всех этапов.
+- Только дом ремонтируется — окружение не меняется.
 
 ## ПРАВИЛА ФОТОРЕАЛИЗМА (строго соблюдай):
 - Добавляй естественные дефекты: пыль на подоконниках, паутина в углах, выгоревшая краска, трещины в штукатурке
@@ -65,31 +74,34 @@ _IMAGE_PROMPT_SYSTEM = """Ты — эксперт по архитектурно�
 - ПОДРОБНО опиши: крыша (форма, материал, цвет), стены (свежая краска/штукатурка), окна (стекло, рамы), дверь (отполированная), двор (чистый, без мусора), подоконники, карнизы, водостоки
 - Каждая деталь видна, фотореалистично. Этот образ используется для финального фрагмента «готовый дом снаружи»
 
+## image_prompt_mid_exterior, image_prompt_mid_interior, image_prompt_after_interior (img2img — REFERENCE ОБЯЗАТЕЛЕН):
+- REFERENCE = предыдущий кадр в цепочке. КОПИРУЙ структуру: окна, дверь, крыша, ракурс, планировку — БЕЗ ИЗМЕНЕНИЙ.
+- mid_exterior: reference=before. Меняй ТОЛЬКО: частично отремонтировать крышу, стены, убрать мусор. Тот же дом.
+- image_prompt_after: reference=mid_exterior. Меняй ТОЛЬКО: полностью отремонтировать. Тот же дом.
+- mid_interior: reference=int_ruined. Меняй ТОЛЬКО: частичный ремонт внутри. Та же комната.
+- after_interior: reference=mid_interior. Меняй ТОЛЬКО: завершённый интерьер. Та же комната.
+
 ## ЗАМОРОЗКА АРХИТЕКТУРЫ (КРИТИЧНО — этажность и структура НИКОГДА не меняются):
 В image_prompt_before ФИКСИРУЕШЬ и ПОВТОРЯЕШЬ в каждом video_prompt: число этажей (one-story / two-story / three-story), количество окон, положение двери.
 В image_prompts 2–5: reference = последний кадр предыдущего видео. Первый кадр нового видео = ТОЧНО этот reference. Структура здания в reference задана — не меняй этажность, окна, дверь. Только ремонт и улучшение.
 
-## location_description (ОБЯЗАТЕЛЬНО — единый «паспорт» дома для ВСЕХ 5 клипов):
-Одно детальное описание, которое повторяется везде. ВСЕГДА: small one-story compact house. ВКЛЮЧИ: тип крыши (gable/hipped), материал стен, количество окон и их расположение, позиция двери. Напр: «small one-story wooden house, gable roof, 2 windows left of door, 1 window right, door centered, timber walls». Этот дом ОДИН И ТОТ ЖЕ во всех кадрах видео.
+## house_blueprint (ОБЯЗАТЕЛЬНО — паспорт дома, одинаковый во ВСЕХ 6 промптах):
+Короткое описание: этажность, крыша, стены, окна, дверь. Напр: "small one-story wooden house, gable roof, timber walls, 2 windows left of door, 1 right, centered door". Начни КАЖДЫЙ image_prompt с "SAME HOUSE: {house_blueprint}. "
 
-## video_prompts — НЕ ГЕНЕРИРУЙ. Верни пустой массив [].
-video_prompts будут собраны автоматически из location_description.
+## location_description = house_blueprint (для video_prompts).
+
+## video_prompts — пустой массив [].
 
 Формат: ТОЛЬКО JSON:
-{"image_prompt_before": "...", "image_prompt_before_interior": "...", "image_prompt_after": "...", "image_prompt_mid_exterior": "...", "image_prompt_mid_interior": "...", "image_prompt_after_interior": "...", "location_description": "...", "video_prompts": []}
+{"house_blueprint": "...", "image_prompt_before": "...", "image_prompt_before_interior": "...", "image_prompt_after": "...", "image_prompt_mid_exterior": "...", "image_prompt_mid_interior": "...", "image_prompt_after_interior": "...", "location_description": "...", "video_prompts": []}
 
-image_prompt_before, before_interior, after — 150–250 слов. mid_exterior, mid_interior, after_interior — 80–120 слов (img2img prompts)."""
+Каждый image_prompt начинается с "SAME HOUSE: {house_blueprint}. " — идентичный дом, только разный уровень готовности."""
 
 
 def _parse_json_response(text: str, required_keys: tuple) -> dict:
-    """Parse LLM JSON response, strip markdown if needed."""
-    raw = text.strip()
-    for pattern in (r"```(?:json)?\s*(.*?)\s*```", r"(\{[\s\S]*\})"):
-        m = re.search(pattern, raw, re.DOTALL)
-        if m:
-            raw = m.group(1).strip()
-            break
-    data = json.loads(raw)
+    """Parse LLM JSON response, strip markdown and extra trailing content."""
+    from utils.json_parse import parse_json_safe
+    data = parse_json_safe(text)
     for k in required_keys:
         if k not in data:
             raise ValueError(f"Prompt agent missing key: {k}")
@@ -109,17 +121,17 @@ async def run_image_prompt_agent(house_type: str) -> dict:
             "video_prompts": [str, ...]
         }
     """
-    llm = make_llm(temperature=0.3, model=TEXT_MODEL)
+    llm = make_llm(temperature=0.15, model=TEXT_MODEL)
     msg = HumanMessage(content=(
         f"Тип дома и локация: {house_type!r}\n\n"
-        "Опиши КОНКРЕТНО этот тип и красивую локацию. "
-        "image_prompt_before: дом разрушен снаружи (text2img). "
-        "image_prompt_before_interior: интерьер разрушен (text2img). "
-        "image_prompt_after: дом полностью восстановлен снаружи (финал). "
-        "image_prompt_mid_exterior: для img2img — частичный ремонт (крыша, стены, без окон). "
-        "image_prompt_mid_interior: для img2img — частичный ремонт внутри. "
-        "image_prompt_after_interior: для img2img — интерьер полностью восстановлен. "
-        "location_description: этажность, ТИП КРЫШИ, окна, дверь. video_prompts: []. Верни ТОЛЬКО JSON."
+        "Один и тот же дом во всех 6 изображениях. house_blueprint: ОДНО предложение на английском с ЧИСЛАМИ: "
+        "сколько окон слева от двери, справа, центр двери или нет, one-story/two-story, тип крыши (gable/hipped), материал стен. "
+        "Без художественных метафор — только измеримая структура. "
+        "image_prompt_before: дом разрушен снаружи. "
+        "image_prompt_before_interior: интерьер разрушен — ТОГО ЖЕ дома (те же окна/дверь изнутри). "
+        "image_prompt_after: дом полностью восстановлен снаружи. "
+        "image_prompt_mid_*: частичный ремонт (img2img). "
+        "Каждый промпт = SAME HOUSE + описание. video_prompts: []. Верни ТОЛЬКО JSON."
     ))
     resp = await llm.ainvoke([SystemMessage(content=_IMAGE_PROMPT_SYSTEM), msg])
     text = resp.content if hasattr(resp, "content") else str(resp)
@@ -129,17 +141,33 @@ async def run_image_prompt_agent(house_type: str) -> dict:
                 "location_description", "video_prompts")
     data = _parse_json_response(text, required)
 
-    loc = (data.get("location_description") or "").strip() or "same building, same floors, same windows"
+    blueprint = (data.get("house_blueprint") or data.get("location_description") or "").strip()
+    if not blueprint:
+        blueprint = "small one-story compact house, gable roof, 2 windows left, 1 right, centered door, timber walls"
+    data["house_blueprint"] = blueprint
+    loc = (data.get("location_description") or "").strip() or blueprint
+    data["location_description"] = loc
     data["video_prompts"] = build_video_prompts(loc)
 
+    prefix = f"SAME HOUSE: {blueprint}. IDENTICAL building in all 6 images — only condition changes. "
     suffix = ", vertical 9:16 portrait, shot on Canon EOS R5, 8K photograph, no AI artifacts, hyperrealistic, lifelike"
-    img2img_suffix = ", 9:16 portrait, photorealistic, same building"
-    for key in ("image_prompt_before", "image_prompt_before_interior", "image_prompt_after"):
-        if suffix.lower() not in (data[key] or "").lower():
-            data[key] = (data[key] or "").rstrip(" .,") + suffix
-    for key in ("image_prompt_mid_exterior", "image_prompt_mid_interior", "image_prompt_after_interior"):
-        if (data.get(key) or "").strip() and img2img_suffix.lower() not in (data[key] or "").lower():
-            data[key] = (data[key] or "").rstrip(" .,") + img2img_suffix
+    img2img_suffix = ", REFERENCE = source of structure. COPY roof, windows, door positions. Change ONLY restoration. 9:16 portrait, photorealistic"
+
+    for key in ("image_prompt_before", "image_prompt_before_interior", "image_prompt_after",
+                "image_prompt_mid_exterior", "image_prompt_mid_interior", "image_prompt_after_interior"):
+        val = (data.get(key) or "").strip()
+        if not val:
+            continue
+        if "SAME HOUSE" not in val and "IDENTICAL" not in val:
+            data[key] = prefix + val
+        else:
+            data[key] = val
+        if key in ("image_prompt_before", "image_prompt_before_interior", "image_prompt_after"):
+            if suffix.lower() not in (data[key] or "").lower():
+                data[key] = data[key].rstrip(" .,") + suffix
+        else:
+            if img2img_suffix.lower() not in (data[key] or "").lower():
+                data[key] = data[key].rstrip(" .,") + img2img_suffix
 
     logger.success(f"[Mode3 Image Prompt] Generated prompts for: {house_type[:50]}...")
     return data
@@ -207,15 +235,10 @@ async def run_prompt_agent(
 
     # Parse JSON (strip markdown fences if present)
     raw = text.strip()
-    for pattern in (r"```(?:json)?\s*(.*?)\s*```", r"(\{[\s\S]*\})"):
-        m = re.search(pattern, raw, re.DOTALL)
-        if m:
-            raw = m.group(1).strip()
-            break
-
     try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
+        from utils.json_parse import parse_json_safe
+        data = parse_json_safe(raw)
+    except (json.JSONDecodeError, ValueError) as e:
         logger.error(f"[Mode3 Prompt] JSON parse error: {e}\nRaw: {raw[:500]}")
         raise ValueError(f"Prompt agent returned invalid JSON: {e}")
 

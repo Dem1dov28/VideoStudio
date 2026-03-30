@@ -62,7 +62,7 @@ async def run_mode2_pipeline(
     videos_dir.mkdir(parents=True, exist_ok=True)
     clips_dir.mkdir(parents=True, exist_ok=True)
 
-    from pipeline_control import checkpoint
+    from pipeline_control import checkpoint, fastgen_cancel_event
 
     logger.info(f"=== Mode 2 Pipeline | topic={topic!r} | session={session_id} ===")
 
@@ -87,6 +87,7 @@ async def run_mode2_pipeline(
         scenes, clips_dir,
         reference_image_path=reference_image_path,
         title=title,
+        cancel_event=fastgen_cancel_event(control),
     )
 
     # ── Step 3: TTS ──────────────────────────────────────────────────────────

@@ -6,6 +6,15 @@ Used by server and orchestrator to allow user to control running pipelines.
 from __future__ import annotations
 
 import asyncio
+import threading
+
+
+def fastgen_cancel_event(control: dict | None) -> threading.Event | None:
+    """Событие отмены для потоков FastGen (Playwright); при set — закрыть окна Chromium."""
+    if not control:
+        return None
+    ev = control.get("fastgen_cancel_event")
+    return ev if isinstance(ev, threading.Event) else None
 
 
 async def checkpoint(control: dict | None) -> None:

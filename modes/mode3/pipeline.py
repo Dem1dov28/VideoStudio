@@ -23,9 +23,27 @@ from typing import Any
 from loguru import logger
 
 from config import settings
+from modes.mode3.constants import (
+    EXTERIOR_IMG2IMG_STEP1_SLIGHT,
+    EXTERIOR_IMG2IMG_STEP2_PERFECT,
+    IMG2IMG_REF_PREFIX,
+    INTERIOR_IMG2IMG_STEP1_HALF,
+    INTERIOR_IMG2IMG_STEP2_PERFECT,
+    INTERIOR_INTRO_VIDEO_STEP1_HALF,
+    INTERIOR_INTRO_VIDEO_STEP2_PERFECT,
+    mode3_blueprint_lock,
+)
 from modes.mode3.prompt_agent import run_image_prompt_agent, run_prompt_agent
 from modes.mode3.video_assembler import assemble_mode3_video
 from modes.mode3.video_generator import generate_restoration_videos
+
+
+def _img_style_hint(text: str, max_len: int = 160) -> str:
+    """Короткий хвост из LLM-промпта (материалы/стиль), без перезаписи жёсткой инструкции img2img."""
+    t = (text or "").strip()
+    if not t:
+        return ""
+    return " Extra detail from brief: " + t[:max_len].rstrip() + "."
 
 
 async def _generate_mode3_images_chain(
@@ -36,22 +54,41 @@ async def _generate_mode3_images_chain(
     image_prompt_mid_interior: str,
     image_prompt_after_interior: str,
     output_dir: Path,
+    house_blueprint: str = "",
+    cancel_event=None,
 ) -> tuple[Path, Path, Path, Path, Path, Path]:
     """
-    Цепочка 6 изображений: text2img ruined → img2img mid → img2img final (экстерьер + интерьер).
+    Цепочка 6 изображений — ОДИН дом на разных этапах восстановления:
+    Экстерьер: ruined (text2img) → mid (img2img ref=0) → final (img2img ref=1)
+    Интерьер: ruined (img2img ref=0) → mid (ref=3) → final (ref=4)
     Returns: (ext_ruined, ext_mid, ext_final, int_ruined, int_mid, int_final)
     """
     from agents.content_generator.fastgen_scraper import generate_images_chain_fastgen
 
+    bp = mode3_blueprint_lock(house_blueprint)
+
+    # Интерьер связываем с экстерьером: int_ruined = img2img от ext_ruined (тот же дом!)
+    interior_ref_prompt = (
+        "CRITICAL: REFERENCE = exterior of THIS house. Generate INTERIOR view of SAME building. "
+        "Windows and door positions from exterior — identical inside. One room, studio layout. "
+    )
+    prompt_int_ruined = bp + interior_ref_prompt + (image_prompt_before_interior or "ruined interior, debris, collapsed beams")
+
+    # img2img: blueprint + жёсткая инструкция + короткий хвост (длинный хвост ломает консистентность)
+    mid_ext = bp + EXTERIOR_IMG2IMG_STEP1_SLIGHT + IMG2IMG_REF_PREFIX + _img_style_hint(image_prompt_mid_exterior)
+    after_ext = bp + EXTERIOR_IMG2IMG_STEP2_PERFECT + IMG2IMG_REF_PREFIX + _img_style_hint(image_prompt_after)
+    mid_int = bp + INTERIOR_IMG2IMG_STEP1_HALF + IMG2IMG_REF_PREFIX + _img_style_hint(image_prompt_mid_interior)
+    after_int = bp + INTERIOR_IMG2IMG_STEP2_PERFECT + IMG2IMG_REF_PREFIX + _img_style_hint(image_prompt_after_interior)
+
     steps = [
-        (image_prompt_before, None),              # 0: ruined exterior (text2img)
-        (image_prompt_mid_exterior, 0),            # 1: mid exterior (img2img)
-        (image_prompt_after, 1),                   # 2: final exterior (img2img)
-        (image_prompt_before_interior, None),      # 3: ruined interior (text2img)
-        (image_prompt_mid_interior, 3),            # 4: mid interior (img2img)
-        (image_prompt_after_interior, 4),           # 5: final interior (img2img)
+        (bp + image_prompt_before, None),          # 0: ruined exterior (text2img)
+        (mid_ext, 0),                             # 1: mid exterior (img2img ref=0)
+        (after_ext, 1),                           # 2: final exterior (img2img ref=1)
+        (prompt_int_ruined, 0),                   # 3: ruined interior (img2img ref=0)
+        (mid_int, 3),                             # 4: mid interior (img2img ref=3)
+        (after_int, 4),                           # 5: final interior (img2img ref=4)
     ]
-    paths = await generate_images_chain_fastgen(steps, output_dir)
+    paths = await generate_images_chain_fastgen(steps, output_dir, cancel_event=cancel_event)
     if len(paths) < 6:
         raise RuntimeError(f"[Mode3] Expected 6 images, got {len(paths)}")
     return tuple(Path(p) for p in paths)
@@ -75,7 +112,7 @@ async def run_mode3_pipeline_from_topic(
     clips_dir.mkdir(parents=True, exist_ok=True)
     images_dir.mkdir(parents=True, exist_ok=True)
 
-    from pipeline_control import checkpoint
+    from pipeline_control import checkpoint, fastgen_cancel_event
 
     logger.info(f"=== Mode 3 Pipeline (from topic) | session={session_id} ===")
 
@@ -99,6 +136,8 @@ async def run_mode3_pipeline_from_topic(
         prompt_data.get("image_prompt_mid_interior", ""),
         prompt_data.get("image_prompt_after_interior", ""),
         images_dir,
+        house_blueprint=prompt_data.get("house_blueprint", ""),
+        cancel_event=fastgen_cancel_event(control),
     )
     logger.success(
         f"[Mode3] Generated 6 images: ext {ext_ruined.name}→{ext_mid.name}→{ext_final.name} | "
@@ -108,6 +147,18 @@ async def run_mode3_pipeline_from_topic(
     await checkpoint(control)
     # ── Step 3: Video Generator — 5 clips with 6 ref images ──────────────────────
     logger.info("Step 3/4 - Mode3 Video Generator (intro + exterior×2 + interior + showcase)")
+    # Clip 2: ref = last frame clip 1 (цепочка) — плавный переход. Override только 0,1,3,4.
+    _bp = mode3_blueprint_lock(prompt_data.get("house_blueprint", ""))
+    interior_from_intro_prompts = (
+        _bp
+        + INTERIOR_INTRO_VIDEO_STEP1_HALF
+        + IMG2IMG_REF_PREFIX
+        + _img_style_hint(prompt_data.get("image_prompt_mid_interior")),
+        _bp
+        + INTERIOR_INTRO_VIDEO_STEP2_PERFECT
+        + IMG2IMG_REF_PREFIX
+        + _img_style_hint(prompt_data.get("image_prompt_after_interior")),
+    )
     video_paths = await generate_restoration_videos(
         video_prompts,
         clips_dir,
@@ -115,10 +166,15 @@ async def run_mode3_pipeline_from_topic(
         ref_overrides={
             0: ext_ruined,
             1: ext_ruined,
-            2: ext_mid,
             3: int_ruined,
-            4: ext_final,
         },
+        completion_targets={
+            2: ext_final,
+            3: int_final,
+        },
+        interior_from_intro_prompts=interior_from_intro_prompts,
+        house_blueprint=prompt_data.get("house_blueprint", ""),
+        cancel_event=fastgen_cancel_event(control),
     )
     valid_paths = [p for p in video_paths if p and Path(p).exists()]
     if len(valid_paths) < 5:
@@ -171,7 +227,7 @@ async def run_mode3_pipeline(
     clips_dir = videos_dir / "clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
 
-    from pipeline_control import checkpoint
+    from pipeline_control import checkpoint, fastgen_cancel_event
 
     logger.info(f"=== Mode 3 Pipeline | House Restoration | session={session_id} ===")
 
@@ -192,7 +248,9 @@ async def run_mode3_pipeline(
         prompt = (image_prompt_before_interior or "").rstrip(" .,") + suf
         try:
             from agents.content_generator.fastgen_scraper import generate_images_fastgen
-            paths = await generate_images_fastgen([prompt], images_dir)
+            paths = await generate_images_fastgen(
+                [prompt], images_dir, cancel_event=fastgen_cancel_event(control)
+            )
             if paths:
                 start_interior_path = Path(paths[0])
                 logger.info(f"[Mode3] Generated interior ref → {start_interior_path.name}")
@@ -210,6 +268,8 @@ async def run_mode3_pipeline(
         clips_dir,
         reference_image_path=start_image_path,
         ref_overrides=overrides,
+        house_blueprint=(prompt_data.get("location_description") or ""),
+        cancel_event=fastgen_cancel_event(control),
     )
     valid_paths = [p for p in video_paths if p and Path(p).exists()]
     if len(valid_paths) < 5:

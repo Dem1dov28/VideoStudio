@@ -10,6 +10,7 @@ Windows: write_videofile в subprocess — иначе WinError 32 при уда�
 from __future__ import annotations
 
 import sys
+import uuid
 from multiprocessing import Process, Queue
 from pathlib import Path
 
@@ -18,7 +19,11 @@ from loguru import logger
 from moviepy import VideoClip, VideoFileClip
 from PIL import Image
 
-from agents.video_editor.subtitles import render_subtitle_overlay
+from agents.video_editor.subtitles import (
+    render_mode4_quote_karaoke_overlay,
+    render_static_quote_caption_overlay,
+    render_subtitle_overlay,
+)
 from config import settings
 
 
@@ -79,8 +84,12 @@ def _make_subtitle_clip(
     bottom_crop: float,
     word_timestamps: list[tuple[float, float]] | None = None,
     tts_words: list[str] | None = None,
+    *,
+    static_caption: bool = False,
+    spoken_script: str | None = None,
+    author_name: str | None = None,
 ) -> tuple[VideoClip, VideoFileClip]:
-    """Видео + субтитры. Аудио только из FastGen. Субтитры синхронны с голосом (word_timestamps)."""
+    """Видео + субтитры. Аудио только из FastGen. Караоке по Whisper или статическая подпись."""
     vc = VideoFileClip(str(video_path))
     vid_dur = float(vc.duration)
     bounds_cache: list[tuple[int, int, int, int] | None] = [None]
@@ -100,17 +109,50 @@ def _make_subtitle_clip(
         arr = np.array(img)
 
         if subtitle_text and subtitle_text.strip():
-            ov = render_subtitle_overlay(
-                subtitle_text, target_w, target_h, t, vid_dur,
-                karaoke=False, word_timestamps=word_timestamps, tts_words=tts_words,
-            )
-            dur = vid_dur
-            fi = max(0, min(1, t / 0.45)) ** 2 * (3 - 2 * max(0, min(1, t / 0.45)))
-            fo = max(0, min(1, (dur - t) / 0.45)) ** 2 * (3 - 2 * max(0, min(1, (dur - t) / 0.45)))
-            alpha = fi * fo
-            if alpha < 1.0:
-                ov = ov.copy()
-                ov[:, :, 3] = (ov[:, :, 3] * alpha).astype(np.uint8)
+            if static_caption:
+                ov = render_static_quote_caption_overlay(
+                    subtitle_text, target_w, target_h, t, vid_dur,
+                )
+            elif (
+                word_timestamps
+                and tts_words
+                and spoken_script
+                and spoken_script.strip()
+            ):
+                ov = render_mode4_quote_karaoke_overlay(
+                    spoken_script.strip(),
+                    author_name,
+                    target_w,
+                    target_h,
+                    t,
+                    vid_dur,
+                    word_timestamps,
+                    tts_words,
+                )
+            elif word_timestamps and tts_words:
+                ov = render_subtitle_overlay(
+                    subtitle_text,
+                    target_w,
+                    target_h,
+                    t,
+                    vid_dur,
+                    karaoke=False,
+                    word_timestamps=word_timestamps,
+                    tts_words=tts_words,
+                )
+                dur = vid_dur
+                fi = max(0, min(1, t / 0.45)) ** 2 * (3 - 2 * max(0, min(1, t / 0.45)))
+                fo = max(0, min(1, (dur - t) / 0.45)) ** 2 * (
+                    3 - 2 * max(0, min(1, (dur - t) / 0.45))
+                )
+                alpha = fi * fo
+                if alpha < 1.0:
+                    ov = ov.copy()
+                    ov[:, :, 3] = (ov[:, :, 3] * alpha).astype(np.uint8)
+            else:
+                ov = render_static_quote_caption_overlay(
+                    subtitle_text, target_w, target_h, t, vid_dur,
+                )
             arr = _alpha_blit(arr, ov)
         return arr
 
@@ -124,6 +166,10 @@ def _assemble_mode4_impl(
     video_paths: list[Path | str],
     subtitle_texts: list[str],
     output_path: Path,
+    static_subtitles: bool = False,
+    spoken_scripts: list[str] | None = None,
+    authors: list[str | None] | None = None,
+    whisper_languages: list[str | None] | None = None,
 ) -> Path:
     """Внутренняя реализация — вызывается в subprocess на Windows."""
     from agents.video_editor.whisper_timestamps import get_word_timestamps_from_video
@@ -140,12 +186,40 @@ def _assemble_mode4_impl(
             logger.warning(f"[Mode4 Assembler] Skip missing: {path}")
             continue
         sub = subtitle_texts[i] if i < len(subtitle_texts) else ""
+        spoken = (
+            spoken_scripts[i]
+            if spoken_scripts and i < len(spoken_scripts) and spoken_scripts[i]
+            else None
+        )
+        author = authors[i] if authors and i < len(authors) else None
+        whisper_script = (spoken or sub).strip() if not static_subtitles else ""
         wt, tw = (None, None)
-        if sub and sub.strip():
-            wt, tw = get_word_timestamps_from_video(path, script=sub)
+        wlang = (
+            whisper_languages[i]
+            if whisper_languages and i < len(whisper_languages)
+            else None
+        )
+        if sub and sub.strip() and not static_subtitles and whisper_script:
+            wt, tw = get_word_timestamps_from_video(
+                path, script=whisper_script, language=wlang
+            )
             if wt and tw:
-                logger.info(f"[Mode4 Assembler] Whisper sync: {len(wt)} words (synced with FastGen voice)")
-        clip, vc = _make_subtitle_clip(path, target_w, target_h, fps, sub, bottom_crop, wt, tw)
+                logger.info(
+                    f"[Mode4 Assembler] Whisper sync: {len(wt)} words (karaoke + voice)"
+                )
+        clip, vc = _make_subtitle_clip(
+            path,
+            target_w,
+            target_h,
+            fps,
+            sub,
+            bottom_crop,
+            wt,
+            tw,
+            static_caption=static_subtitles and bool(sub and sub.strip()),
+            spoken_script=spoken,
+            author_name=author,
+        )
         clips.append(clip)
         vc_refs.append(vc)
 
@@ -156,6 +230,9 @@ def _assemble_mode4_impl(
     final = concatenate_videoclips(clips, method="compose")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    # MoviePy default: temp_audiofile_path="" → CWD + basename "video_ru" → same path for
+    # every parallel job → moov errors / WinError 32. Isolate per output dir + UUID.
+    temp_audio = output_path.parent / f"_m4_snd_{uuid.uuid4().hex}.mp4"
     logger.info(f"[Mode4 Assembler] Rendering → {output_path} ({len(clips)} clip(s), with audio)")
     try:
         final.write_videofile(
@@ -169,6 +246,8 @@ def _assemble_mode4_impl(
             preset="fast",
             ffmpeg_params=["-pix_fmt", "yuv420p", "-movflags", "+faststart"],
             logger=None,
+            temp_audiofile=str(temp_audio),
+            temp_audiofile_path=str(output_path.parent),
         )
         if not output_path.exists() or output_path.stat().st_size < 1024:
             raise RuntimeError(f"[Mode4 Assembler] Output invalid or empty: {output_path}")
@@ -189,9 +268,26 @@ def _assemble_mode4_impl(
     return output_path
 
 
-def _run_in_process(paths: list, texts: list, out: Path, err_q: Queue) -> None:
+def _run_in_process(
+    paths: list,
+    texts: list,
+    out: Path,
+    static_subtitles: bool,
+    err_q: Queue,
+    spoken_scripts: list[str] | None,
+    authors: list[str | None] | None,
+    whisper_languages: list[str | None] | None,
+) -> None:
     try:
-        _assemble_mode4_impl(paths, texts, out)
+        _assemble_mode4_impl(
+            paths,
+            texts,
+            out,
+            static_subtitles=static_subtitles,
+            spoken_scripts=spoken_scripts,
+            authors=authors,
+            whisper_languages=whisper_languages,
+        )
     except Exception as e:
         err_q.put(e)
 
@@ -200,6 +296,11 @@ def assemble_mode4_video(
     video_paths: list[Path | str],
     subtitle_texts: list[str],
     output_path: Path,
+    static_subtitles: bool = False,
+    *,
+    spoken_scripts: list[str] | None = None,
+    authors: list[str | None] | None = None,
+    whisper_languages: list[str | None] | None = None,
 ) -> Path:
     """
     Собирает видео. На Windows — в subprocess (избегаем WinError 32 с temp-файлами).
@@ -212,7 +313,11 @@ def assemble_mode4_video(
                 [str(Path(x)) for x in video_paths],
                 subtitle_texts,
                 output_path,
+                static_subtitles,
                 q,
+                spoken_scripts,
+                authors,
+                whisper_languages,
             ),
         )
         p.start()
@@ -220,5 +325,13 @@ def assemble_mode4_video(
         if not q.empty():
             raise q.get_nowait()
     else:
-        _assemble_mode4_impl(video_paths, subtitle_texts, output_path)
+        _assemble_mode4_impl(
+            video_paths,
+            subtitle_texts,
+            output_path,
+            static_subtitles=static_subtitles,
+            spoken_scripts=spoken_scripts,
+            authors=authors,
+            whisper_languages=whisper_languages,
+        )
     return output_path

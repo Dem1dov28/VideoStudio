@@ -10,8 +10,9 @@ from modes.mode3.constants import NUM_RESTORATION_CLIPS
 def _lock_line(spec: str) -> str:
     s = (spec or "").strip() or "small wooden house"
     return (
-        f"HOUSE LOCK — {s}. WINDOWS AND DOOR: positions NEVER change. "
-        "Same house in ALL clips. Reference = exact building. Copy reference. "
+        f"HOUSE LOCK — {s}. STRUCTURE_ID repeat: {s}. "
+        "FROZEN: roof shape, window count, door position — ZERO change across ALL clips. "
+        "Reference = exact building. First frame = reference PIXEL-PERFECT. Same house throughout. "
     )
 
 PHASE_TEMPLATES = [
@@ -23,17 +24,20 @@ PHASE_TEMPLATES = [
     (
         "REFERENCE = ruined exterior. Workers: debris, scaffolding, walls, roof. TIME-LAPSE. WINDOWS+DOOR positions = reference. End: roof done, no windows yet. "
     ),
-    # 2: экстерьер — окна + финиш → скриншот для clip 4
+    # 2: экстерьер — окна + финиш; финальный кадр = ПОЛНОСТЬЮ готово
     (
-        "REFERENCE = roof done, walls done. Workers: windows, door, paint, remove scaffolding. TIME-LAPSE. End: exterior restored. Screenshot this frame. "
+        "REFERENCE = roof and walls structurally done. Workers: install windows, door, exterior paint, remove ALL scaffolding. TIME-LAPSE. "
+        "FINAL FRAME MUST BE: fully finished exterior — fresh paint, all windows with glass, finished door, clean yard, ZERO scaffolding, ZERO workers, renovation 100% complete. "
     ),
-    # 3: интерьер
+    # 3: интерьер — финал = журнальный готовый зал
     (
-        "REFERENCE = ruined ONE room interior. Workers: debris, ceiling, walls, floor, paint, furniture. TIME-LAPSE. ONE room. End: completed interior. "
+        "REFERENCE = ruined ONE room interior. Workers: ceiling, walls, floor, paint, furniture, lighting. TIME-LAPSE. ONE room, layout frozen. "
+        "FINAL FRAME MUST BE: fully finished interior — painted walls, finished floor, furniture placed, lights on, NO workers, NO debris, magazine-ready COMPLETE room. "
     ),
-    # 4: финальный показ — ref = скриншот clip 2
+    # 4: финал — два референса (последние кадры clip 2 и 3) задают экстерьер и интерьер
     (
-        "REFERENCE = restored exterior (screenshot clip 2). THIS EXACT house. First frame = reference. No workers. Pan inside — interior of THIS house. ONE room. "
+        "Use BOTH reference images: first = finished exterior, second = finished interior of SAME house. "
+        "Start matching first ref (exterior), then transition inside matching second ref exactly. No workers. ONE room inside. "
     ),
 ]
 

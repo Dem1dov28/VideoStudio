@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
-import { RiVideoAddLine, RiHistoryLine, RiSparklingLine, RiBookmarkLine, RiLoader4Line } from 'react-icons/ri';
+import { RiVideoAddLine, RiHistoryLine, RiSparklingLine, RiBookmarkLine, RiLoader4Line, RiPauseLine } from 'react-icons/ri';
 import { motion } from 'framer-motion';
 import { api } from '../services/api';
 
@@ -10,12 +10,14 @@ const NAV = [
   { to: '/topics',  icon: RiBookmarkLine,  label: 'Темы' },
 ];
 
-const MODE_LABELS = { 1: '5 фактов', 2: 'Почему X?', 3: 'Реставрация', 4: 'Цитата' };
+const MODE_LABELS = { 1: '5 фактов', 2: 'Почему X?', 3: 'Реставрация', 4: 'Цитата', 5: 'Длинные', 6: 'Релакс', 7: '2 клипа', 8: 'Было→стало', 9: 'Keyframe', 10: 'Пляж' };
 
 export default function Layout({ children }) {
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const [activeSessions, setActiveSessions] = useState([]);
+  const runMatch = pathname.match(/^\/run\/([^/]+)/);
+  const activeRunSessionId = runMatch ? runMatch[1] : null;
 
   useEffect(() => {
     let mounted = true;
@@ -52,21 +54,33 @@ export default function Layout({ children }) {
               В работе ({activeSessions.length})
             </div>
             <div className="space-y-1">
-              {activeSessions.map(s => (
-                <button
-                  key={s.session_id}
-                  onClick={() => navigate(`/run/${s.session_id}`)}
-                  className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left text-xs bg-brand-600/10 border border-brand-600/20 hover:border-brand-600/40 transition-colors"
-                >
-                  <RiLoader4Line className="flex-shrink-0 animate-spin text-brand-400 text-sm" />
-                  <span className="truncate flex-1 text-[#e4e4f0]">
-                    {s.topic || `#${s.session_id?.slice(-8)}`}
-                  </span>
-                  <span className="text-[10px] text-[#71717a] flex-shrink-0">
-                    {MODE_LABELS[s.mode] || s.mode}
-                  </span>
-                </button>
-              ))}
+              {activeSessions.map(s => {
+                const isCurrent = activeRunSessionId && s.session_id === activeRunSessionId;
+                const isPaused = s.status === 'paused';
+                return (
+                  <button
+                    key={s.session_id}
+                    onClick={() => navigate(`/run/${s.session_id}`)}
+                    className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left text-xs border transition-colors ${
+                      isCurrent
+                        ? 'bg-brand-600/25 border-brand-500/60 ring-1 ring-brand-500/30'
+                        : 'bg-brand-600/10 border-brand-600/20 hover:border-brand-600/40'
+                    }`}
+                  >
+                    {isPaused ? (
+                      <RiPauseLine className="flex-shrink-0 text-amber-400 text-sm" />
+                    ) : (
+                      <RiLoader4Line className="flex-shrink-0 animate-spin text-brand-400 text-sm" />
+                    )}
+                    <span className="truncate flex-1 text-[#e4e4f0]">
+                      {s.topic || `#${s.session_id?.slice(-8)}`}
+                    </span>
+                    <span className="text-[10px] text-[#71717a] flex-shrink-0">
+                      {MODE_LABELS[s.mode] || s.mode}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           </div>
         )}

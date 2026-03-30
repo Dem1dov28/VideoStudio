@@ -1,8 +1,8 @@
 """
 Subtitle overlay for MoviePy 2.x — text-only subtitle.
 
-- All words white (no karaoke gold/dim)
-- Line transitions with crossfade for smoothness
+- Mode 4: активное слово подсвечивается (SUB_GOLD), синхрон Whisper по аудио
+- Прочие режимы: строки по одной с кроссфейдом; без золотой караоке
 """
 
 from __future__ import annotations
@@ -77,18 +77,35 @@ def _merge_dashes_with_words(words: list[str]) -> list[str]:
     return result
 
 
+def _pil_text_advance(draw: ImageDraw.ImageDraw, font: object, text: str, stroke_w: int) -> float:
+    """Ширина строки для вёрстки; в старых Pillow у textlength нет stroke_width."""
+    if not text:
+        return 0.0
+    try:
+        return float(draw.textlength(text, font=font, stroke_width=stroke_w))
+    except TypeError:
+        bb = draw.textbbox((0, 0), text, font=font, stroke_width=stroke_w)
+        return float(bb[2] - bb[0])
+
+
 def _wrap_text(
     text: str,
     font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
     max_px: int,
     draw: ImageDraw.ImageDraw,
+    *,
+    stroke_width: int | None = None,
 ) -> list[str]:
     words = text.split()
     lines: list[str] = []
     current = ""
+    tb_kw = {}
+    if stroke_width is not None:
+        tb_kw["stroke_width"] = stroke_width
     for word in words:
         candidate = (current + " " + word).strip()
-        w = draw.textbbox((0, 0), candidate, font=font)[2]
+        bb = draw.textbbox((0, 0), candidate, font=font, **tb_kw)
+        w = bb[2] - bb[0]
         if w <= max_px:
             current = candidate
         else:
@@ -365,6 +382,207 @@ def render_subtitle_overlay(
     dr_out = ImageDraw.Draw(img_out)
     _draw_line(img_out, line_words, width, height, font, dr_out)
     return np.array(img_out)
+
+
+def render_static_quote_caption_overlay(
+    text: str,
+    width: int,
+    height: int,
+    t: float,
+    duration: float,
+    *,
+    fade_in: float = 0.45,
+    bottom_frac: float = 0.88,
+) -> np.ndarray:
+    """
+    Полная подпись «"цитата" – Автор» несколькими строками у нижнего края (Mode 4).
+    Без пословной синхронизации с Whisper — текст виден на протяжении ролика.
+    Межстрочный интервал фиксированный; textbbox с учётом обводки — без наложения строк.
+    """
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    if not text or not text.strip():
+        return np.array(img)
+    draw = ImageDraw.Draw(img)
+    font_size = max(30, min(54, width // 16))
+    font = load_ui_font(font_size, bold=True)
+    stroke_w = 5
+    max_text_w = int(width * dt.SUBTITLE_MAX_WIDTH_FRAC) - 2 * dt.SUBTITLE_PAD_X
+    lines = _wrap_text(
+        text.strip(), font, max_text_w, draw, stroke_width=stroke_w,
+    )
+    if not lines:
+        return np.array(img)
+
+    line_heights: list[int] = []
+    for line in lines:
+        bb = draw.textbbox((0, 0), line, font=font, stroke_width=stroke_w)
+        line_heights.append(bb[3] - bb[1])
+    # Фиксированный зазор между полосами строк + одинаковая высота полосы (max высота строки)
+    line_gap = max(14, font_size // 4) + stroke_w
+    max_lh = max(line_heights)
+    n = len(lines)
+    total_h = n * max_lh + (n - 1) * line_gap
+    bottom_y = int(height * bottom_frac)
+    y_band = max(dt.SUBTITLE_PAD_Y, bottom_y - total_h)
+
+    alpha_m = min(1.0, t / fade_in) if fade_in > 0 else 1.0
+    for line, lh in zip(lines, line_heights):
+        bb = draw.textbbox((0, 0), line, font=font, stroke_width=stroke_w)
+        line_w = bb[2] - bb[0]
+        x = (width - line_w) // 2
+        y_text = y_band + (max_lh - lh) // 2
+        draw.text(
+            (x, y_text),
+            line,
+            font=font,
+            fill=dt.SUB_WHITE,
+            stroke_width=stroke_w,
+            stroke_fill=(20, 12, 30, 245),
+        )
+        y_band += max_lh + line_gap
+
+    arr = np.array(img)
+    if alpha_m < 1.0:
+        arr = arr.copy()
+        arr[:, :, 3] = (arr[:, :, 3].astype(np.float32) * alpha_m).astype(np.uint8)
+    return arr
+
+
+def render_mode4_quote_karaoke_overlay(
+    quote_text: str,
+    author_name: str | None,
+    width: int,
+    height: int,
+    t: float,
+    duration: float,
+    word_timestamps: list[tuple[float, float]] | None,
+    tts_words: list[str] | None,
+    *,
+    fade_in: float = 0.45,
+    bottom_frac: float = 0.88,
+) -> np.ndarray:
+    """
+    Mode 4: многострочная цитата у нижнего края; текущее слово — SUB_GOLD, остальные белые.
+    Таймкоды Whisper по дорожке FastGen (word_timestamps + tts_words → align к словам скрипта).
+    Автор под цитатой отдельной строкой (без караоке).
+    """
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    qt = (quote_text or "").strip()
+    if not qt:
+        return np.array(img)
+
+    draw = ImageDraw.Draw(img)
+    font_size = max(30, min(54, width // 16))
+    font = load_ui_font(font_size, bold=True)
+    stroke_w = 5
+
+    raw = qt.split()
+    words = _merge_dashes_with_words(raw)
+    words = _merge_short_with_adjacent(words)
+    ts_for_display: list[tuple[float, float]] | None = None
+    if word_timestamps and tts_words and len(tts_words) == len(word_timestamps):
+        if len(words) == len(word_timestamps):
+            ts_for_display = word_timestamps
+        else:
+            ts_for_display = align_script_to_whisper(words, word_timestamps)
+
+    if not words:
+        return np.array(img)
+
+    if ts_for_display and len(ts_for_display) > 0 and t < ts_for_display[0][0]:
+        return np.array(img)
+
+    active_index = _active_word_index(t, duration, words, ts_for_display)
+
+    max_text_w = int(width * dt.SUBTITLE_MAX_WIDTH_FRAC) - 2 * dt.SUBTITLE_PAD_X
+    lines: list[list[tuple[str, int]]] = []
+    line: list[tuple[str, int]] = []
+    for i, w in enumerate(words):
+        candidate = " ".join(wd for wd, _ in line) + (" " + w if line else w)
+        bb = draw.textbbox((0, 0), candidate, font=font, stroke_width=stroke_w)
+        if (bb[2] - bb[0]) <= max_text_w:
+            line.append((w, i))
+        else:
+            if line:
+                lines.append(line)
+            line = [(w, i)]
+    if line:
+        lines.append(line)
+
+    line_heights: list[int] = []
+    for ln in lines:
+        disp = " ".join(w for w, _ in ln)
+        bb = draw.textbbox((0, 0), disp, font=font, stroke_width=stroke_w)
+        line_heights.append(bb[3] - bb[1])
+    # Одна высота полосы для всех строк — иначе у кириллицы (р, у, д…) межстрочка «гуляет», латиница визуально ровнее
+    max_lh = max(line_heights) if line_heights else 0
+    line_gap = max(6, font_size // 10) + max(2, stroke_w // 2)
+
+    author_line = ""
+    author_h = 0
+    author_gap = 0
+    an = (author_name or "").strip()
+    if an:
+        author_line = f"– {an}"
+        bb_a = draw.textbbox((0, 0), author_line, font=font, stroke_width=stroke_w)
+        author_h = bb_a[3] - bb_a[1]
+        author_gap = line_gap
+
+    n = len(lines)
+    total_quote_h = n * max_lh + (n - 1) * line_gap if n else 0
+    total_h = total_quote_h + (author_gap + author_h if author_h else 0)
+    bottom_y = int(height * bottom_frac)
+    y_band = max(dt.SUBTITLE_PAD_Y, bottom_y - total_h)
+
+    # Позиции слов через textlength префиксов — как у одной строки с пробелами:
+    # одинаковые зазоры + кернинг; textbbox по словам + отдельный пробел даёт «рваные» промежутки.
+    def _word_start_x(words_row: list[str], j: int) -> float:
+        if j <= 0:
+            return 0.0
+        prefix = " ".join(words_row[0:j]) + " "
+        return _pil_text_advance(draw, font, prefix, stroke_w)
+
+    for li, (ln, lh) in enumerate(zip(lines, line_heights)):
+        words_line = [w for w, _ in ln]
+        disp = " ".join(words_line)
+        total_line_w = _pil_text_advance(draw, font, disp, stroke_w)
+        x0 = int(round((width - total_line_w) / 2.0))
+        y_text = y_band + (max_lh - lh) // 2
+        for j, (word, wi) in enumerate(ln):
+            cx = x0 + int(round(_word_start_x(words_line, j)))
+            is_act = wi == active_index
+            fill = dt.SUB_GOLD if is_act else dt.SUB_WHITE
+            if _NUMBER_RE.search(word) and not is_act:
+                fill = dt.SUB_PURPLE
+            draw.text(
+                (cx, y_text),
+                word,
+                font=font,
+                fill=fill,
+                stroke_width=stroke_w,
+                stroke_fill=(20, 12, 30, 245),
+            )
+        y_band += max_lh + (line_gap if li < len(lines) - 1 else 0)
+
+    if author_line:
+        aw = _pil_text_advance(draw, font, author_line, stroke_w)
+        ax = int(round((width - aw) / 2.0))
+        ay = y_band + author_gap
+        draw.text(
+            (ax, ay),
+            author_line,
+            font=font,
+            fill=(*dt.TEXT_MUTED, 255),
+            stroke_width=stroke_w,
+            stroke_fill=(20, 12, 30, 245),
+        )
+
+    arr = np.array(img)
+    alpha_m = min(1.0, t / fade_in) if fade_in > 0 else 1.0
+    if alpha_m < 1.0:
+        arr = arr.copy()
+        arr[:, :, 3] = (arr[:, :, 3].astype(np.float32) * alpha_m).astype(np.uint8)
+    return arr
 
 
 # ── Backwards-compatible alias (static frame = no karaoke progression) ─────

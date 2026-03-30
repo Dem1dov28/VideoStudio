@@ -10,6 +10,7 @@ Mode 6: Viral Cartoon Drama
 Mode 7: Animal Keyboard Videos
 Mode 8: House Building Timelapse
 Mode 9: Vehicle Assembly Timelapse
+Mode 10: Beach cleanup timelapse (логика как mode 8)
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ async def _run_pipeline_wrapped(
     mode4_quote: str | None = None,
     mode4_person_name: str | None = None,
     mode4_photo_path: str | None = None,
+    mode4_only_lang: str | None = None,
     mode6_num_characters: int = 3,
     mode7_keyboards: list[str] | None = None,
     mode7_animal_type: str | None = None,
@@ -56,10 +58,27 @@ async def _run_pipeline_wrapped(
     mode9_vehicle_type: str | None = None,
     mode9_location: str | None = None,
     mode9_num_stages: int = 5,
+    mode10_beach_type: str | None = None,
+    mode10_coast_setting: str | None = None,
+    mode10_num_stages: int = 5,
     control: dict | None = None,
 ) -> dict[str, Any]:
     """Internal pipeline runner with session context."""
     from pipeline_control import checkpoint
+
+    # Mode 10: Beach cleanup timelapse
+    if mode == 10:
+        await checkpoint(control)
+        from modes.mode10.pipeline import run_mode10_pipeline
+        return await run_mode10_pipeline(
+            session_id=session_id,
+            local_only=local_only,
+            beach_type=mode10_beach_type,
+            coast_setting=mode10_coast_setting,
+            num_stages=mode10_num_stages,
+            language=language or "ru",
+            control=control,
+        )
 
     # Mode 9: Vehicle Assembly Timelapse
     if mode == 9:
@@ -137,9 +156,14 @@ async def _run_pipeline_wrapped(
             person_name=mode4_person_name.strip(),
             photo_path=mode4_photo_path,
             session_id=session_id,
-            language=language,
+            language="both",
             show_subtitles=show_subtitles,
             control=control,
+            only_lang=(
+                (mode4_only_lang or "").strip().lower()
+                if (mode4_only_lang or "").strip().lower() in ("ru", "en")
+                else None
+            ),
         )
 
     # Mode 3: Восстановление домов

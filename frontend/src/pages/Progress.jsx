@@ -1,10 +1,37 @@
-import { useEffect, useState, useRef, useMemo } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { RiArrowLeftLine, RiDownloadLine, RiVideoLine, RiCheckboxCircleLine, RiPauseLine, RiPlayLine, RiStopLine, RiRestartLine, RiFileCopyLine, RiCheckLine } from 'react-icons/ri';
+import {
+  RiArrowLeftLine,
+  RiDownloadLine,
+  RiVideoLine,
+  RiCheckboxCircleLine,
+  RiPauseLine,
+  RiPlayLine,
+  RiStopLine,
+  RiRestartLine,
+  RiFileTextLine,
+  RiFileCopyLine,
+  RiCheckLine,
+} from 'react-icons/ri';
 import { subscribeToStream, api } from '../services/api';
 import LogConsole from '../components/LogConsole';
 import StepIndicator from '../components/StepIndicator';
+
+const MODE_LABELS = { 1: '5 фактов', 2: 'Почему X?', 3: 'Реставрация', 4: 'Цитата', 5: 'Длинные', 6: 'Релакс', 7: '2 клипа', 8: 'Было→стало' };
+
+function downloadTextFile(filename, text) {
+  if (text == null || text === '') return;
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 
 export default function Progress() {
   const { sid } = useParams();
@@ -13,31 +40,69 @@ export default function Progress() {
   const [logs, setLogs]   = useState([]);
   const [done, setDone]   = useState(null);   // result object
   const [error, setError] = useState('');
-  const [status, setStatus] = useState('running');  // running | paused | cancelled
+  const [status, setStatus] = useState('running');  // running | paused | cancelled | error
   const [busy, setBusy]   = useState(false);
-  const [copied, setCopied] = useState('');  // which field was copied
-  const cleanupRef = useRef(null);
+  const [sessionTopic, setSessionTopic] = useState('');
+  const [sessionMode, setSessionMode] = useState(1);
+  const [copied, setCopied] = useState('');
 
   useEffect(() => {
-    api.getPipelineStatus(sid).then(r => {
-      setStatus(r.status || 'running');
-      if (r.status === 'done' && r.result) {
-        setDone(r.result);
-      } else if (r.status === 'error' && r.error) {
-        setError(r.error);
+    setLogs([]);
+    setDone(null);
+    setError('');
+    setStatus('running');
+    setBusy(false);
+    setSessionTopic('');
+    setSessionMode(1);
+    setCopied('');
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const r = await api.getPipelineStatus(sid);
+        if (cancelled) return;
+        setStatus(r.status || 'running');
+        setSessionTopic(r.topic || '');
+        setSessionMode(typeof r.mode === 'number' ? r.mode : 1);
+        if (r.status === 'done' && r.result) {
+          setDone({ ...r.result, session_id: r.result.session_id || sid });
+        } else if (r.status === 'error' && r.error) {
+          setError(r.error);
+        } else if (r.status === 'cancelled') {
+          setStatus('cancelled');
+          setError(r.error || 'Генерация отменена');
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setStatus('error');
+          setError(e.message || 'Сессия не найдена на сервере');
+        }
       }
-    }).catch(() => {});
-  }, [sid]);
+    })();
 
-  useEffect(() => {
     const cleanup = subscribeToStream(
       sid,
-      (entry) => setLogs(prev => [...prev, entry]),
-      (result) => setDone(result),
-      (err)    => { setError(String(err)); setStatus('error'); },
+      (entry) => {
+        if (!cancelled) setLogs((prev) => [...prev, entry]);
+      },
+      (result) => {
+        if (!cancelled) {
+          setDone({ ...result, session_id: result.session_id || sid });
+        }
+      },
+      (err) => {
+        if (!cancelled) {
+          setError(String(err));
+          setStatus('error');
+        }
+      },
     );
-    cleanupRef.current = cleanup;
-    return cleanup;
+
+    return () => {
+      cancelled = true;
+      cleanup();
+    };
   }, [sid]);
 
   // Video URL(s) from result — один файл или несколько (Mode 4 bilingual)
@@ -96,17 +161,40 @@ export default function Progress() {
 
       {/* Title */}
       <div className="mb-6">
+        <div className="mb-4 p-3 rounded-xl bg-[#14141c] border border-[#27272f]">
+          <p className="text-[10px] font-semibold text-brand-400/90 uppercase tracking-wider mb-1">
+            Сейчас на экране
+          </p>
+          <p className="text-sm text-[#e4e4f0] font-medium leading-snug line-clamp-4">
+            {sessionTopic || (done?.topic) || 'Загрузка описания…'}
+          </p>
+          <p className="text-xs text-[#71717a] mt-1.5 flex flex-wrap items-center gap-x-1">
+            <span>Режим:</span>
+            <span className="text-[#a1a1aa]">{MODE_LABELS[sessionMode] ?? sessionMode}</span>
+            <span className="text-[#3f3f46]">·</span>
+            <span className="font-mono text-[#52525b]">session …{sid?.slice(-8)}</span>
+          </p>
+        </div>
         <h1 className="text-xl font-bold text-white">
-          {done ? '🎉 Видео готово!' : error ? '❌ Ошибка' : status === 'paused' ? '⏸️ На паузе' : '⚙️ Генерация...'}
+          {done
+            ? '🎉 Видео готово!'
+            : status === 'cancelled'
+              ? '⏹️ Остановлено'
+              : error
+                ? '❌ Ошибка'
+                : status === 'paused'
+                  ? '⏸️ На паузе'
+                  : '⚙️ Генерация...'}
         </h1>
-        {done?.topic && (
-          <p className="text-[#71717a] text-sm mt-1">{done.topic}</p>
+        {!done?.quote_caption_ru && !done?.quote_caption_en && (done?.quote_caption || done?.topic) && (
+          <p className="text-[#d4d4d8] text-sm mt-1 leading-relaxed whitespace-pre-wrap">
+            {done.quote_caption || done.topic}
+          </p>
         )}
-        <p className="text-[#52525b] text-xs font-mono mt-1">session: {sid}</p>
       </div>
 
       {/* Pause / Resume / Cancel */}
-      {!done && !error && (
+      {!done && !error && status !== 'cancelled' && (
         <div className="flex gap-2 mb-4">
           {status === 'running' && (
             <button
@@ -225,13 +313,45 @@ export default function Progress() {
                       <source src={url} type="video/mp4" />
                     </video>
                   </div>
+                  {(() => {
+                    const cap =
+                      label === 'RU'
+                        ? done?.quote_caption_ru
+                        : label === 'EN'
+                          ? done?.quote_caption_en
+                          : done?.quote_caption || done?.quote_caption_ru || done?.topic;
+                    if (!cap) return null;
+                    return (
+                      <p className="text-[#d4d4d8] text-sm leading-relaxed text-center px-1">
+                        {cap}
+                      </p>
+                    );
+                  })()}
                   <a
                     href={url}
                     download={`video_${label || idx}.mp4`}
                     className="btn-secondary flex items-center gap-2 text-sm self-start"
                   >
-                    <RiDownloadLine /> Скачать {label ? label : ''} MP4
+                    <RiDownloadLine /> Скачать {label ? `${label} ` : ''}MP4
                   </a>
+                  {label === 'RU' && done?.quote_caption_ru && (
+                    <button
+                      type="button"
+                      onClick={() => downloadTextFile(`quote_caption_ru_${sid?.slice(-8) || 'video'}.txt`, done.quote_caption_ru)}
+                      className="btn-secondary flex items-center gap-2 text-sm self-start"
+                    >
+                      <RiFileTextLine /> Скачать подпись RU (.txt)
+                    </button>
+                  )}
+                  {label === 'EN' && done?.quote_caption_en && (
+                    <button
+                      type="button"
+                      onClick={() => downloadTextFile(`quote_caption_en_${sid?.slice(-8) || 'video'}.txt`, done.quote_caption_en)}
+                      className="btn-secondary flex items-center gap-2 text-sm self-start"
+                    >
+                      <RiFileTextLine /> Скачать подпись EN (.txt)
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
