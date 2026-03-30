@@ -8,6 +8,7 @@ import {
 } from 'react-icons/ri';
 import { useLanguage } from '../context/LanguageContext';
 import { useMode } from '../context/ModeContext';
+import { useRateLimit } from '../context/RateLimitContext';
 import { api } from '../services/api';
 import ScenarioEditor from '../components/ScenarioEditor';
 
@@ -84,6 +85,7 @@ export default function Generate() {
   const navigate = useNavigate();
   const { mode, setMode } = useMode();
   const { lang, setLang } = useLanguage();
+  const { checkAndStartVideo, addToQueue } = useRateLimit();
 
   /* form state */
   const [topic, setTopic]           = useState('');
@@ -178,9 +180,17 @@ export default function Generate() {
         language: lang,
         reference_image_path: referenceImage?.path || null,
       };
-      const res = await api.startPipeline(payload);
+      
+      // Use rate limit check
+      const result = await checkAndStartVideo(payload);
+      
       setStep('form');
-      setStartedSession(res.session_id);
+      if (result.status === 'started') {
+        setStartedSession(result.session_id);
+      } else if (result.status === 'queued') {
+        setError('Лимит исчерпан. Видео добавлено в очередь и запустится в следующем часе.');
+        setStep('editing');
+      }
     } catch (e) {
       setError(e.message);
       setStep('editing');
@@ -208,9 +218,16 @@ export default function Generate() {
         mode: 5,
         language: mode5Lang,
       };
-      const res = await api.startPipeline(payload);
+      
+      // Use rate limit check
+      const result = await checkAndStartVideo(payload);
+      
       setStep('form');
-      setStartedSession(res.session_id);
+      if (result.status === 'started') {
+        setStartedSession(result.session_id);
+      } else if (result.status === 'queued') {
+        setError('Лимит исчерпан. Видео добавлено в очередь и запустится в следующем часе.');
+      }
     } catch (e) {
       setError(e.message);
       setStep('form');
@@ -235,9 +252,16 @@ export default function Generate() {
         language: lang,
         mode6_num_characters: mode6NumCharacters,
       };
-      const res = await api.startPipeline(payload);
+      
+      // Use rate limit check
+      const result = await checkAndStartVideo(payload);
+      
       setStep('form');
-      setStartedSession(res.session_id);
+      if (result.status === 'started') {
+        setStartedSession(result.session_id);
+      } else if (result.status === 'queued') {
+        setError('Лимит исчерпан. Видео добавлено в очередь и запустится в следующем часе.');
+      }
     } catch (e) {
       setError(e.message);
       setStep('form');
@@ -267,9 +291,16 @@ export default function Generate() {
         mode7_animal_type: mode7AnimalType === 'random' ? null : mode7AnimalType,
         mode7_keyboards: mode7Keyboards,
       };
-      const res = await api.startPipeline(payload);
+      
+      // Use rate limit check
+      const result = await checkAndStartVideo(payload);
+      
       setStep('form');
-      setStartedSession(res.session_id);
+      if (result.status === 'started') {
+        setStartedSession(result.session_id);
+      } else if (result.status === 'queued') {
+        setError('Лимит исчерпан. Видео добавлено в очередь и запустится в следующем часе.');
+      }
     } catch (e) {
       setError(e.message);
       setStep('form');
@@ -310,9 +341,16 @@ export default function Generate() {
         mode8_start_frame_path: mode8UseKeyframes ? mode8StartFrame?.path : null,
         mode8_end_frame_path: mode8UseKeyframes ? mode8EndFrame?.path : null,
       };
-      const res = await api.startPipeline(payload);
+      
+      // Use rate limit check
+      const result = await checkAndStartVideo(payload);
+      
       setStep('form');
-      setStartedSession(res.session_id);
+      if (result.status === 'started') {
+        setStartedSession(result.session_id);
+      } else if (result.status === 'queued') {
+        setError('Лимит исчерпан. Видео добавлено в очередь и запустится в следующем часе.');
+      }
     } catch (e) {
       setError(e.message);
       setStep('form');
@@ -339,9 +377,16 @@ export default function Generate() {
         mode10_coast_setting: mode10CoastSetting === 'random' ? null : mode10CoastSetting,
         mode10_num_stages: mode10NumStages,
       };
-      const res = await api.startPipeline(payload);
+      
+      // Use rate limit check
+      const result = await checkAndStartVideo(payload);
+      
       setStep('form');
-      setStartedSession(res.session_id);
+      if (result.status === 'started') {
+        setStartedSession(result.session_id);
+      } else if (result.status === 'queued') {
+        setError('Лимит исчерпан. Видео добавлено в очередь и запустится в следующем часе.');
+      }
     } catch (e) {
       setError(e.message);
       setStep('form');
@@ -368,9 +413,16 @@ export default function Generate() {
         mode9_location: mode9Location === 'random' ? null : mode9Location,
         mode9_num_stages: mode9NumStages,
       };
-      const res = await api.startPipeline(payload);
+      
+      // Use rate limit check
+      const result = await checkAndStartVideo(payload);
+      
       setStep('form');
-      setStartedSession(res.session_id);
+      if (result.status === 'started') {
+        setStartedSession(result.session_id);
+      } else if (result.status === 'queued') {
+        setError('Лимит исчерпан. Видео добавлено в очередь и запустится в следующем часе.');
+      }
     } catch (e) {
       setError(e.message);
       setStep('form');
@@ -410,9 +462,16 @@ export default function Generate() {
         mode4_photo_path: mode4Photo.path,
         mode4_only_lang: mode4OutputLang === 'both' ? null : mode4OutputLang,
       };
-      const res = await api.startPipeline(payload);
+      
+      // Use rate limit check
+      const result = await checkAndStartVideo(payload);
+      
       setStep('form');
-      setStartedSession(res.session_id);
+      if (result.status === 'started') {
+        setStartedSession(result.session_id);
+      } else if (result.status === 'queued') {
+        setError('Лимит исчерпан. Видео добавлено в очередь и запустится в следующем часе.');
+      }
     } catch (e) {
       setError(e.message);
       setStep('form');
@@ -449,9 +508,16 @@ export default function Generate() {
         mode3_end_image_path: useType ? null : mode3EndImage?.path,
         mode3_topic: useType ? houseLabel : null,
       };
-      const res = await api.startPipeline(payload);
+      
+      // Use rate limit check
+      const result = await checkAndStartVideo(payload);
+      
       setStep('form');
-      setStartedSession(res.session_id);
+      if (result.status === 'started') {
+        setStartedSession(result.session_id);
+      } else if (result.status === 'queued') {
+        setError('Лимит исчерпан. Видео добавлено в очередь и запустится в следующем часе.');
+      }
     } catch (e) {
       setError(e.message);
       setStep('form');
@@ -467,7 +533,7 @@ export default function Generate() {
     setError('');
     setStep('launching');
     try {
-      const res = await api.startPipeline({
+      const payload = {
         topic: topic.trim(),
         auto_topic: false,
         num_scenes: scenes,
@@ -479,12 +545,20 @@ export default function Generate() {
         mode,
         language: lang,
         reference_image_path: referenceImage?.path || null,
-      });
+      };
+      
+      // Use rate limit check
+      const result = await checkAndStartVideo(payload);
+      
       setStep('form');
-      setStartedSession(res.session_id);
+      if (result.status === 'started') {
+        setStartedSession(result.session_id);
+      } else if (result.status === 'queued') {
+        setError('Лимит исчерпан. Видео добавлено в очередь и запустится в следующем часе.');
+      }
     } catch (e) {
       setError(e.message);
-      setStep('form');
+      setStep('select_mode');
     }
   }
 

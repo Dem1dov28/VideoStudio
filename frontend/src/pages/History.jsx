@@ -1,7 +1,8 @@
 import { useEffect, useState, useReducer } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { RiVideoLine, RiLoader4Line, RiCloseLine } from 'react-icons/ri';
+import { RiVideoLine, RiLoader4Line, RiCloseLine, RiRestartLine } from 'react-icons/ri';
 import { api } from '../services/api';
+import { useNavigate } from 'react-router-dom';
 import VideoCard from '../components/VideoCard';
 
 const initialState = { videos: [], loading: true, error: false };
@@ -20,8 +21,10 @@ function historyReducer(state, action) {
 }
 
 export default function History() {
+  const navigate = useNavigate();
   const [state, dispatch] = useReducer(historyReducer, initialState);
   const [selected, setSelected] = useState(null);
+  const [regenBusy, setRegenBusy] = useState(false);
   const { videos, loading, networkError } = {
     videos: state.videos,
     loading: state.loading,

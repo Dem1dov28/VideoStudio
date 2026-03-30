@@ -3,6 +3,7 @@ import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { RiVideoAddLine, RiHistoryLine, RiSparklingLine, RiBookmarkLine, RiLoader4Line, RiPauseLine } from 'react-icons/ri';
 import { motion } from 'framer-motion';
 import { api } from '../services/api';
+import RateLimitPanel from './RateLimitPanel';
 
 const NAV = [
   { to: '/',        icon: RiVideoAddLine,  label: 'Создать' },
@@ -84,6 +85,9 @@ export default function Layout({ children }) {
             </div>
           </div>
         )}
+
+        {/* Rate Limit Panel */}
+        <RateLimitPanel />
 
         {/* Nav */}
         <nav className="flex-1 px-3 py-4 space-y-1">

@@ -1,36 +1,14 @@
 GENERATED VIDEO PROMPT SAMPLE
 ================================================================================
 
-**TRANSITION:** [Land Preparation] -> [Foundation]
+**KEY VISUAL CHANGES** (MAX 3 BULLETS): 
+• Workers clearing the land, removing vegetation, and leveling the ground around the fixed house structure. 
+• Heavy machinery, such as excavators and bulldozers, digging and preparing the foundation trenches. 
+• Concrete being poured into the trenches to form a solid foundation base, while the house remains unaltered. 
 
-**CAMERA & CONTINUITY:** 
-• Fixed tripod (X=0.0m, Y=8.0m, Z=25.0m), 35mm focal length 
-• Horizon at 60% from bottom, elevated viewpoint 
-• Sky, trees, landscape unchanged across frames 
-• Only house construction changes - background frozen 
-
-**KEY VISUAL CHANGES** 
-• Cleared land transitions to wooden forms filled with wet concrete, dimensions aligning to house footprint. 
-• Workers operate a concrete mixer, pouring wet concrete into forms while ensuring rebar is properly positioned and aligned. 
-• Foundation forms are smoothed using trowels, revealing a level surface and complete footprint ready for further construction. 
-
-**MOTION TYPE:** [timelapse]
-
-**MOTION DETAIL:** 
-• Continuous forward build, smooth concrete pouring process. 
-• No reversing - only forward advancement of construction elements. 
-• Active workers/machinery, tools: concrete mixer, trowels, rebar cutters. 
-
-**BUILDING HEIGHT CONTEXT:** 
-• Current floor: ground, height: ~0 meters. 
-• Vertical progress: foundation sets stage for the upward build. 
-
-**VISUAL FOCUS:** Foundation details 
-
-**LIGHTING & ATMOSPHERE:** 
-• Time: midday, lighting: bright. 
-• Weather: clear construction conditions.
+**VIDEO PROMPT:** 
+Begin the timelapse by capturing a wide shot of the static house sitting on a plot of land. As the video progresses, focus on the land preparation phase where workers actively clear the site of debris and uneven terrain. Highlight the use of heavy machinery, the excavation process as trenches are dug, all while maintaining the house in the same position. Transition smoothly into the foundation stage, where concrete is poured into the created trenches, the transformation of the land without altering the house itself. Throughout the video, retain clarity of the house to emphasize its fixed presence amidst the dynamic activities surrounding it. Maintain steady camera angles to reinforce the stability of the house while the industrious efforts of the workers and machinery.
 
 ================================================================================
-Word count: 165
-Character count: 1227
+Word count: 180
+Character count: 1162

@@ -404,6 +404,21 @@ async def upload_image(file: UploadFile = File(...)):
 async def start_pipeline(req: StartRequest):
     _validate_start_request(req)
 
+    # Check rate limit before starting
+    from utils.rate_limiter import get_rate_limiter
+    limiter = get_rate_limiter()
+    
+    allowed, reason = limiter.check_allowed()
+    if not allowed:
+        # Return 429 Too Many Requests with rate limit info
+        status = limiter.get_status()
+        return {
+            "error": "rate_limit_reached",
+            "message": reason,
+            "rate_limit": status,
+            "suggestion": "add_to_queue"
+        }, 429
+
     session_id = str(int(time.time() * 1000))
     queue: asyncio.Queue = asyncio.Queue()
     pause_event = asyncio.Event()
@@ -428,6 +443,10 @@ async def start_pipeline(req: StartRequest):
 
     task = asyncio.create_task(_run_pipeline_task(session_id, req, queue, control))
     _sessions[session_id]["task"] = task
+    
+    # Increment rate limit counter after successful start
+    limiter.increment_usage()
+    
     return {"session_id": session_id}
 
 
@@ -842,9 +861,12 @@ async def serve_video_thumbnail(
 ):
     """Первый кадр видео как JPEG (аватарка). Параметр file= — имя mp4 в папке сессии (для RU/EN)."""
     videos_dir = settings.videos_dir
+    # Пробуем flat формат: video_{session_id}.mp4 или video_{session_id}_*.mp4
     flat_path = videos_dir / f"video_{session_id}.mp4"
     legacy = videos_dir / session_id
     path: Path | None = None
+    
+    # 1) Если передан video_file и есть legacy папка - ищем там
     if video_file and legacy.is_dir():
         safe_name = Path(video_file).name
         if safe_name.endswith(".mp4"):
@@ -855,8 +877,20 @@ async def serve_video_thumbnail(
                 raise HTTPException(400, "Invalid file path") from None
             if candidate.is_file():
                 path = candidate
-    if path is None and flat_path.exists():
-        path = flat_path
+    
+    # 2) Если не нашли в legacy, пробуем flat формат в корне videos_dir
+    if path is None:
+        # Проверяем video_{session_id}.mp4
+        if flat_path.exists():
+            path = flat_path
+        else:
+            # Проверяем video_{session_id}_*.mp4 (например, _with_preview)
+            for candidate in videos_dir.glob(f"video_{session_id}_*.mp4"):
+                if candidate.is_file():
+                    path = candidate
+                    break
+    
+    # 3) Если не нашли flat, пробуем legacy папку
     if path is None and legacy.is_dir():
         path = _pick_legacy_thumbnail_path(legacy)
     if not path or not path.exists():
@@ -1063,6 +1097,103 @@ async def regenerate_topic(session_id: str):
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "version": "1.0"}
+
+
+# ── Rate Limiter Endpoints ───────────────────────────────────────────────────
+
+@app.get("/api/rate-limit/status")
+async def get_rate_limit_status():
+    """
+    Get current rate limit status.
+    
+    Returns:
+        {
+            "limit": int (1-3),
+            "used": int,
+            "remaining": int,
+            "hour_key": str,
+            "next_reset": str (ISO format)
+        }
+    """
+    from utils.rate_limiter import get_rate_limiter
+    limiter = get_rate_limiter()
+    return limiter.get_status()
+
+
+@app.post("/api/rate-limit/set")
+async def set_rate_limit(limit: int = Body(..., embed=True)):
+    """
+    Set the hourly generation limit.
+    
+    Args:
+        limit: New limit value (must be 1, 2, or 3)
+        
+    Returns:
+        {"success": bool, "limit": int}
+    """
+    from utils.rate_limiter import get_rate_limiter
+    limiter = get_rate_limiter()
+    
+    success = limiter.set_limit(limit)
+    
+    if not success:
+        raise HTTPException(400, f"Invalid limit: {limit}. Must be 1, 2, or 3.")
+    
+    return {"success": True, "limit": limit}
+
+
+@app.post("/api/rate-limit/check")
+async def check_rate_limit():
+    """
+    Check if a new video generation is allowed.
+    
+    Returns:
+        {
+            "allowed": bool,
+            "reason": str,
+            "used": int,
+            "limit": int,
+            "remaining": int
+        }
+    """
+    from utils.rate_limiter import get_rate_limiter
+    limiter = get_rate_limiter()
+    
+    allowed, reason = limiter.check_allowed()
+    status = limiter.get_status()
+    
+    return {
+        "allowed": allowed,
+        "reason": reason,
+        "used": status["used"],
+        "limit": status["limit"],
+        "remaining": status["remaining"]
+    }
+
+
+@app.post("/api/rate-limit/increment")
+async def increment_rate_limit():
+    """
+    Increment the usage counter (call when starting a video generation).
+    
+    Returns:
+        {
+            "success": bool,
+            "used": int,
+            "remaining": int
+        }
+    """
+    from utils.rate_limiter import get_rate_limiter
+    limiter = get_rate_limiter()
+    
+    success = limiter.increment_usage()
+    status = limiter.get_status()
+    
+    return {
+        "success": success,
+        "used": status["used"],
+        "remaining": status["remaining"]
+    }
 
 
 @app.get("/api/debug/diag")
