@@ -701,19 +701,48 @@ class FastGenScraper:
         logger.info(f"[FastGen] Browser started (headless={settings.fastgen_headless})")
 
     async def stop(self) -> None:
-        try:
-            if self._browser:
-                await self._browser.close()
-        except Exception:
-            pass
-        try:
-            if getattr(self, "_playwright", None):
+        """Stop browser and playwright with proper error handling for shutdown scenarios."""
+        # Close browser first
+        if self._browser:
+            try:
+                # Check if browser is still connected before closing
+                if hasattr(self._browser, 'is_connected') and self._browser.is_connected():
+                    await self._browser.close()
+                    logger.debug("[FastGen] Browser closed successfully")
+                else:
+                    logger.debug("[FastGen] Browser already disconnected, skipping close")
+            except Exception as e:
+                # Ignore errors during shutdown - browser may already be closed
+                logger.debug(f"[FastGen] Browser close error (expected during shutdown): {e}")
+            finally:
+                self._browser = None
+        
+        # Close context if exists
+        if self._context:
+            try:
+                await self._context.close()
+            except Exception:
+                pass
+            self._context = None
+        
+        # Close page if exists
+        if self._page:
+            try:
+                await self._page.close()
+            except Exception:
+                pass
+            self._page = None
+        
+        # Stop playwright last
+        if getattr(self, "_playwright", None):
+            try:
                 await self._playwright.stop()
-        except Exception:
-            pass
-        self._browser = None
-        self._context = None
-        self._page = None
+                logger.debug("[FastGen] Playwright stopped successfully")
+            except Exception as e:
+                # Ignore errors during shutdown
+                logger.debug(f"[FastGen] Playwright stop error (expected during shutdown): {e}")
+            finally:
+                self._playwright = None
 
     async def _recover_page_in_same_browser(self) -> bool:
         """
@@ -2837,6 +2866,10 @@ def _run_keyframe_video_sync(
                 try:
                     result = await _inner_attempt(scraper)
                     return result
+                except asyncio.CancelledError:
+                    # Properly handle cancellation - don't restart browser, just cleanup
+                    logger.info("[FastGen Keyframes] Generation cancelled, cleaning up...")
+                    raise
                 except VideoGenerationError as e:
                     logger.warning(f"[FastGen Keyframes] Error caught, restarting browser context (attempt {attempt+1}/3): {e}")
                     await scraper.restart_browser()
@@ -2869,6 +2902,10 @@ async def generate_images_chain_fastgen(
         )
     except FastGenCancelled:
         raise asyncio.CancelledError("FastGen cancelled") from None
+    except asyncio.CancelledError:
+        # Handle direct cancellation (not via FastGenCancelled)
+        logger.info("[FastGen] Image chain generation cancelled")
+        raise
 
 
 async def generate_images_chain_from_seed_fastgen(
@@ -2891,6 +2928,9 @@ async def generate_images_chain_from_seed_fastgen(
         )
     except FastGenCancelled:
         raise asyncio.CancelledError("FastGen cancelled") from None
+    except asyncio.CancelledError:
+        logger.info("[FastGen] Image chain from seed cancelled")
+        raise
 
 
 async def generate_images_fastgen(
@@ -2916,6 +2956,9 @@ async def generate_images_fastgen(
         return await asyncio.to_thread(_run_fastgen_sync, prompts, output_dir, cancel_event)
     except FastGenCancelled:
         raise asyncio.CancelledError("FastGen cancelled") from None
+    except asyncio.CancelledError:
+        logger.info("[FastGen] Image generation cancelled")
+        raise
 
 
 def _run_fastgen_with_refs_sync(

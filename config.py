@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     fastgen_api_key: str = Field("", alias="FASTGEN_API_KEY")
     # Модель: Imagen 4 - Whisk | Imagen 4 - Whisk Nano | Banana Pro - Flow4x |
     #         Nano Banana 2 - Flow | Nano Banana 2 - FlowNew4x | Nano Banana Pro - Flow4x | Nano Banana Pro - GeminiBeta
-    fastgen_model: str = Field("GEM_PIX_2", alias="FASTGEN_MODEL")
+    fastgen_model: str = Field("NARWHAL", alias="FASTGEN_MODEL")
     # false = видимый браузер (для отладки), true = фоновый (продакшн)
     fastgen_headless: bool = Field(False, alias="FASTGEN_HEADLESS")
     # Сколько секунд ждать появления нового превью на fast-gen.ai (иногда >2 мин)

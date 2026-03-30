@@ -10,6 +10,7 @@ import asyncio
 import json
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from urllib.parse import quote
@@ -173,16 +174,25 @@ async def _run_pipeline_task(
             logger.warning(f"[TopicsHistory] attach_start_request failed: {ex}")
 
     except asyncio.CancelledError:
+        logger.info(f"Pipeline task cancelled for session {session_id}")
         session["status"] = "cancelled"
         control["cancelled"] = True
-        await queue.put({"type": "error", "error": "Генерация отменена"})
+        try:
+            await queue.put({"type": "error", "error": "Генерация отменена"})
+        except Exception:
+            # Queue might be closed during shutdown
+            pass
     except Exception as exc:
         import traceback
         tb = traceback.format_exc()
         logger.error(f"Pipeline error: {exc}\n{tb}")
         session["status"] = "error"
         session["error"] = str(exc)
-        await queue.put({"type": "error", "error": str(exc)})
+        try:
+            await queue.put({"type": "error", "error": str(exc)})
+        except Exception:
+            # Queue might be closed during shutdown
+            pass
     finally:
         if sink_id is not None:
             logger.remove(sink_id)
@@ -190,7 +200,19 @@ async def _run_pipeline_task(
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Content Factory API", version="1.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Graceful startup and shutdown handler."""
+    # Startup
+    logger.info("[Server] Starting up...")
+    yield
+    # Shutdown
+    logger.info("[Server] Shutting down gracefully...")
+    # Give running pipelines time to cleanup (FastGen browser etc.)
+    await asyncio.sleep(0.5)
+    logger.info("[Server] Shutdown complete")
+
+app = FastAPI(title="Content Factory API", version="1.0", lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -1143,4 +1165,15 @@ if __name__ == "__main__":
     # На Windows spawn дочерний Process (mode4 assembler) перезапускает этот скрипт — не запускать uvicorn во вторичном процессе
     if _mp.current_process().name == "MainProcess":
         import uvicorn
-        uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=False)
+        
+        logger.info("Starting VideoStudio server with graceful shutdown support...")
+        
+        uvicorn.run(
+            "server:app",
+            host="0.0.0.0",
+            port=8000,
+            reload=False,
+            log_level="info",
+            access_log=True,
+            timeout_keep_alive=300,  # Keep connections alive longer during long operations
+        )

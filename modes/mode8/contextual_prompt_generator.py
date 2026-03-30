@@ -103,7 +103,7 @@ TASK: Analyze the building scenario and create a detailed visual progression pla
 SCENARIO DETAILS:
 - House Style: {house_style}
 - Location: {location}
-- Number of Floors: {num_floors} floor{'s' if num_floors > 1 else ''}
+- Number of Floors: {num_floors} {floor_word}
 - Total Stages: {total_stages}
 
 STAGES TO ANALYZE:
@@ -142,7 +142,7 @@ CURRENT STAGE DETAILS:
 ARCHITECTURAL CONTEXT:
 - House Style: {house_style}
 - Location: {location}
-- Number of Floors: {num_floors} floor{'s' if num_floors > 1 else ''}
+- Number of Floors: {num_floors} {floor_word}
 - Camera Specs: {camera_specs}
 
 PREVIOUS IMAGE PROMPTS (DO NOT REPEAT):
@@ -315,12 +315,14 @@ class ContextAnalyzer:
             house_style = scenario.get("house_style", "modern")
             location = scenario.get("location", "suburbs")
             num_floors = scenario.get("num_floors", 2)  # NEW: Get floors from scenario
+            floor_word = "floors" if num_floors > 1 else "floor"
             
             # Build prompt
             prompt = CONTEXT_ANALYSIS_PROMPT.format(
                 house_style=house_style,
                 location=location,
                 num_floors=num_floors,  # NEW: Pass floors to context analysis
+                floor_word=floor_word,
                 total_stages=len(stages),
                 stages_list=stages_list,
             )
@@ -501,6 +503,10 @@ class ImagePromptGenerator:
             # Get camera specs
             camera_specs = _get_camera_specs_for_scenario(scenario_context)
             
+            # Calculate floor word
+            num_floors = scenario_context.num_floors
+            floor_word = "floors" if num_floors > 1 else "floor"
+            
             # CRITICAL: Add static camera warning to camera specs
             camera_specs_with_warning = f"""{camera_specs}
 
@@ -525,7 +531,8 @@ class ImagePromptGenerator:
                 progression_notes=progression_notes,
                 house_style=scenario_context.style_consistency_notes,
                 location=scenario_context.location_atmosphere,
-                num_floors=scenario_context.num_floors,
+                num_floors=num_floors,
+                floor_word=floor_word,
                 camera_specs=camera_specs_with_warning,  # Use enhanced version
                 previous_image_prompts=prev_prompts_text,
             )

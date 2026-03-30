@@ -212,6 +212,7 @@ def _build_image_prompt(
     house_style = scenario.get("house_style", "modern")
     location = scenario.get("location", "suburbs")
     num_floors = scenario.get("num_floors", 2)  # NEW: Get floors from scenario
+    floor_word = "floors" if num_floors > 1 else "floor"
     stage_key = scene.get("stage_key", "empty_land")
 
     style_visual = HOUSE_STYLE_VISUALS.get(house_style, HOUSE_STYLE_VISUALS["modern"])
@@ -275,7 +276,7 @@ STYLE: Photorealistic, shot on smartphone camera, natural lighting, authentic co
 {title_line}
 
 **HOUSE SPECIFICATIONS:**
-• Number of floors: {num_floors} floor{'s' if num_floors > 1 else ''}
+• Number of floors: {num_floors} {floor_word}
 • House design: MUST remain consistent across all stages
 
 ━━━ SCENE SPECIFICATIONS ━━━
@@ -350,7 +351,7 @@ STYLE: Photorealistic, shot on smartphone camera, natural lighting, authentic co
 {title_line}
 
 **HOUSE SPECIFICATIONS:**
-• Number of floors: {num_floors} floor{'s' if num_floors > 1 else ''}
+• Number of floors: {num_floors} {floor_word}
 • House design: MUST remain consistent across all stages
 
 HOUSE STYLE: {style_visual['visual']}
@@ -402,6 +403,7 @@ def _build_video_prompt(
     house_style = scenario.get("house_style", "modern")
     location = scenario.get("location", "suburbs")
     num_floors = scenario.get("num_floors", 2)  # NEW: Get floors from scenario
+    floor_word = "floors" if num_floors > 1 else "floor"
 
     style_visual = HOUSE_STYLE_VISUALS.get(house_style, HOUSE_STYLE_VISUALS["modern"])
     loc_visual = LOCATION_VISUALS.get(location, LOCATION_VISUALS["suburbs"])
@@ -532,7 +534,7 @@ A highly satisfying construction timelapse showing WORK IN PROGRESS between two 
 
 HOUSE STYLE: {style_visual['visual']}
 LOCATION: {loc_visual['visual']}
-NUM FLOORS: {num_floors} floor{'s' if num_floors > 1 else ''} house under construction
+NUM FLOORS: {num_floors} {floor_word} house under construction
 
 **BUILDING STABILITY RULE (MOST IMPORTANT):**
 • House structure: 100% IDENTICAL from start to end of video
@@ -661,6 +663,7 @@ def _build_keyframe_video_prompt(
     house_style = scenario.get("house_style", "modern")
     location = scenario.get("location", "suburbs")
     num_floors = scenario.get("num_floors", 2)  # NEW: Get floors from scenario
+    floor_word = "floors" if num_floors > 1 else "floor"
 
     style_visual = HOUSE_STYLE_VISUALS.get(house_style, HOUSE_STYLE_VISUALS["modern"])
     loc_visual = LOCATION_VISUALS.get(location, LOCATION_VISUALS["suburbs"])
@@ -689,7 +692,7 @@ def _build_keyframe_video_prompt(
 ⚠️ FIXED CAMERA: Wide shot composition is LOCKED - same framing for ALL stages.
 Construction timelapse: {stage_name_en}.
 {style_visual['visual']}, {loc_visual['visual']}.
-NUM FLOORS: {num_floors} floor{'s' if num_floors > 1 else ''} house under construction
+NUM FLOORS: {num_floors} {floor_word} house under construction
 
 **BUILDING STABILITY RULE:**
 • House: 100% IDENTICAL start to end
@@ -741,6 +744,7 @@ def _build_drone_showcase_image_prompt(
     house_style = scenario.get("house_style", "modern")
     location = scenario.get("location", "suburbs")
     num_floors = scenario.get("num_floors", 2)  # NEW: Get floors from scenario
+    floor_word = "floors" if num_floors > 1 else "floor"
 
     style_visual = HOUSE_STYLE_VISUALS.get(house_style, HOUSE_STYLE_VISUALS["modern"])
     loc_visual = LOCATION_VISUALS.get(location, LOCATION_VISUALS["suburbs"])
@@ -758,17 +762,12 @@ The house must be EXACTLY the same as in the reference image:
 - SAME surrounding landscape, trees, driveway — EVERYTHING IDENTICAL
 - THE HOUSE ITSELF DOES NOT CHANGE — ONLY THE CAMERA POSITION IS FARTHER AWAY
 
-BUT NOW ADD SIGNS THAT PEOPLE ARE LIVING HERE:
-- Parked car/vehicle in driveway (modern family car, generic brand)
-- Warm interior lights ON in windows (visible glow from inside rooms)
-- Outdoor furniture on porch/patio (chairs, small table, decorative cushions)
-- Potted plants near entrance (decorative flower pots by front door)
-- Garden decorations (solar pathway lights along walkway)
-- Mailbox at end of driveway (residential mailbox on post)
-- Welcome mat at front door
-- Possibly outdoor lantern or string lights on porch
+BUT NOW ADD SIGNS THAT PEOPLE ARE LIVING HERE (MINIMAL - ONLY 2 ELEMENTS):
+- Parked car/vehicle in driveway (modern family car, generic brand) — ONLY 1 element
+- Warm interior lights ON in windows (visible glow from inside rooms) — ONLY 2nd element
+- DO NOT add: furniture, plants, decorations, mailbox, welcome mat, string lights
 
-DO NOT change ANYTHING about the house structure itself — ONLY add these living decorations and move camera farther away.
+DO NOT change ANYTHING about the house structure itself — ONLY move camera farther away and add car + lights.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 **HOUSE SPECIFICATIONS:**
@@ -790,7 +789,7 @@ LOCATION CONTEXT: {loc_visual['visual']}
 ━━━ WHAT TO SHOW (HOUSE AS THE HERO WITH LIFE) ━━━
 PRIMARY FOCUS: The completed house — LARGE and DETAILED in frame, FULLY LIVED-IN
 
-VISIBLE SIGNS OF HABITATION (CRITICAL):
+VISIBLE SIGNS OF HABITATION (ONLY 2 ELEMENTS - CRITICAL FOR CONSISTENCY):
 1. VEHICLE: One modern family car parked in driveway (generic sedan or SUV, neutral color)
    - Positioned naturally, not staged
    - Adds realism and scale
@@ -800,18 +799,17 @@ VISIBLE SIGNS OF HABITATION (CRITICAL):
    - Creates cozy, welcoming atmosphere
    - Multiple windows lit (living room, kitchen, bedrooms)
 
-3. OUTDOOR DECORATIONS:
-   - Patio furniture: 2-4 chairs + small table on porch/deck
-   - Decorative cushions in neutral colors
-   - Potted plants/flowers by front entrance (2-3 large decorative pots)
-   - Solar pathway lights along walkway (small glowing markers)
-   - Welcome mat at front door
-   - Residential mailbox on post near driveway
+DO NOT ADD (CRITICAL):
+- NO outdoor furniture (chairs, tables, cushions)
+- NO potted plants or flower pots
+- NO solar pathway lights
+- NO welcome mat
+- NO mailbox
+- NO string lights or lanterns
+- NO garden decorations
+- NO decorative items of any kind
 
-4. AMBIANCE DETAILS:
-   - Possibly string lights or lantern on porch (subtle, not Christmas lights)
-   - Maybe garden flag or house numbers visible
-   - Personal touches that say "someone lives here"
+Adding extra elements BREAKS house identity and causes generation failures.
 
 House should be the CLEAR MAIN SUBJECT, occupying majority of the image, but with MORE SURROUNDINGS visible than construction shots.
 Show roof details, facade texture, windows clearly, plus additional context like full driveway, front yard landscaping.
@@ -844,9 +842,8 @@ TECHNICAL: Vertical 9:16, 1080x1920, ultra detailed, photorealistic.
 
 SAFETY: Generic content ONLY. NO brands, logos, copyrighted material.
 - Car must be GENERIC (no visible emblems or brand identifiers)
-- All decorations must be original designs
 
-GOAL: Create an intimate aerial showcase where the house remains the HERO — large, detailed, impressive, and CLEARLY LIVED-IN with visible signs that a family has moved in and made it their home."""
+GOAL: Create an intimate aerial showcase where the house remains the HERO — large, detailed, impressive, and CLEARLY LIVED-IN with ONLY 2 elements: 1) car in driveway, 2) warm interior lights. House must be PIXEL-PERFECT MATCH to reference — same design, same materials, same everything except camera distance."""
 
     return prompt
 
@@ -876,6 +873,7 @@ def _build_final_drone_video_prompt(
     house_style = scenario.get("house_style", "modern")
     location = scenario.get("location", "suburbs")
     num_floors = scenario.get("num_floors", 2)  # NEW: Get floors from scenario
+    floor_word = "floors" if num_floors > 1 else "floor"
 
     style_visual = HOUSE_STYLE_VISUALS.get(house_style, HOUSE_STYLE_VISUALS["modern"])
     loc_visual = LOCATION_VISUALS.get(location, LOCATION_VISUALS["suburbs"])
@@ -918,22 +916,25 @@ LOCATION: {loc_visual['visual']}
 ━━━ CRITICAL: THIS IS A SHOWCASE, NOT CONSTRUCTION ━━━
 The house is FULLY BUILT and OCCUPIED. Must show signs that people live here:
 
-VISIBLE SIGNS OF HABITATION (3-4 KEY ELEMENTS ONLY):
+VISIBLE SIGNS OF HABITATION (ONLY 2 ELEMENTS - CRITICAL FOR CONSISTENCY):
 1. VEHICLE: One modern family car parked in driveway (generic sedan/SUV, neutral color)
 2. INTERIOR LIGHTS: Warm yellow/orange glow visible through 3-5 windows
-3. OUTDOOR FURNITURE: Small patio set on porch (2 chairs + tiny table OR decorative cushions)
-4. POTTED PLANTS: 2-3 decorative flower pots by front entrance
 
 **HOUSE SPECIFICATIONS:**
 • Number of floors: {num_floors} floor{'s' if num_floors > 1 else ''}
-• House design: MUST remain consistent with construction stages
+• House design: MUST remain consistent with construction stages — PIXEL-PERFECT MATCH
 
-OPTIONAL SUBTLE DETAILS (choose 0-1):
-- Solar pathway lights (2-3 small markers along walkway)
-- Welcome mat at front door
-- Residential mailbox on post near driveway
+DO NOT ADD (CRITICAL):
+- NO outdoor furniture (chairs, tables, cushions)
+- NO potted plants or flower pots
+- NO solar pathway lights
+- NO welcome mat
+- NO mailbox
+- NO string lights or lanterns
+- NO garden decorations
+- NO decorative items of any kind
 
-DO NOT overload scene — select only 3-4 main elements total.
+Adding extra elements BREAKS house identity and causes generation failures.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ━━━ STATIC CAMERA SPECIFICATIONS ━━━
@@ -979,10 +980,8 @@ TECHNICAL: Vertical 9:16, 1080x1920, cinematic drone PHOTOGRAPH, sharp details.
 
 SAFETY: Generic content ONLY. NO brands, logos, copyrighted material.
 - Car must be GENERIC (no visible emblems or brand identifiers)
-- All decorations must be original designs
-- Keep decorations minimal — 3-4 elements maximum
 
-GOAL: Create ONE stunning, intimate aerial photograph where the house remains the HERO — large, detailed, impressive, and CLEARLY LIVED-IN with 3-4 visible signs that a family has moved in and made it their home. Camera is COMPLETELY STATIC — this is a beautiful still image, not a motion video."""
+GOAL: Create ONE stunning, intimate aerial photograph where the house remains the HERO — large, detailed, impressive, and CLEARLY LIVED-IN with ONLY 2 elements: 1) car in driveway, 2) warm interior lights. House must be PIXEL-PERFECT MATCH to last construction frame — same design, same materials, same everything except camera distance."""
 
     return prompt
 # ═══════════════════════════════════════════════════════════════════════════

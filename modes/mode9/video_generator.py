@@ -340,6 +340,11 @@ COMPOSITION:
 - ⚠️ CRITICAL: Use EXACT camera calibration parameters from above - NO variations allowed
 - Wide shot showing the ENTIRE vehicle fully - complete assembly visible from all angles
 - Frame composition: Vehicle occupies 50-60% of frame - far enough to show full object
+- **CRITICAL FRAMING RULES**:
+  • Capture COMPLETE vehicle - no cropping, no partial views
+  • Every part of vehicle must be in frame - from front to back, left to right
+  • Imagine photographing from 25 meters away at 8 meters height
+  • House should occupy 40-50% of frame with surrounding context
 - Vertical 9:16 aspect ratio (TikTok/Reels/Shorts format)
 - ⚠️ Camera angle is LOCKED - same perspective for ALL stages (see calibration data)
 - Natural daylight, sun position consistent (sun at ~45° elevation from horizon)
@@ -574,14 +579,16 @@ def _build_keyframe_video_prompt(
     Build a STRUCTURED video prompt (150-180 words) for FastGen keyframe video generation.
     Based on video skills best practices for image-to-video generation.
     
+    CRITICAL: ALL keyframe videos use STATIC CAMERA - NO movement except final drone showcase.
+    
     VIDEO PROMPT FORMULA:
     [Shot Type] + [Subject Action] + [Camera Motion] + [Environment] + [Temporal] + [Technical]
     
-    For construction timelapse:
-    - Shot: wide_shot (full house/vehicle visible)
+    For vehicle assembly timelapse:
+    - Shot: wide_shot (full vehicle visible)
     - Camera: static/locked-off (CRITICAL for timelapse consistency)
     - Temporal: time_lapse (compressed time)
-    - Environment: outdoor construction site
+    - Environment: assembly facility
     """
     vehicle_type = scenario.get("vehicle_type", "car_modern")
     location = scenario.get("location", "factory")
@@ -604,6 +611,7 @@ def _build_keyframe_video_prompt(
     
     # PROFESSIONAL VIDEO PROMPT - STRUCTURED (150-180 words)
     # CRITICAL: Building stays IDENTICAL throughout - only workers/machinery move
+    # STYLE: Smartphone camera photorealism, NOT CGI
     prompt = f"""CRITICAL: BUILDING UNCHANGED! Only workers move around FIXED structure.
 Building does NOT grow/change/transform - it's already complete.
 
@@ -614,10 +622,10 @@ Building does NOT grow/change/transform - it's already complete.
 • No construction on building - already built
 • ONLY workers/machinery moving AROUND fixed building
 
-**CAMERA & CONTINUITY:** (FULL HOUSE VISIBILITY)
+**CAMERA & CONTINUITY:** (FULL VEHICLE VISIBILITY)
 • Fixed tripod: X=0.0m, Y=8.0m, Z=25.0m
 • 35mm focal length, horizon at 60%
-• Static background unchanged
+• Static background unchanged across ALL stages
 
 **KEY VISUAL CHANGES** (3 bullets):
 • {action[:50]}. Workers: {workers_short}
@@ -641,7 +649,9 @@ Building does NOT grow/change/transform - it's already complete.
 • Time: midday, lighting: bright daylight
 
 FRAMING: Vertical 9:16. Wide shot - FULL vehicle/house visible.
-SAFETY: Generic content only."""
+SAFETY: Generic content only.
+
+STYLE: Photorealistic, shot on smartphone camera, natural lighting. NOT 3D render, NOT CGI."""
 
     return prompt
 
