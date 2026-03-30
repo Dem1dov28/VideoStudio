@@ -152,14 +152,25 @@ async def run_mode8_pipeline(
     
     from modes.mode8.clickbait_titles import generate_clickbait_title
     
-    # Generate clickbait title using real video duration
+    # Generate clickbait title using real video duration (RU version)
     clickbait_title_ru = generate_clickbait_title(
         content_type="house",
         style_or_type=house_style_name,
         location=location_name,
         duration_seconds=video_duration,
+        language="ru",  # Russian for RU publishing
     )
-    logger.success(f"[Mode8] Clickbait title: {clickbait_title_ru}")
+    logger.success(f"[Mode8] Clickbait title (RU): {clickbait_title_ru}")
+    
+    # Generate English clickbait title
+    clickbait_title_en = generate_clickbait_title(
+        content_type="house",
+        style_or_type=house_style_name,
+        location=location_name,
+        duration_seconds=video_duration,
+        language="en",  # English for EN publishing
+    )
+    logger.success(f"[Mode8] Clickbait title (EN): {clickbait_title_en}")
     
     # Generate full publishing metadata with forced clickbait title
     publishing_ru_raw = await generate_publishing_metadata(
@@ -168,7 +179,7 @@ async def run_mode8_pipeline(
         stages=stages,
         title=title,  # Pass original title to LLM for context
         language="ru",
-        force_title=clickbait_title_ru,  # Force clickbait title
+        force_title=clickbait_title_ru,  # Force Russian clickbait title
     )
     publishing_en_raw = await generate_publishing_metadata(
         house_style=house_style_name,
@@ -176,7 +187,7 @@ async def run_mode8_pipeline(
         stages=stages,
         title=title,  # Pass original title to LLM for context
         language="en",
-        force_title=clickbait_title_ru,  # Force same clickbait title for EN
+        force_title=clickbait_title_en,  # Force English clickbait title
     )
     
     # Create final publishing (titles already forced in generate_publishing_metadata)

@@ -1389,7 +1389,9 @@ async def generate_house_videos(
             video_paths = video_paths[:-1] if len(video_paths) > 0 else video_paths
         else:
             # No preview was generated (task returned None or not added)
-            logger.warning("[Mode8] No preview result from last task - preview will NOT be added")
+            logger.debug("[Mode8] No preview result from last task")
+            # Still remove last item if it was a preview task that returned None
+            video_paths = video_paths[:-1] if len(video_paths) > 0 else video_paths
 
     # Handle results
     valid_paths: list[Path | None] = []
@@ -1401,6 +1403,11 @@ async def generate_house_videos(
             # Placeholder task (skipped)
             valid_paths.append(None)
         else:
+            # Explicitly skip preview paths - they should not be in video_paths anymore
+            result_path = Path(result) if not isinstance(result, Path) else result
+            if 'preview' in str(result_path).lower():
+                logger.warning(f"[Mode8] Skipping preview path in video results: {result_path}")
+                continue
             valid_paths.append(result)
 
     # Enrich scenario with video paths and reference image paths

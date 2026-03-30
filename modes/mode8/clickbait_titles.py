@@ -30,6 +30,15 @@ HOUSE_TEMPLATES = [
     "{house_type} ЗА {duration} СЕКУНД — ЭТО РЕАЛЬНО? {emoji}",
 ]
 
+# English house building templates (Mode 8)
+HOUSE_TEMPLATES_EN = [
+    "I BUILT A {house_type} FROM SCRATCH IN {duration} SECONDS {emoji}",
+    "BUILT {house_type} IN {duration} SECONDS {emoji}",
+    "I BUILT A {house_type} FROM NOTHING... WATCH 👀",
+    "{house_type} IN {duration} SECONDS — IS THIS REAL? {emoji}",
+    "FROM EMPTY LAND TO {house_type} IN {duration} SECONDS {emoji}",
+]
+
 # Vehicle assembly templates (Mode 9)
 VEHICLE_TEMPLATES = [
     "Я СОБРАЛ {vehicle_type} {location_variant} ЗА {duration} СЕКУНД {emoji}",
@@ -39,24 +48,33 @@ VEHICLE_TEMPLATES = [
     "Я СОБРАЛ {vehicle_type}… РЕЗУЛЬТАТ В КОНЦЕ 👀",
 ]
 
+# English vehicle assembly templates (Mode 9)
+VEHICLE_TEMPLATES_EN = [
+    "I ASSEMBLED A {vehicle_type} IN {duration} SECONDS {emoji}",
+    "ASSEMBLED {vehicle_type} IN {duration} SECONDS {emoji}",
+    "I BUILT A {vehicle_type} FROM SCRATCH IN {duration} SECONDS 🔧",
+    "{vehicle_type} IN {duration} SECONDS — MIND BLOWN! {emoji}",
+    "FROM PARTS TO {vehicle_type} IN {duration} SECONDS {emoji}",
+]
+
 # House type mappings
 HOUSE_TYPES = {
-    "modern": ("СОВРЕМЕННЫЙ ДОМ", "🏠"),
-    "contemporary": ("УЛЬТРА-СОВРЕМЕННЫЙ ДОМ", "🏢"),
-    "minimalist": ("МИНИМАЛИСТИЧНЫЙ ДОМ", "🏚️"),
-    "scandinavian": ("СКАНДИНАВСКИЙ ДОМ", "🏡"),
-    "cottage": ("УЮТНЫЙ КОТТЕДЖ", "🏘️"),
-    "villa": ("РОСКОШНУЮ ВИЛЛУ", "🏰"),
-    "farmhouse": ("ФЕРМЕРСКИЙ ДОМ", "🚜"),
-    "colonial": ("КОЛОНИАЛЬНЫЙ ОСОБНЯК", "🏛️"),
-    "victorian": ("ВИКТОРИАНСКИЙ ДОМ", "🏯"),
-    "mediterranean": ("СРЕДИЗЕМНОМОРСКУЮ ВИЛЛУ", "🌴"),
-    "cabin": ("ХИЖИНУ В ЛЕСУ", "🌲"),
-    "log_house": ("БОЛЬШОЙ ДЕРЕВЯННЫЙ ДОМ", "🪵"),
-    "chalet": ("АЛЬПИЙСКОЕ ШАЛЕ", "🏔️"),
-    "adobe": ("ДОМ ИЗ САМана", "🏜️"),
-    "mansion": ("ОГРОМНЫЙ ОСОБНЯК", "💎"),
-    "estate": ("СЕМЕЙНОЕ ПОМЕСТЬЕ", "🌳"),
+    "modern": ("СОВРЕМЕННЫЙ ДОМ", "MODERN HOUSE", "🏠"),
+    "contemporary": ("УЛЬТРА-СОВРЕМЕННЫЙ ДОМ", "ULTRA-MODERN HOUSE", "🏢"),
+    "minimalist": ("МИНИМАЛИСТИЧНЫЙ ДОМ", "MINIMALIST HOUSE", "🏚️"),
+    "scandinavian": ("СКАНДИНАВСКИЙ ДОМ", "SCANDINAVIAN HOUSE", "🏡"),
+    "cottage": ("УЮТНЫЙ КОТТЕДЖ", "COZY COTTAGE", "🏘️"),
+    "villa": ("РОСКОШНУЮ ВИЛЛУ", "LUXURY VILLA", "🏰"),
+    "farmhouse": ("ФЕРМЕРСКИЙ ДОМ", "FARMHOUSE", "🚜"),
+    "colonial": ("КОЛОНИАЛЬНЫЙ ОСОБНЯК", "COLONIAL MANSION", "🏛️"),
+    "victorian": ("ВИКТОРИАНСКИЙ ДОМ", "VICTORIAN HOUSE", "🏯"),
+    "mediterranean": ("СРЕДИЗЕМНОМОРСКУЮ ВИЛЛУ", "MEDITERRANEAN VILLA", "🌴"),
+    "cabin": ("ХИЖИНУ В ЛЕСУ", "FOREST CABIN", "🌲"),
+    "log_house": ("БОЛЬШОЙ ДЕРЕВЯННЫЙ ДОМ", "LOG HOUSE", "🪵"),
+    "chalet": ("АЛЬПИЙСКОЕ ШАЛЕ", "ALPINE CHALET", "🏔️"),
+    "adobe": ("ДОМ ИЗ САМАНА", "ADOBE HOUSE", "🏜️"),
+    "mansion": ("ОГРОМНЫЙ ОСОБНЯК", "HUGE MANSION", "💎"),
+    "estate": ("СЕМЕЙНОЕ ПОМЕСТЬЕ", "FAMILY ESTATE", "🌳"),
 }
 
 # Location mappings for houses
@@ -163,6 +181,7 @@ def generate_clickbait_title(
     style_or_type: str,
     location: str,
     duration_seconds: float,
+    language: Literal["ru", "en"] = "ru",  # NEW parameter
 ) -> str:
     """
     Generate a clickbait title with real video duration.
@@ -172,28 +191,34 @@ def generate_clickbait_title(
         style_or_type: House style or vehicle type
         location: Location name
         duration_seconds: Real final video duration in seconds
+        language: Title language ("ru" or "en")
         
     Returns:
-        Clickbait title in Russian
+        Clickbait title in specified language
     """
     # Round duration for catchiness
     rounded_duration = _round_duration(duration_seconds)
     
     if content_type == "house":
-        templates = HOUSE_TEMPLATES
+        # Select templates based on language
+        templates = HOUSE_TEMPLATES if language == "ru" else HOUSE_TEMPLATES_EN
         type_mapping = HOUSE_TYPES
         location_mapping = HOUSE_LOCATIONS
         default_emoji = "🏠"
     else:  # vehicle
-        templates = VEHICLE_TEMPLATES
+        # Select templates based on language
+        templates = VEHICLE_TEMPLATES if language == "ru" else VEHICLE_TEMPLATES_EN
         type_mapping = VEHICLE_TYPES
         location_mapping = VEHICLE_LOCATIONS
         default_emoji = "🚗"
     
     # Get type name and emoji
-    type_info = type_mapping.get(style_or_type.lower(), (style_or_type.upper(), default_emoji))
-    type_name = type_info[0]
-    type_emoji = type_info[1]
+    type_info = type_mapping.get(style_or_type.lower(), (style_or_type.upper(), style_or_type.upper(), default_emoji))
+    if language == "ru":
+        type_name = type_info[0]  # Russian name
+    else:
+        type_name = type_info[1]  # English name
+    type_emoji = type_info[2]
     
     # Get location variant
     loc_info = location_mapping.get(location.lower(), (f"В {location.upper()}", "📍"))
@@ -205,14 +230,24 @@ def generate_clickbait_title(
     
     # Build style variant (for "Я ПОСТРОИЛ ДОМ {style_variant} С НУЛЯ")
     style_variant = ""
-    if style_or_type.lower() in ["modern", "contemporary", "minimalist"]:
-        style_variant = f"({type_name})"
-    elif style_or_type.lower() in ["villa", "mansion", "estate"]:
-        style_variant = "РОСКОШНЫЙ"
-    elif style_or_type.lower() in ["cottage", "cabin", "chalet"]:
-        style_variant = "УЮТНЫЙ"
-    else:
-        style_variant = ""
+    if language == "ru":
+        if style_or_type.lower() in ["modern", "contemporary", "minimalist"]:
+            style_variant = f"({type_name})"
+        elif style_or_type.lower() in ["villa", "mansion", "estate"]:
+            style_variant = "РОСКОШНЫЙ"
+        elif style_or_type.lower() in ["cottage", "cabin", "chalet"]:
+            style_variant = "УЮТНЫЙ"
+        else:
+            style_variant = ""
+    else:  # English
+        if style_or_type.lower() in ["modern", "contemporary", "minimalist"]:
+            style_variant = f"({type_name})"
+        elif style_or_type.lower() in ["villa", "mansion", "estate"]:
+            style_variant = "LUXURY"
+        elif style_or_type.lower() in ["cottage", "cabin", "chalet"]:
+            style_variant = "COZY"
+        else:
+            style_variant = ""
     
     # Fill template
     title = template.format(

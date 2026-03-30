@@ -264,37 +264,12 @@ def assemble_mode8_video(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     logger.info(f"[Mode8 Assembler] Rendering -> {output_path}")
-
-    try:
-        final.write_videofile(
-            str(output_path),
-            fps=fps,
-            codec="libx264",
-            audio_codec="aac",
-            threads=4,
-            preset="fast",
-            logger=None,
-        )
-    finally:
-        final.close()
-        for c in clips:
-            try:
-                c.close()
-            except Exception:
-                pass
-        for vc in original_vcs:
-            try:
-                vc.close()
-            except Exception:
-                pass
-
-    logger.success(f"[Mode8 Assembler] Done -> {output_path} (duration: {final.duration:.2f}s)")
     
     # ═══════════════════════════════════════════════════════════════════════
-    # APPEND CLICKBAIT PREVIEW (OPTIONAL)
+    # APPEND CLICKBAIT PREVIEW BEFORE FINAL RENDER (OPTIONAL)
     # ═══════════════════════════════════════════════════════════════════════
     
-    # Explicitly check preview_image_path
+    # Explicitly check preview_image_path BEFORE closing final
     logger.info(f"[Mode8 Assembler] Preview path check: {preview_image_path}")
     if preview_image_path:
         logger.info(f"[Mode8 Assembler] Preview file exists: {Path(preview_image_path).exists()}")
@@ -317,28 +292,39 @@ def assemble_mode8_video(
             # Preserve audio from main video (preview will be silent or can add sound effect)
             final_with_preview = final_with_preview.with_audio(final.audio if final.audio else None)
             
-            # Re-render with preview
-            temp_output = output_path.parent / f"{output_path.stem}_with_preview{output_path.suffix}"
-            final_with_preview.write_videofile(
-                str(temp_output),
-                fps=fps,
-                codec="libx264",
-                audio_codec="aac",
-                threads=4,
-                preset="fast",
-                logger=None,
-            )
-            
-            # Replace original with preview version
-            output_path.unlink(missing_ok=True)
-            temp_output.rename(output_path)
-            
-            final_with_preview.close()
-            preview_clip.close()
-            
-            logger.success(f"[Mode8 Assembler] Preview appended -> {output_path} (+{preview_duration}s)")
+            # Use final_with_preview instead of final
+            final_to_render = final_with_preview
+            logger.success(f"[Mode8 Assembler] Preview appended (+{preview_duration}s)")
             
         except Exception as e:
             logger.error(f"[Mode8 Assembler] Preview append failed: {e}")
+            final_to_render = final  # Fallback to original
+    else:
+        final_to_render = final  # No preview
+
+    try:
+        final_to_render.write_videofile(
+            str(output_path),
+            fps=fps,
+            codec="libx264",
+            audio_codec="aac",
+            threads=4,
+            preset="fast",
+            logger=None,
+        )
+    finally:
+        final_to_render.close()
+        for c in clips:
+            try:
+                c.close()
+            except Exception:
+                pass
+        for vc in original_vcs:
+            try:
+                vc.close()
+            except Exception:
+                pass
+
+    logger.success(f"[Mode8 Assembler] Done -> {output_path} (duration: {final_to_render.duration:.2f}s)")
     
     return output_path, float(final.duration) + (preview_duration if preview_image_path and Path(preview_image_path).exists() else 0)
