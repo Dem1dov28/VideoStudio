@@ -16,17 +16,10 @@ function detectStep(logs) {
   if (!logs.length) return -1;
   const joined = logs.map(l => l.text).join('\n');
 
-  // Done
-  if (
-    joined.includes('LOCAL ONLY mode') || 
-    joined.includes('Pipeline DONE') || 
-    joined.includes('Mode 3 Pipeline DONE') || 
-    joined.includes('Mode 5 Pipeline DONE') ||
-    joined.includes('Mode 8 Pipeline DONE') ||
-    joined.includes('Mode 9 Pipeline DONE')
-  ) return STEPS.length - 1;
+  // Done - all modes support (3-10)
+  if (joined.includes('LOCAL ONLY mode') || joined.includes('Pipeline DONE') || joined.includes('Mode 3 Pipeline DONE') || joined.includes('Mode 5 Pipeline DONE') || joined.includes('Mode 6 Pipeline DONE') || joined.includes('Mode 7 Pipeline DONE') || joined.includes('Mode 8 Pipeline DONE') || joined.includes('Mode 9 Pipeline DONE') || joined.includes('Mode 10 Pipeline DONE')) return STEPS.length - 1;
   
-  // Video assembly (Mode 2 + Mode 3 + Mode 8 + Mode 9)
+  // Video assembly (Mode 2 + Mode 3)
   if (
     joined.includes('Video Editor Agent') ||
     joined.includes('Assembling') ||
@@ -83,6 +76,15 @@ function detectStep(logs) {
   
   // Mode 3: prompt agent
   if (joined.includes('Mode3 Prompt') || joined.includes('Mode 3 Pipeline')) return 1;
+  
+  // Mode 6: relaxing video
+  if (joined.includes('Mode6') || joined.includes('Mode 6 Pipeline')) return 3;  // images/video step
+  // Mode 7: two clips (prompt → images → video)
+  if (joined.includes('Mode7') || joined.includes('Mode 7 Pipeline')) return 3;
+  // Mode 8: house building timelapse
+  if (joined.includes('Mode8') || joined.includes('Mode 8 Pipeline')) return 3;
+  // Mode 10: beach cleanup timelapse
+  if (joined.includes('Mode10') || joined.includes('Mode 10 Pipeline')) return 3;
   
   // Fact miner
   if (
