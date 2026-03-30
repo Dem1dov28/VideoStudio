@@ -132,7 +132,6 @@ async def _run_pipeline_task(
             mode4_quote=getattr(req, "mode4_quote", None),
             mode4_person_name=getattr(req, "mode4_person_name", None),
             mode4_photo_path=getattr(req, "mode4_photo_path", None),
-            mode4_only_lang=getattr(req, "mode4_only_lang", None),
             mode6_num_characters=getattr(req, "mode6_num_characters", 3),
             mode7_keyboards=getattr(req, "mode7_keyboards", None),
             mode7_animal_type=getattr(req, "mode7_animal_type", None),
