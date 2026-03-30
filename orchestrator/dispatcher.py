@@ -278,6 +278,9 @@ async def run_pipeline(
     mode9_vehicle_type: str | None = None,
     mode9_location: str | None = None,
     mode9_num_stages: int = 5,
+    mode10_beach_type: str | None = None,
+    mode10_coast_setting: str | None = None,
+    mode10_num_stages: int = 5,
     control: dict | None = None,
 ) -> dict[str, Any]:
     """Route to the appropriate pipeline by mode with session context."""
