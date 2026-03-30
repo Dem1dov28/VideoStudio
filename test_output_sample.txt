@@ -1,0 +1,36 @@
+GENERATED VIDEO PROMPT SAMPLE
+================================================================================
+
+**TRANSITION:** [Land Preparation] -> [Foundation]
+
+**CAMERA & CONTINUITY:** 
+• Fixed tripod (X=0.0m, Y=8.0m, Z=25.0m), 35mm focal length 
+• Horizon at 60% from bottom, elevated viewpoint 
+• Sky, trees, landscape unchanged across frames 
+• Only house construction changes - background frozen 
+
+**KEY VISUAL CHANGES** 
+• Cleared land transitions to wooden forms filled with wet concrete, dimensions aligning to house footprint. 
+• Workers operate a concrete mixer, pouring wet concrete into forms while ensuring rebar is properly positioned and aligned. 
+• Foundation forms are smoothed using trowels, revealing a level surface and complete footprint ready for further construction. 
+
+**MOTION TYPE:** [timelapse]
+
+**MOTION DETAIL:** 
+• Continuous forward build, smooth concrete pouring process. 
+• No reversing - only forward advancement of construction elements. 
+• Active workers/machinery, tools: concrete mixer, trowels, rebar cutters. 
+
+**BUILDING HEIGHT CONTEXT:** 
+• Current floor: ground, height: ~0 meters. 
+• Vertical progress: foundation sets stage for the upward build. 
+
+**VISUAL FOCUS:** Foundation details 
+
+**LIGHTING & ATMOSPHERE:** 
+• Time: midday, lighting: bright. 
+• Weather: clear construction conditions.
+
+================================================================================
+Word count: 165
+Character count: 1227

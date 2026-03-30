@@ -115,6 +115,7 @@ export default function Generate() {
   const [mode8HouseStyle, setMode8HouseStyle] = useState('random');
   const [mode8Location, setMode8Location] = useState('random');
   const [mode8NumStages, setMode8NumStages] = useState(5);
+  const [mode8NumFloors, setMode8NumFloors] = useState(2); // Number of floors
   const [mode8UseKeyframes, setMode8UseKeyframes] = useState(false);
   const [mode8StartFrame, setMode8StartFrame] = useState(null);
   const [mode8EndFrame, setMode8EndFrame] = useState(null);
@@ -298,6 +299,7 @@ export default function Generate() {
         mode8_house_style: mode8UseKeyframes ? null : (mode8HouseStyle === 'random' ? null : mode8HouseStyle),
         mode8_location: mode8UseKeyframes ? null : (mode8Location === 'random' ? null : mode8Location),
         mode8_num_stages: mode8NumStages,
+        mode8_num_floors: mode8NumFloors, // NEW: floors count
         mode8_use_keyframes: mode8UseKeyframes,
         mode8_start_frame_path: mode8UseKeyframes ? mode8StartFrame?.path : null,
         mode8_end_frame_path: mode8UseKeyframes ? mode8EndFrame?.path : null,
@@ -1082,6 +1084,32 @@ export default function Generate() {
                       </div>
                       <p className="text-xs text-[#52525b] mt-3">
                         Каждая стадия — отдельный видеофрагмент: пустой участок → фундамент → стены → крыша → готовый дом.
+                      </p>
+                    </div>
+
+                    {/* 🏢 Этажность дома */}
+                    <div className="card p-5 mt-4">
+                      <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
+                        Этажность дома
+                      </label>
+                      <div className="flex gap-2">
+                        {[1, 2, 3].map(n => (
+                          <button
+                            key={n}
+                            type="button"
+                            onClick={() => setMode8NumFloors(n)}
+                            className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                              mode8NumFloors === n
+                                ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                                : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                            }`}
+                          >
+                            {n} этаж{n === 1 ? '' : n === 2 ? 'а' : 'ей'}
+                          </button>
+                        ))}
+                      </div>
+                      <p className="text-xs text-[#52525b] mt-3">
+                        Сколько этажей будет в доме после завершения строительства.
                       </p>
                     </div>
                   </>

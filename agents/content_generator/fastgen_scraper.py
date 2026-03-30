@@ -1588,11 +1588,12 @@ def _run_single_image_sync(index: int, prompt: str, output_dir: Path) -> Path | 
         finally:
             await scraper.stop()
 
-    loop = _asyncio.new_event_loop()
+    # Use asyncio.run() instead of manual loop creation to avoid InvalidStateError on Windows
     try:
-        return loop.run_until_complete(_inner())
-    finally:
-        loop.close()
+        return _asyncio.run(_inner())
+    except Exception as e:
+        logger.error(f"[FastGen] Single image generation failed: {e}")
+        return None
 
 
 def _run_single_image_with_refs_sync(
@@ -1603,7 +1604,7 @@ def _run_single_image_with_refs_sync(
 ) -> Path | None:
     """Генерация одного изображения с multiple references в отдельном браузере."""
     import asyncio as _asyncio
-
+    
     async def _inner() -> Path | None:
         scraper = FastGenScraper()
         await scraper.start()
@@ -1624,12 +1625,13 @@ def _run_single_image_with_refs_sync(
             return None
         finally:
             await scraper.stop()
-
-    loop = _asyncio.new_event_loop()
+    
+    # Use asyncio.run() instead of manual loop creation to avoid InvalidStateError on Windows
     try:
-        return loop.run_until_complete(_inner())
-    finally:
-        loop.close()
+        return _asyncio.run(_inner())
+    except Exception as e:
+        logger.error(f"[FastGen] Image generation failed: {e}")
+        return None
 
 
 def _run_fastgen_sync(prompts: list[str], output_dir: Path) -> list[Path]:
@@ -1658,11 +1660,12 @@ def _run_fastgen_sync(prompts: list[str], output_dir: Path) -> list[Path]:
             await scraper.stop()
 
     # Create a fresh event loop isolated from uvicorn's loop
-    loop = _asyncio.new_event_loop()
+    # Use asyncio.run() instead of manual loop creation to avoid InvalidStateError on Windows
     try:
-        return loop.run_until_complete(_inner())
-    finally:
-        loop.close()
+        return _asyncio.run(_inner())
+    except Exception as e:
+        logger.error(f"[FastGen] Sequential generation failed: {e}")
+        return []
 
 
 def _run_img2img_chain_sync(
@@ -1696,11 +1699,12 @@ def _run_img2img_chain_sync(
         finally:
             await scraper.stop()
 
-    loop = _asyncio.new_event_loop()
+    # Use asyncio.run() instead of manual loop creation to avoid InvalidStateError on Windows
     try:
-        return loop.run_until_complete(_inner())
-    finally:
-        loop.close()
+        return _asyncio.run(_inner())
+    except Exception as e:
+        logger.error(f"[FastGen] Image chain generation failed: {e}")
+        return []
 
 
 def _run_fastgen_images_parallel_sync(prompts: list[str], output_dir: Path) -> list[Path]:
@@ -1817,11 +1821,12 @@ def _run_single_video_sync(
         finally:
             await scraper.stop()
 
-    loop = _asyncio.new_event_loop()
+    # Use asyncio.run() instead of manual loop creation to avoid InvalidStateError on Windows
     try:
-        return loop.run_until_complete(_inner())
-    finally:
-        loop.close()
+        return _asyncio.run(_inner())
+    except Exception as e:
+        logger.error(f"[FastGen] Single video generation failed: {e}")
+        return None
 
 
 def _run_fastgen_video_sync(
@@ -1915,11 +1920,12 @@ def _run_single_video_multi_ref_sync(
         finally:
             await scraper.stop()
 
-    loop = _asyncio.new_event_loop()
+    # Use asyncio.run() instead of manual loop creation to avoid InvalidStateError on Windows
     try:
-        return loop.run_until_complete(_inner())
-    finally:
-        loop.close()
+        return _asyncio.run(_inner())
+    except Exception as e:
+        logger.error(f"[FastGen] Multi-ref video generation failed: {e}")
+        return None
 
 
 def _run_fastgen_video_multi_ref_sync(
@@ -2480,11 +2486,12 @@ def _run_keyframe_video_sync(
         finally:
             await scraper.stop()
     
-    loop = _asyncio.new_event_loop()
+    # Use asyncio.run() instead of manual loop creation to avoid InvalidStateError on Windows
     try:
-        return loop.run_until_complete(_inner())
-    finally:
-        loop.close()
+        return _asyncio.run(_inner())
+    except Exception as e:
+        logger.error(f"[FastGen Keyframes] Generation failed: {e}")
+        return None
 
 
 # ── Async entry point ──────────────────────────────────────────────────────────
@@ -2555,11 +2562,12 @@ def _run_fastgen_with_refs_sync(
             await scraper.stop()
 
     # Create a fresh event loop isolated from uvicorn's loop
-    loop = _asyncio.new_event_loop()
+    # Use asyncio.run() instead of manual loop creation to avoid InvalidStateError on Windows
     try:
-        return loop.run_until_complete(_inner())
-    finally:
-        loop.close()
+        return _asyncio.run(_inner())
+    except Exception as e:
+        logger.error(f"[FastGen] Sequential generation with references failed: {e}")
+        return []
 
 
 async def generate_images_with_references_fastgen(

@@ -1,0 +1,45 @@
+MODE9 GENERATED VIDEO PROMPT SAMPLE
+================================================================================
+
+CRITICAL: BUILDING UNCHANGED! Only workers move around FIXED structure.
+Building does NOT grow/change/transform - it's already complete.
+
+**TRANSITION:** [Bare chassis on assembly line] -> [Chassis with engine and suspension mounted]
+
+**BUILDING STABILITY RULE:**
+• Building: 100% IDENTICAL start to end
+• No construction on building - already built
+• ONLY workers/machinery moving AROUND fixed building
+
+**CAMERA & CONTINUITY:** (FULL HOUSE VISIBILITY)
+• Fixed tripod: X=0.0m, Y=8.0m, Z=25.0m
+• 35mm focal length, horizon at 60%
+• Static background unchanged
+
+**KEY VISUAL CHANGES** (3 bullets):
+• Engine installation and suspension mounting. Workers: Mechanics installing engine components, technicians mounting...
+• Equipment: Hydraulic lifts, pneumatic tools, engine hoists
+• Assembly: Bare chassis on assembly line to Chassis with engine and suspension mount
+
+**MOTION TYPE:** Timelapse
+
+**MOTION DETAIL:**
+• Continuous forward build
+• No reversing - only forward
+• Active workers/machinery moving
+
+**ASSEMBLY HEIGHT CONTEXT:**
+• Current: Chassis Assembly
+• Vertical growth: upward/outward
+
+**VISUAL FOCUS:** modern sedan, streamlined body, LED headlights, alloy wheels
+
+**LIGHTING & ATMOSPHERE:**
+• Time: midday, lighting: bright daylight
+
+FRAMING: Vertical 9:16. Wide shot - FULL vehicle/house visible.
+SAFETY: Generic content only.
+
+================================================================================
+Word count: 180
+Character count: 1339

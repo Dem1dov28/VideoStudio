@@ -284,14 +284,32 @@ def _build_image_prompt(
 
 {title_line}
 
+━━━ CRITICAL: STATIC CAMERA - NO MOVEMENT! ━━━
+⚠️ THIS IS A STATIC IMAGE — CAMERA IS COMPLETELY LOCKED!
+- Camera is completely motionless — tripod-mounted, locked-off position
+- Camera angle CANNOT change — think: camera is bolted to concrete
+- If camera moves even 1 degree, the entire timelapse will be ruined
+- This is THE MOST IMPORTANT rule for vehicle assembly timelapse
+- Absolutely static camera, like the attached reference photo in FastGen
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 ━━━ CRITICAL: BACKGROUND STAYS THE SAME! ━━━
 The BACKGROUND (sky, buildings, hangar walls, equipment, landscape) MUST REMAIN EXACTLY THE SAME across all stages!
 - Same sky, same lighting
 - Same location elements, same ground
 - Same equipment in background, same tools on walls
 - ONLY THE VEHICLE ASSEMBLY PROGRESSES — background is FROZEN!
-- Camera angle and perspective MUST match previous stage exactly
-- This is essential for smooth timelapse video.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+━━━ CAMERA CALIBRATION DATA (ABSOLUTE PRECISION REQUIRED) ━━━
+CAMERA PARAMETERS - MUST BE IDENTICAL FOR EVERY SINGLE IMAGE:
+- Position: X=0.0m (center), Y=8.0m (height - elevated), Z=25.0m (distance - far)
+- Angle: Horizontal=0°, Vertical=-10° (slight downward angle from height)
+- Focal Length: 35mm full-frame equivalent (wide enough for full vehicle)
+- Horizon Line: 60% from bottom edge (elevated viewpoint)
+- Cloud Motion: ALWAYS moving RIGHT (never static, never left)
+- Framing: ENTIRE vehicle must be fully visible with surrounding assembly area
+- These parameters are LOCKED - ZERO tolerance for variation
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ━━━ CONTENT SAFETY (MANDATORY) ━━━
@@ -319,15 +337,18 @@ SCENE DESCRIPTION:
 {visual_prompt}
 
 COMPOSITION:
-- Wide shot showing the entire assembly area
+- ⚠️ CRITICAL: Use EXACT camera calibration parameters from above - NO variations allowed
+- Wide shot showing the ENTIRE vehicle fully - complete assembly visible from all angles
+- Frame composition: Vehicle occupies 50-60% of frame - far enough to show full object
 - Vertical 9:16 aspect ratio (TikTok/Reels/Shorts format)
-- Camera positioned at EXACTLY the same angle as previous stage (critical for timelapse!)
-- Natural daylight, sun at ~45 degrees
-- Realistic shadows and lighting
+- ⚠️ Camera angle is LOCKED - same perspective for ALL stages (see calibration data)
+- Natural daylight, sun position consistent (sun at ~45° elevation from horizon)
+- Realistic shadows and lighting (shadows must match across all stages)
 - Assembly materials visible: metal parts, tools, equipment, machinery
 - Real textures: metallic surfaces, concrete floor, industrial elements
 - WORKERS visible if appropriate for this stage
 - ASSEMBLY EQUIPMENT visible if appropriate (lifts, cranes, tools)
+- **CRITICAL FRAMING**: Capture COMPLETE vehicle - no cropping, no partial views
 
 CRITICAL REQUIREMENTS:
 - This MUST look like a REAL PHOTO from an assembly facility
@@ -484,14 +505,21 @@ SPECIFIC MICRO-ACTIONS VISIBLE:
 {actions_text}
 - These actions happen in sequence, showing real work being done"""
 
-    prompt = f"""A highly satisfying construction timelapse showing WORK IN PROGRESS between two stages.
+    prompt = f"""CRITICAL: BUILDING REMAINS COMPLETELY UNCHANGED THROUGHOUT THIS VIDEO!
+ONLY workers and machinery move around the FIXED building structure.
+The building itself does NOT grow, change, or transform in this video.
+
+**TRANSITION:** [{start_state}] -> [{end_state}]
+
+**BUILDING STABILITY RULE (MOST IMPORTANT):**
+• Building structure: 100% IDENTICAL from start to end of video
+• No construction on building - it's already complete
+• ONLY workers/machinery moving AROUND the fixed building
+• Think: building is a STATIC PHOTO - workers are DYNAMIC overlay
 
 {transformation_title}
 
-VEHICLE TYPE: {style_visual['visual']}
-LOCATION: {loc_visual['visual']}
-{peak_section}
-━━━ CRITICAL: SHOW THE WORK, NOT JUST THE RESULT ━━━
+**KEY VISUAL CHANGES** (specific actions):
 {workers_section}
 {machinery_section}
 {intensity_section}
@@ -502,73 +530,37 @@ THE BUILDING EVOLVES THROUGH REAL CONSTRUCTION ACTIONS:
 - NOT instant transformation, NOT magical appearance
 - Logical and physically believable progress
 {micro_actions_section}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-TRANSITION:
-FROM: {start_state}
-TO: {end_state}
+**MOTION TYPE:** Timelapse
 
-MAIN ACTIVITY: {action}
+**MOTION DETAIL:**
+• Continuous forward build - smooth progression through time
+• No reversing - only forward advancement
+• Active workers/machinery in constant motion
 
-━━━ CAMERA RULES (MANDATORY) ━━━
-- FIXED CAMERA position (tripod-mounted look)
-- SAME LOCATION throughout the video
-- SAME PERSPECTIVE, same angle
-- Only the construction progresses
-- SUBTLE natural micro-motion: tiny, almost imperceptible camera vibration
-- This micro-motion makes footage feel REAL, not CGI
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{peak_section}
 
-━━━ CRITICAL: NO INTERIOR SHOTS ━━━
-- NEVER show views from inside the vehicle
-- NEVER show the vehicle cabin from inside
-- ALWAYS show the vehicle from OUTSIDE
-- Interior components are installed through open doors/windows
-- Camera ALWAYS stays external to the vehicle
-- This ensures timelapse consistency across all stages
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+**ASSEMBLY HEIGHT CONTEXT:**
+• Current progress: {stage_name_en}
+• Vertical growth: structure grows upward/outward
 
-━━━ MOTION RULES (MANDATORY) ━━━
-- FORWARD MOTION ONLY, no reversing
-- Continuous progress, no sudden jumps
-- Smooth timelapse speed (1 day = 6 seconds)
-- Clean satisfying motion
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+**VISUAL FOCUS:** {style_visual['visual'][:60]}
 
-━━━ CHAOS & IMPERFECTIONS (REALISM) ━━━
-- Scattered materials on ground: piles of bricks, lumber, tools
-- Uneven surfaces, dirt patches, construction mess
-- Workers' footprints in dirt
-- Temporary structures, tarps, protective coverings
-- Real construction site feels lived-in and working
-- NOT a perfect clean CGI scene
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-━━━ SMALL DETAILS (SECRET TO REALISM) ━━━
-- Dust rising from activity
-- Shadows shifting as time passes
-- Machinery operating in background
-- Workers' shadows moving
-- Small debris and movement
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {lighting_section}
 
-FRAMING: Vertical 9:16. Wide shot of construction site.
+**ENVIRONMENT DETAILS:**
+- Scattered materials on ground: piles of bricks, lumber, tools
+- Uneven surfaces, dirt patches, construction mess
+- Real construction site feels lived-in and working
+- NOT a perfect clean CGI scene
+
+FRAMING: Vertical 9:16. Wide shot - FULL vehicle/house visible.
 
 AUDIO: Construction site ambience — machinery sounds, tools, footsteps, activity. NO MUSIC. NO VOICE.
 
 STYLE: Photorealistic, cinematic, ultra detailed, smooth motion.
 
-━━━ KEYFRAME RULES ━━━
-The transition must strictly follow the change from the start frame to the end frame.
-No sudden jumps or unrelated changes.
-━━━━━━━━━━━━━━━━━━━━
-
-━━━ CONTENT SAFETY ━━━
-NO dangerous situations
-NO accidents or injuries
-Safe, satisfying construction progress only
-━━━━━━━━━━━━"""
+SAFETY: Generic content ONLY. NO brands, logos, copyrighted material."""
 
     return prompt
 
@@ -579,14 +571,14 @@ def _build_keyframe_video_prompt(
     language: str = "ru",
 ) -> str:
     """
-    Build a SHORT video prompt for FastGen keyframe video generation.
+    Build a STRUCTURED video prompt (150-180 words) for FastGen keyframe video generation.
     Based on video skills best practices for image-to-video generation.
     
     VIDEO PROMPT FORMULA:
     [Shot Type] + [Subject Action] + [Camera Motion] + [Environment] + [Temporal] + [Technical]
     
     For construction timelapse:
-    - Shot: wide_shot (full construction site visible)
+    - Shot: wide_shot (full house/vehicle visible)
     - Camera: static/locked-off (CRITICAL for timelapse consistency)
     - Temporal: time_lapse (compressed time)
     - Environment: outdoor construction site
@@ -606,30 +598,50 @@ def _build_keyframe_video_prompt(
     workers = scene.get("workers_en")
     machinery = scene.get("machinery_en")
     
-    # Truncate long workers/machinery text
-    workers_short = (workers[:80] + "...") if workers and len(workers) > 80 else (workers or "workers active")
-    machinery_short = (machinery[:80] + "...") if machinery and len(machinery) > 80 else (machinery or "equipment operating")
+    # Truncate long workers/machinery text MORE aggressively for 150-180 words
+    workers_short = (workers[:60] + "...") if workers and len(workers) > 60 else (workers or "workers active")
+    machinery_short = (machinery[:60] + "...") if machinery and len(machinery) > 60 else (machinery or "equipment operating")
     
-    # PROFESSIONAL VIDEO PROMPT (based on video skills)
-    # Formula: Shot + Action + Camera + Temporal + Technical
-    # Optimized for FastGen (~700 chars)
-    prompt = f"""Wide shot (WS), construction timelapse: {stage_name_en}.
-{style_visual['visual']}, {loc_visual['visual']}.
+    # PROFESSIONAL VIDEO PROMPT - STRUCTURED (150-180 words)
+    # CRITICAL: Building stays IDENTICAL throughout - only workers/machinery move
+    prompt = f"""CRITICAL: BUILDING UNCHANGED! Only workers move around FIXED structure.
+Building does NOT grow/change/transform - it's already complete.
 
-SUBJECT: {action}. Workers: {workers_short}. Equipment: {machinery_short}.
+**TRANSITION:** [{start_state}] -> [{end_state}]
 
-CAMERA: Locked-off tripod, static frame. CRITICAL: camera must not move.
-NO INTERIOR SHOTS: Always show vehicle from OUTSIDE, never from inside.
-TEMPORAL: Time-lapse, forward motion ONLY, step-by-step progress.
+**BUILDING STABILITY RULE:**
+• Building: 100% IDENTICAL start to end
+• No construction on building - already built
+• ONLY workers/machinery moving AROUND fixed building
 
-TRANSITION: "{start_state}" → "{end_state}".
-MUST strictly follow start frame to end frame. No sudden jumps.
+**CAMERA & CONTINUITY:** (FULL HOUSE VISIBILITY)
+• Fixed tripod: X=0.0m, Y=8.0m, Z=25.0m
+• 35mm focal length, horizon at 60%
+• Static background unchanged
 
-BACKGROUND: Sky, trees, street stay SAME. Only house evolves.
+**KEY VISUAL CHANGES** (3 bullets):
+• {action[:50]}. Workers: {workers_short}
+• Equipment: {machinery_short}
+• Assembly: {start_state[:40]} to {end_state[:40]}
 
-SAFETY: Generic content ONLY. NO brands, logos, copyrighted material. Generic equipment.
+**MOTION TYPE:** Timelapse
 
-TECHNICAL: Vertical 9:16, 1080x1920, cinematic, photorealistic."""
+**MOTION DETAIL:**
+• Continuous forward build
+• No reversing - only forward
+• Active workers/machinery moving
+
+**ASSEMBLY HEIGHT CONTEXT:**
+• Current: {stage_name_en}
+• Vertical growth: upward/outward
+
+**VISUAL FOCUS:** {style_visual['visual'][:60]}
+
+**LIGHTING & ATMOSPHERE:**
+• Time: midday, lighting: bright daylight
+
+FRAMING: Vertical 9:16. Wide shot - FULL vehicle/house visible.
+SAFETY: Generic content only."""
 
     return prompt
 
@@ -641,12 +653,13 @@ def _build_drone_showcase_image_prompt(
     """
     Build a prompt for generating DRONE SHOWCASE IMAGE (end frame for drone video).
     
-    PURPOSE: Create a beautiful aerial view showing vehicle + full workshop/factory context.
+    PURPOSE: Create a beautiful aerial view showing vehicle + full workshop/factory context with SIGNS OF USE.
     
     KEY REQUIREMENTS:
-    - SAME vehicle (identical design, materials, colors)
-    - DIFFERENT camera angle (higher elevation, wider view)
+    - SAME vehicle (identical design, materials, colors) — EXACT COPY from reference
+    - FARTHER AWAY — drone shows the vehicle from a bit more distance (but still close)
     - Show FULL environment: workshop, factory floor, equipment, surroundings
+    - Add SIGNS THAT VEHICLE IS IN USE: driver/person nearby, tools, accessories
     - Cinematic industrial photography quality
     """
     vehicle_type = scenario.get("vehicle_type", "car_modern")
@@ -655,59 +668,111 @@ def _build_drone_showcase_image_prompt(
     style_visual = VEHICLE_TYPE_VISUALS.get(vehicle_type, VEHICLE_TYPE_VISUALS["car_modern"])
     loc_visual = LOCATION_VISUALS.get(location, LOCATION_VISUALS["factory"])
 
-    # Drone showcase image prompt - aerial view with full facility context
-    prompt = f"""━━━ ★★★ DRONE SHOWCASE IMAGE ★★★ ━━━
-PURPOSE: Create the FINAL FRAME for a cinematic drone showcase video.
-This image will be the END POINT of a smooth camera movement from assembly view to aerial showcase.
+    # Drone showcase image prompt — FARTHER AWAY aerial view with signs of use
+    prompt = f"""━━━ ★★★ DRONE SHOWCASE IMAGE — LIVED-IN/IN-USE VEHICLE FROM FARTHER AWAY ★★★ ━━━
+PURPOSE: Create the FINAL FRAME for a cinematic drone showcase video showing a vehicle that's READY TO USE, viewed from SLIGHTLY FARTHER AWAY than assembly shots.
+This image will be the END POINT of a smooth camera movement from assembly view to aerial showcase with visible signs of use and MORE DISTANT perspective.
 
-━━━ CRITICAL: VEHICLE MUST REMAIN IDENTICAL ━━━
+━━━ CRITICAL: VEHICLE MUST BE IDENTICAL + SIGNS OF USE ━━━
 The vehicle must be EXACTLY the same as in the reference image:
-- SAME design, architecture, materials, colors
-- SAME proportions, details, finish
-- DO NOT change the vehicle itself — ONLY change the camera viewpoint
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- SAME design, architecture, materials, colors — NO CHANGES ALLOWED
+- SAME proportions, details, finish — EXACT COPY
+- DO NOT change the vehicle itself — ONLY THE CAMERA POSITION IS FARTHER AWAY
 
-SUBJECT: {style_visual['visual']}
+BUT NOW ADD SIGNS THAT THE VEHICLE IS READY FOR USE / INHABITED:
+- Driver or person standing/sitting near vehicle (generic worker or driver)
+- Personal items visible: bag on seat, coffee cup in holder, phone on dashboard
+- Tools or accessories nearby: toolbox, cleaning supplies, maintenance equipment
+- Vehicle accessories: roof rack, bike carrier, cargo boxes (if appropriate)
+- Open door or hood showing interior/engine (subtle, not fully open)
+- Reflections showing activity around vehicle
+- Footprints or tire tracks on floor (subtle details)
+- Work lights or inspection lamps positioned around vehicle
+
+DO NOT change the vehicle structure itself — ONLY add these signs of use/life and move camera farther away.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SUBJECT: {style_visual['visual']} — now showing signs of being ready for use, viewed from FARTHER AWAY
 LOCATION CONTEXT: {loc_visual['visual']}
 
-━━━ CAMERA ANGLE: ELEVATED DRONE VIEW ━━━
-- HIGH ELEVATION: 20-40 meters above ground (bird's eye perspective)
-- WIDE FIELD OF VIEW: Show entire vehicle + full facility context
-- ANGLED DOWNWARD: Camera tilted down ~30-45 degrees
-- CINEMATIC COMPOSITION: Rule of thirds, balanced framing
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━ CAMERA ANGLE: FARTHER ELEVATED DRONE VIEW ━━━
+- MODERATE ELEVATION: 20-30 meters above ground (higher than assembly shots)
+- FARTHER DISTANCE: 35-50 meters from the vehicle (drone moves BACK to show more context)
+- VEHICLE STILL DOMINATES: Vehicle fills 50-60% of frame (still the hero, but with more surroundings)
+- ANGLED DOWNWARD: Camera tilted down ~25-35 degrees
+- CINEMATIC COMPOSITION: Rule of thirds, balanced framing with MORE ENVIRONMENT
+- FULL CONTEXT VISIBLE: Show complete workshop/factory floor, equipment layout, surrounding area
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-━━━ WHAT TO SHOW (VEHICLE + ENVIRONMENT) ━━━
-PRIMARY FOCUS: The completed vehicle (same as reference)
+━━━ WHAT TO SHOW (VEHICLE AS HERO WITH SIGNS OF USE) ━━━
+PRIMARY FOCUS: The completed vehicle — LARGE and DETAILED in frame, READY FOR USE
+
+VISIBLE SIGNS OF USE/HABITATION (CRITICAL):
+1. PERSON/DRIVER: One generic person (worker/driver) near vehicle
+   - Standing beside door OR sitting inside (visible through window)
+   - Wearing neutral clothing (no logos)
+   - Adds human scale and life to scene
+
+2. PERSONAL ITEMS (visible through windows):
+   - Bag or backpack on passenger seat
+   - Coffee cup in cup holder
+   - Phone or tablet on dashboard/console
+   - Notebook or papers on seat
+
+3. TOOLS & ACCESSORIES:
+   - Toolbox or tool bag on floor nearby
+   - Cleaning supplies (cloth, spray bottle) if vehicle looks maintained
+   - Maintenance equipment (inspection lamp, diagnostic tools)
+   - Vehicle accessories: roof rack, cargo carrier, bike mount (if appropriate for vehicle type)
+
+4. SUBTLE ACTIVITY SIGNS:
+   - Slightly open door (driver or passenger door ajar ~15-30 degrees)
+   - Or hood slightly open showing engine bay (if appropriate)
+   - Work lights or inspection lamps positioned around vehicle
+   - Tire tracks or footprints on workshop floor (subtle)
+   - Reflections on vehicle surface showing activity around it
+
 ENVIRONMENT TO INCLUDE:
-- Full workshop or factory floor space
-- Industrial equipment, tools in background
-- Lighting rigs, ceiling structures
+- Workshop or factory floor space around vehicle
+- Industrial equipment, tools in background (blurred/subtle)
 - Floor markings, work areas
-- Storage areas, shelves with parts
-- Other vehicles or components (if appropriate)
-- Facility architecture (windows, doors, structural elements)
+- Lighting rigs creating reflections on vehicle
+- Other vehicles or components in far background (optional, minimal)
 
-The goal is to show the vehicle IN ITS FULL INDUSTRIAL CONTEXT.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Vehicle should be the CLEAR MAIN SUBJECT, occupying majority of the image, but with MORE SURROUNDINGS visible than assembly shots.
+Show body details, paint finish, design features clearly, plus additional context like full workshop layout, equipment positions.
+The viewer should feel the vehicle is "ready to drive away" or "actively being used", seen from FARTHER AWAY while it remains the HERO.
+
+ABSOLUTELY AVOID:
+- Wide shots where vehicle is small in center (vehicle must still dominate!)
+- Extreme bird's eye view from very high altitude
+- Showing entire factory or vast landscape
+- Any camera position that makes vehicle look distant or tiny
+- Assembly equipment, workers building vehicle (this is AFTER assembly)
+- Brand logos or copyrighted designs
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 LIGHTING: Industrial golden hour or professional studio lighting
-- Warm, directional light revealing form and depth
-- Beautiful reflections on vehicle surface
+- Warm, directional light revealing vehicle form and depth
+- Beautiful reflections on vehicle surface showing activity
 - Professional automotive/industrial photography aesthetic
+- Interior lights on (if visible through windows) creating warm glow
 
 STYLE: Ultra photorealistic, cinematic industrial photography
 - Shot on professional drone or high-end camera
 - High resolution, sharp details
 - Rich colors, excellent dynamic range
 - Premium marketing photography quality
-- Emotional, aspirational atmosphere
+- Emotional, aspirational "ready for adventure" atmosphere
 
 TECHNICAL: Vertical 9:16, 1080x1920, ultra detailed, photorealistic.
 
 SAFETY: Generic content ONLY. NO brands, logos, copyrighted material.
+- Person must be GENERIC (no branded clothing)
+- All accessories must be original designs
+- Vehicle must remain unbranded
 
-GOAL: Create a stunning aerial showcase image that reveals the full beauty of the vehicle and its industrial surroundings."""
+GOAL: Create an intimate aerial showcase where the vehicle remains the HERO — large, detailed, impressive, and CLEARLY IN USE or READY FOR USE with visible signs that someone has claimed it and is actively using it."""
 
     return prompt
 
@@ -719,9 +784,9 @@ def _build_final_drone_video_prompt(
     """
     Build a video prompt for the FINAL SHOWCASE shot.
     
-    PURPOSE: Emotional payoff, show full result clearly, increase retention.
+    PURPOSE: Emotional payoff, show full result clearly with SIGNS OF USE, increase retention.
     
-    KEY PRINCIPLE: NO MORE ASSEMBLY — ONLY PRESENTATION
+    KEY PRINCIPLE: NO MORE ASSEMBLY — ONLY PRESENTATION WITH LIFE
     
     DRONE SHOT STYLE (randomly selected):
     - Slow pull-back (отдаление)
@@ -731,7 +796,7 @@ def _build_final_drone_video_prompt(
     
     TWO-FRAME TRANSITION:
     - START FRAME: Last assembly stage image (ground-level view)
-    - END FRAME: Drone showcase image (elevated aerial view)
+    - END FRAME: Drone showcase image with SIGNS OF USE (elevated aerial view)
     - VIDEO: Smooth camera movement from start to end frame
     """
     vehicle_type = scenario.get("vehicle_type", "car_modern")
@@ -740,12 +805,12 @@ def _build_final_drone_video_prompt(
     style_visual = VEHICLE_TYPE_VISUALS.get(vehicle_type, VEHICLE_TYPE_VISUALS["car_modern"])
     loc_visual = LOCATION_VISUALS.get(location, LOCATION_VISUALS["factory"])
 
-    # Random movement selection for variety
+    # Random movement selection for variety - SMOOTH TRANSITIONS BETWEEN FRAMES
     movements = [
-        "slow pull-back and upward: camera starts at ground-level assembly view, gently moves backward and rises to elevated aerial position, revealing the full vehicle and facility",
-        "smooth orbit with elevation gain: camera circles around the vehicle while ascending from ground level to bird's eye view, showing all angles",
-        "rise-up reveal: camera starts low near ground at assembly viewpoint, slowly rises upward to high aerial position while pulling back",
-        "diagonal fly-back: camera passes alongside the vehicle diagonally while moving backward and upward from assembly view to aerial overview",
+        "slow smooth pull-back and upward: camera gently moves backward while rising from ground-level assembly view to elevated aerial showcase position, revealing the full vehicle with signs of use",
+        "gradual orbit with elevation gain: camera smoothly circles around the vehicle while ascending from assembly viewpoint to moderate aerial perspective, showing all angles and activity signs",
+        "steady rise-up reveal: camera starts at ground-level assembly position, slowly rises upward to aerial showcase while pulling back, revealing vehicle ready for use",
+        "fluid diagonal fly-back: camera passes alongside the vehicle diagonally while moving backward and upward from assembly view to aerial overview with activity signs visible",
     ]
     selected_movement = random.choice(movements)
 
@@ -757,69 +822,93 @@ def _build_final_drone_video_prompt(
     ]
     selected_time = random.choice(times_of_day)
 
-    # TWO-FRAME TRANSITION PROMPT
-    # CRITICAL: This video transitions FROM assembly view TO aerial showcase
-    prompt = f"""━━━ ★★★ TRANSITION: ASSEMBLY → AERIAL SHOWCASE ★★★ ━━━
-THIS VIDEO SHOWS A SMOOTH CAMERA MOVEMENT BETWEEN TWO FRAMES:
+    # TWO-FRAME TRANSITION PROMPT — SMOOTH MOVEMENT FROM ASSEMBLY TO AERIAL SHOWCASE
+    # CRITICAL: This IS a transition video between TWO frames using keyframe interpolation
+    prompt = f"""━━━ ★★★ SMOOTH TRANSITION: ASSEMBLY → IN-USE AERIAL SHOWCASE ★★★ ━━━
+THIS VIDEO SHOWS A SMOOTH, GRADUAL CAMERA MOVEMENT BETWEEN TWO FRAMES:
 - START FRAME: Assembly workshop view (ground-level, human perspective)
-- END FRAME: Beautiful aerial showcase view (elevated drone perspective)
+- END FRAME: Beautiful aerial showcase view with SIGNS OF USE (elevated drone perspective at 15-25 meters)
 
-The video MUST smoothly transition from the start frame to the end frame.
+The video MUST smoothly morph/transition from the start frame to the end frame.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-A cinematic drone showcase of the COMPLETED vehicle. This is the FINAL RESULT — NO assembly, NO workers, NO machinery.
+A cinematic drone showcase of the COMPLETED, READY-TO-USE vehicle. This is the FINAL RESULT — NO assembly, NO workers building, NO machinery.
 
-SUBJECT: {style_visual['visual']}
+SUBJECT: {style_visual['visual']} — now showing signs of being actively used or ready for use
 LOCATION: {loc_visual['visual']}
 
-━━━ CRITICAL: THIS IS A SHOWCASE, NOT ASSEMBLY ━━━
-The vehicle is FULLY BUILT and must remain UNCHANGED throughout.
-NO assembly activities.
-NO workers.
-NO machinery.
-NO transformation.
-ONLY the finished, beautiful result.
+━━━ CRITICAL: THIS IS A SHOWCASE WITH LIFE, NOT ASSEMBLY ━━━
+The vehicle is FULLY BUILT and shows signs of being USED/INHABITED. Must show signs that someone is using it:
+
+VISIBLE SIGNS OF USE/HABITATION (APPEAR GRADUALLY DURING TRANSITION):
+1. PERSON/DRIVER: Generic person (worker/driver) standing near OR sitting in vehicle (becomes visible as camera rises)
+2. PERSONAL ITEMS: Bag on seat + coffee cup in holder (visible through windows in end frame)
+3. TOOLS & ACCESSORIES: Toolbox nearby OR vehicle accessories (roof rack/cargo carrier) — appear during transition
+4. ACTIVITY SIGNS: Slightly open door (~15 degrees) OR work light positioned nearby — become visible as camera ascends
+5. AMBIANCE: Reflections showing activity, interior lights creating warm glow through windows (visible in end frame)
+
+OPTIONAL SUBTLE DETAILS:
+- Phone or tablet on dashboard/console
+- Tire tracks or footprints on floor (subtle)
+
+DO NOT overload scene — focus on 3-4 main elements that appear gradually.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-━━━ CAMERA MOVEMENT: SMOOTH TRANSITION ━━━
+NO assembly activities.
+NO workers building the vehicle.
+NO construction equipment.
+ONLY the finished, beautiful, IN-USE result.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+━━━ CAMERA MOVEMENT: SMOOTH GRADUAL TRANSITION ━━━
 {selected_movement}
 
 KEY REQUIREMENTS:
-- Video STARTS from the assembly viewpoint (start frame)
-- Video ENDS at the aerial showcase viewpoint (end frame)
+- Video STARTS from the assembly viewpoint (start frame — ground level, no decorations yet)
+- Video ENDS at the aerial showcase viewpoint with signs of use (end frame — 15-25 meters elevation, all decorations visible)
 - Movement must be SMOOTH, GRADUAL, and CINEMATIC
 - No sudden jumps or cuts
 - Natural, flowing camera motion
-- The vehicle remains IDENTICAL throughout — only camera position changes
+- The vehicle remains IDENTICAL throughout — only camera position changes AND signs of use appear gradually
+- Signs of habitation should emerge naturally as camera moves and perspective changes
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-FRAMING EVOLUTION:
-- START: Ground-level view focused on vehicle
-- MIDDLE: Gradual ascent revealing more surroundings
-- END: High aerial overview showing full facility + context
+FRAMING EVOLUTION (GRADUAL TRANSITION):
+- START (0-33%): Ground-level view focused on vehicle (assembly complete but minimal activity signs)
+- MIDDLE (34-66%): Gradual ascent revealing more surroundings + signs of use beginning to appear (person becomes visible, lights turn on)
+- END (67-100%): Moderate aerial overview from 15-25 meters showing full facility with ALL signs of use visible (person, items, tools, accessories, activity)
 
 LIGHTING: {selected_time}
 - Realistic shadows consistent with scene
-- Beautiful reflections on vehicle surface
+- Beautiful reflections on vehicle surface showing activity
 - Professional automotive/industrial photography quality
+- Interior lights create warm glow visible through windows (gradually becoming visible as camera rises)
+- Lighting emphasizes the "ready for adventure" atmosphere
 
 ENVIRONMENT MOTION:
-- Slight ambient movement
+- Slight ambient movement (air circulation in workshop)
 - Natural environmental life
 - Subtle industrial atmosphere
+- Person making subtle gesture or walking toward vehicle (frozen moment gradually appearing)
+- Soft reflections on vehicle surface (steady glow)
 
 STYLE:
 - Ultra realistic
 - Cinematic
 - Calm and satisfying
 - Premium showcase quality
-- Emotional payoff for viewer
+- Emotional payoff for viewer — sense of "ready to drive away"
+- Aspirational ownership/use atmosphere
 
-TECHNICAL: Vertical 9:16, 1080x1920, cinematic drone footage, smooth motion.
+TECHNICAL: Vertical 9:16, 1080x1920, cinematic drone FOOTAGE, smooth motion, sharp details.
 
 SAFETY: Generic content ONLY. NO brands, logos, copyrighted material.
+- Person must be GENERIC (no branded clothing)
+- All accessories must be original designs
+- Vehicle must remain unbranded
+- Keep decorations minimal — 3-4 elements maximum that appear gradually
 
-GOAL: Create a stunning, smooth transition that reveals the full beauty of the completed vehicle from an aerial perspective."""
+GOAL: Create a smooth, emotional transition from assembly site to a beautifully prepared, IN-USE vehicle that clearly shows someone has claimed it and is actively using it. Camera smoothly moves from ground-level assembly view to 15-25 meter aerial showcase, with signs of use appearing gradually during the ascent."""
 
     return prompt
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1169,18 +1258,34 @@ async def generate_vehicle_videos(
     # Generate ALL videos in parallel
     video_paths = await asyncio.gather(*video_tasks, return_exceptions=True)
     
-    # Separate video results from preview result (last task might be preview)
+    # ═══════════════════════════════════════════════════════════════════════
+    # SEPARATE PREVIEW RESULT FROM VIDEO RESULTS
+    # ═══════════════════════════════════════════════════════════════════════
     preview_path = None
-    if generate_preview and len(video_paths) > num_total_videos:
-        # Last item is preview result
-        preview_result = video_paths.pop()  # Remove and get preview
+    
+    # Check if preview task was added and extract its result
+    if generate_preview and len(video_tasks) > 0:
+        # Preview task is always the LAST one added (after drone shot)
+        # We need to check if the last task actually produced a preview
+        preview_result = video_paths[-1] if len(video_paths) > 0 else None
+        
         if isinstance(preview_result, Path):
+            # Successfully generated preview - remove it from video_paths
             preview_path = preview_result
+            video_paths = video_paths[:-1]  # Remove last item (preview)
             logger.success(f"[Mode9] Clickbait preview generated: {preview_result.name}")
+            logger.info(f"[Mode9] Preview full path: {preview_result.absolute()}")
+            # Verify file exists
+            if not preview_result.exists():
+                logger.error(f"[Mode9] Preview file does not exist: {preview_result}")
+                preview_path = None
         elif isinstance(preview_result, Exception):
+            # Preview generation failed - log error but continue
             logger.error(f"[Mode9] Preview generation failed: {preview_result}")
+            video_paths = video_paths[:-1] if len(video_paths) > 0 else video_paths
         else:
-            logger.warning("[Mode9] Preview generation returned None")
+            # No preview was generated (task returned None or not added)
+            logger.warning("[Mode9] No preview result from last task - preview will NOT be added")
 
     # Handle results
     valid_paths: list[Path | None] = []

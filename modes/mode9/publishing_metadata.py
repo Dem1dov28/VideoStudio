@@ -7,6 +7,7 @@ based on the vehicle assembly timelapse video content.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import random
 import re
@@ -127,6 +128,7 @@ async def generate_publishing_metadata(
     stages: list[dict],
     title: str,
     language: str = "en",
+    force_title: str | None = None,  # NEW: Override generated title
 ) -> dict[str, Any]:
     """
     Generate publishing metadata for YouTube Shorts.
@@ -163,7 +165,11 @@ async def generate_publishing_metadata(
                 SystemMessage(content="You are a YouTube Shorts SEO expert. Generate viral, clickable metadata optimized for the algorithm."),
                 HumanMessage(content=prompt),
             ]
-            response = await llm.ainvoke(messages)
+            try:
+                response = await asyncio.wait_for(llm.ainvoke(messages), timeout=30.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"[Mode9 Publishing] Metadata generation timeout (30s), using fallback")
+                raise Exception("Timeout")
             raw = response.content.strip() if hasattr(response, 'content') else str(response)
             
             # Strip markdown code fences if present
@@ -176,19 +182,26 @@ async def generate_publishing_metadata(
             if json_match:
                 result = json.loads(json_match.group())
                 if result:
+                    # Force override title if provided
+                    if force_title:
+                        result["title"] = force_title
                     logger.success(f"[Mode9 Publishing] Generated metadata: {result.get('title', 'N/A')}")
                     return result
         except Exception as e:
             logger.warning(f"[Mode9 Publishing] LLM failed, using fallback: {e}")
         
         # Fallback
-        return _generate_fallback_metadata(vehicle_type, location, stages, title, language)
+        fallback_result = _generate_fallback_metadata(vehicle_type, location, stages, title, language)
+        # Force override title if provided
+        if force_title:
+            fallback_result["title"] = force_title
+        return fallback_result
     except Exception as e:
         # Ultimate fallback if anything fails
         logger.error(f"[Mode9 Publishing] All methods failed: {e}")
         lang_hashtags = "#assembly #сборка #vehiclebuild #timelapse #beforeafter" if language == "ru" else "#assembly #vehiclebuild #machinery #timelapse #beforeafter"
         return {
-            "title": f"Vehicle Assembly Timelapse {vehicle_type or ''} {location or ''} #timelapse #beforeafter".strip(),
+            "title": force_title or f"Vehicle Assembly Timelapse {vehicle_type or ''} {location or ''} #timelapse #beforeafter".strip(),
             "description": f"Watch the complete vehicle assembly process in this satisfying timelapse. {lang_hashtags}",
             "tags": ["vehicle assembly", "timelapse", "manufacturing", "satisfying"],
         }

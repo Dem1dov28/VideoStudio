@@ -34,45 +34,45 @@ from modes.mode9.architectural_variations import (
 CAMERA_SPECS: dict[str, dict[str, str]] = {
     "static_side_elevated": {
         "name": "static side elevated view",
-        "description": "camera positioned at 90-degree side angle, 20 meters distance, 8 meters elevation, capturing full vehicle profile",
+        "description": "camera positioned at 90-degree side angle, 30 meters distance, 12 meters elevation, capturing FULL vehicle profile",
         "lens": "35mm equivalent, moderate wide angle",
-        "height": "8-10 meters above ground",
+        "height": "12-15 meters above ground",
         "angle": "15-degree downward angle",
-        "distance": "20-25 meters from vehicle",
-        "framing": "vehicle occupies 70% of frame horizontally, full length visible",
+        "distance": "30-35 meters from vehicle",
+        "framing": "vehicle occupies 50% of frame horizontally, ENTIRE vehicle fully visible",
         "movement": "STATIC - no camera movement between stages",
         "best_for": ["factory", "hangar", "construction_site", "industrial_zone"],
     },
     "static_front_quarter": {
         "name": "static front three-quarter view",
-        "description": "camera positioned at 45-degree front angle, 25 meters distance, 6 meters elevation, capturing front and side",
+        "description": "camera positioned at 45-degree front angle, 35 meters distance, 10 meters elevation, capturing front and side",
         "lens": "35mm equivalent, moderate wide angle",
-        "height": "6-8 meters above ground",
+        "height": "10-12 meters above ground",
         "angle": "10-degree downward angle",
-        "distance": "25-30 meters from vehicle",
-        "framing": "vehicle occupies 65% of frame, front and side visible",
+        "distance": "35-40 meters from vehicle",
+        "framing": "vehicle occupies 45% of frame, ENTIRE vehicle front and side visible",
         "movement": "STATIC - no camera movement between stages",
         "best_for": ["factory", "hangar", "parking_lot", "building_roof"],
     },
     "drone_elevated": {
         "name": "elevated drone overview",
-        "description": "drone positioned at 30-degree angle, 40 meters distance, 20 meters elevation, bird's eye perspective",
+        "description": "drone positioned at 30-degree angle, 50 meters distance, 25 meters elevation, bird's eye perspective",
         "lens": "28mm equivalent, wide angle",
-        "height": "20-25 meters above ground",
+        "height": "25-30 meters above ground",
         "angle": "30-degree downward angle",
-        "distance": "40-50 meters from vehicle",
-        "framing": "vehicle occupies 50% of frame, surroundings visible",
+        "distance": "50-60 meters from vehicle",
+        "framing": "vehicle occupies 40% of frame, ENTIRE vehicle visible with surroundings",
         "movement": "STATIC - no camera movement between stages",
         "best_for": ["empty_field", "desert", "ocean_coast", "mountain_valley", "construction_site"],
     },
     "ground_level_pan": {
         "name": "ground level panoramic view",
-        "description": "camera at ground level, 30 meters distance, capturing vehicle against landscape backdrop",
+        "description": "camera at ground level, 40 meters distance, capturing vehicle against landscape backdrop",
         "lens": "50mm equivalent, standard",
-        "height": "2-3 meters above ground",
+        "height": "3-4 meters above ground",
         "angle": "5-degree upward angle",
-        "distance": "30-40 meters from vehicle",
-        "framing": "vehicle occupies 60% of frame, landscape background prominent",
+        "distance": "40-50 meters from vehicle",
+        "framing": "vehicle occupies 50% of frame, ENTIRE vehicle visible, landscape background prominent",
         "movement": "STATIC - no camera movement between stages",
         "best_for": ["empty_field", "desert", "mountain_valley", "snowy_plain"],
     },
@@ -1086,6 +1086,19 @@ class AssemblyStage(BaseModel):
     micro_actions: list[str] = []
     micro_actions_en: list[str] = []
     build_intensity: str = "medium"
+    
+    # ═══════════════════════════════════════════════════════════════════
+    # CAMERA CALIBRATION DATA (ABSOLUTELY CRITICAL FOR TIMELAPSE)
+    # These parameters MUST remain IDENTICAL across ALL stages
+    # ═══════════════════════════════════════════════════════════════════
+    camera_position_x: float = 0.0  # Horizontal position (meters from center)
+    camera_position_y: float = 1.5  # Height (meters from ground)
+    camera_position_z: float = 5.0  # Distance from subject (meters)
+    camera_angle_horizontal: float = 0.0  # Horizontal rotation (degrees)
+    camera_angle_vertical: float = 0.0  # Vertical tilt (degrees)
+    focal_length_mm: float = 50.0  # Focal length (mm, full-frame equivalent)
+    horizon_line_percent: float = 40.0  # Horizon position (% from bottom)
+    cloud_motion_direction: str = "right"  # ALWAYS "right" for consistent timelapse
     time_of_day: str = "midday"
     is_peak_moment: bool = False
 
@@ -1316,6 +1329,15 @@ def generate_scenario(
             build_intensity=stage_data.get("build_intensity", "medium"),
             time_of_day=stage_data.get("time_of_day", "midday"),
             is_peak_moment=stage_data.get("is_peak_moment", False),
+            # CAMERA CALIBRATION - IDENTICAL FOR ALL STAGES
+            camera_position_x=0.0,
+            camera_position_y=1.5,
+            camera_position_z=5.0,
+            camera_angle_horizontal=0.0,
+            camera_angle_vertical=0.0,
+            focal_length_mm=50.0,
+            horizon_line_percent=40.0,
+            cloud_motion_direction="right",  # ALWAYS right for consistent timelapse
         )
         stages.append(stage)
         total_duration += stage.duration

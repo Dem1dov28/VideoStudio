@@ -176,32 +176,32 @@ HOUSE_STYLES: dict[str, dict[str, Any]] = {
 CAMERA_SPECS: dict[str, dict[str, str]] = {
     "drone_elevated_front": {
         "name": "elevated frontal drone view",
-        "description": "drone positioned at 45-degree angle, 30 meters distance, 15 meters elevation, showing full house and surrounding landscape",
+        "description": "drone positioned at 45-degree angle, 50 meters distance, 20 meters elevation, showing FULL house and surrounding landscape",
         "lens": "35mm equivalent, moderate wide angle",
-        "height": "15-20 meters above ground",
-        "angle": "45-degree downward angle",
-        "distance": "30-40 meters from house",
-        "framing": "house occupies 60% of frame, landscape visible around",
+        "height": "20-25 meters above ground",
+        "angle": "30-degree downward angle",
+        "distance": "50-60 meters from house",
+        "framing": "house occupies 50% of frame, FULL structure visible, landscape visible around",
         "movement": "static position, no camera movement between stages",
     },
     "drone_slight_elevation": {
         "name": "slightly elevated drone view",
-        "description": "drone at 25-degree angle, 40 meters distance, 10 meters elevation, panoramic view showing house in landscape context",
+        "description": "drone at 25-degree angle, 60 meters distance, 15 meters elevation, panoramic view showing house in landscape context",
         "lens": "28mm equivalent, wide angle",
-        "height": "10-15 meters above ground",
-        "angle": "25-degree downward angle",
-        "distance": "40-50 meters from house",
-        "framing": "house occupies 40% of frame, extensive landscape visible",
+        "height": "15-20 meters above ground",
+        "angle": "20-degree downward angle",
+        "distance": "60-70 meters from house",
+        "framing": "house occupies 40% of frame, FULL structure visible, extensive landscape visible",
         "movement": "static position, consistent viewpoint",
     },
     "hill_overlook": {
         "name": "hilltop overlook view",
         "description": "camera positioned on higher ground looking down at house below, showing elevation difference and dramatic perspective",
         "lens": "35mm equivalent",
-        "height": "20-30 meters above house level",
-        "angle": "30-degree downward angle",
-        "distance": "50-60 meters from house",
-        "framing": "house in lower portion of frame, valley/landscape below visible",
+        "height": "25-35 meters above house level",
+        "angle": "25-degree downward angle",
+        "distance": "60-80 meters from house",
+        "framing": "house in lower portion of frame, FULL structure visible, valley/landscape below visible",
         "movement": "fixed position on hillside",
     },
     "valley_panorama": {
@@ -210,8 +210,8 @@ CAMERA_SPECS: dict[str, dict[str, str]] = {
         "lens": "24mm equivalent, wide panoramic",
         "height": "same level as house or slightly elevated",
         "angle": "10-15 degree slight downward angle",
-        "distance": "80-120 meters from house",
-        "framing": "house occupies 25% of frame, vast landscape dominates",
+        "distance": "100-150 meters from house",
+        "framing": "house occupies 30% of frame, FULL structure visible, vast landscape dominates",
         "movement": "static panoramic viewpoint",
     },
 }
@@ -913,8 +913,26 @@ class BuildingStage(BaseModel):
     micro_actions: list[str] = []
     micro_actions_en: list[str] = []
     build_intensity: str = "medium"  # low | medium | high
+    
+    # ═══════════════════════════════════════════════════════════════════
+    # CAMERA CALIBRATION DATA (ABSOLUTELY CRITICAL FOR TIMELAPSE)
+    # These parameters MUST remain IDENTICAL across ALL stages
+    # ═══════════════════════════════════════════════════════════════════
+    camera_position_x: float = 0.0  # Horizontal position (meters from center)
+    camera_position_y: float = 1.5  # Height (meters from ground)
+    camera_position_z: float = 5.0  # Distance from subject (meters)
+    camera_angle_horizontal: float = 0.0  # Horizontal rotation (degrees)
+    camera_angle_vertical: float = 0.0  # Vertical tilt (degrees)
+    focal_length_mm: float = 50.0  # Focal length (mm, full-frame equivalent)
+    horizon_line_percent: float = 40.0  # Horizon position (% from bottom)
+    cloud_motion_direction: str = "right"  # ALWAYS "right" for consistent timelapse
     time_of_day: str = "midday"     # morning | midday | afternoon | golden_hour
     is_peak_moment: bool = False     # Visually impactful WOW moment
+    
+    # ═══════════════════════════════════════════════════════════════════
+    # CONSTRUCTION PROGRESS TRACKING (for video prompts)
+    # ═══════════════════════════════════════════════════════════════════
+    num_floors: int = 2  # Number of floors in the house (1 | 2 | 3)
 
 
 class BuildingScenario(BaseModel):
@@ -927,6 +945,7 @@ class BuildingScenario(BaseModel):
     location_name: str
     stages: list[BuildingStage]
     total_duration: int = 0
+    num_floors: int = 2  # Number of floors in the house
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1355,6 +1374,7 @@ async def generate_building_scenario(
     house_style: str | None = None,
     location: str | None = None,
     num_stages: int = 5,
+    num_floors: int = 2,  # NEW: Number of floors
     language: str = "ru",
     use_variations: bool = True,
     variation_seed: int | None = None,
@@ -1369,6 +1389,7 @@ async def generate_building_scenario(
         house_style: House style key (modern, cottage, villa, cabin, farmhouse)
         location: Location key (suburbs, forest, seaside, countryside, mountains)
         num_stages: Number of stages (5-8)
+        num_floors: Number of floors in the house (1-3)
         language: Output language
         use_variations: Whether to use LLM-generated architectural variations
         variation_seed: Seed for reproducible variations (None = random)
@@ -1382,6 +1403,9 @@ async def generate_building_scenario(
 
     style = HOUSE_STYLES[style_key]
     loc = LOCATIONS[loc_key]
+    
+    # Store num_floors for later use
+    logger.info(f"[Mode8] House will have {num_floors} floor(s)")
 
     # Generate unique architectural variation
     variation = None
@@ -1442,6 +1466,17 @@ async def generate_building_scenario(
             build_intensity=stage_data.get("build_intensity", "medium"),
             time_of_day=stage_data.get("time_of_day", "midday"),
             is_peak_moment=stage_data.get("is_peak_moment", False),
+            # CAMERA CALIBRATION - IDENTICAL FOR ALL STAGES
+            camera_position_x=0.0,
+            camera_position_y=1.5,
+            camera_position_z=5.0,
+            camera_angle_horizontal=0.0,
+            camera_angle_vertical=0.0,
+            focal_length_mm=50.0,
+            horizon_line_percent=40.0,
+            cloud_motion_direction="right",  # ALWAYS right for consistent timelapse
+            # CONSTRUCTION PROGRESS TRACKING
+            num_floors=num_floors,  # Use passed parameter
         )
         stages.append(stage)
         total_duration += stage.duration
@@ -1472,6 +1507,7 @@ async def generate_building_scenario(
         location_name=loc["name"],
         stages=stages,
         total_duration=total_duration,
+        num_floors=num_floors,  # Use passed parameter
     )
 
     logger.success(
@@ -1486,6 +1522,7 @@ async def run_mode8_scenario_writer(
     house_style: str | None = None,
     location: str | None = None,
     num_stages: int = 5,
+    num_floors: int = 2,  # NEW: Number of floors
     language: str = "ru",
     control: dict | None = None,
     use_variations: bool = True,
@@ -1500,6 +1537,7 @@ async def run_mode8_scenario_writer(
         house_style: House style preference
         location: Location preference
         num_stages: Number of building stages (5-8)
+        num_floors: Number of floors in the house (1-3)
         language: Output language
         control: Pipeline control dict
         use_variations: Whether to use LLM-generated architectural variations
@@ -1516,6 +1554,7 @@ async def run_mode8_scenario_writer(
         house_style=house_style,
         location=location,
         num_stages=num_stages,
+        num_floors=num_floors,  # NEW: pass floors
         language=language,
         use_variations=use_variations,
         variation_seed=variation_seed,

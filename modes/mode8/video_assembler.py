@@ -294,6 +294,11 @@ def assemble_mode8_video(
     # APPEND CLICKBAIT PREVIEW (OPTIONAL)
     # ═══════════════════════════════════════════════════════════════════════
     
+    # Explicitly check preview_image_path
+    logger.info(f"[Mode8 Assembler] Preview path check: {preview_image_path}")
+    if preview_image_path:
+        logger.info(f"[Mode8 Assembler] Preview file exists: {Path(preview_image_path).exists()}")
+    
     if preview_image_path and Path(preview_image_path).exists():
         try:
             logger.info(f"[Mode8 Assembler] Appending clickbait preview ({preview_duration}s)...")

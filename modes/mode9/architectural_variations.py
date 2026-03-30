@@ -326,7 +326,7 @@ Create specific, vivid environmental details:
 2. BACKGROUND ELEMENTS:
    - List specific elements visible behind the assembly area
    - Include industrial and natural features
-   - Consider scale and perspective
+   - Consider scale and relative positioning (camera perspective is FIXED - do not change)
 
 3. LIGHTING CONDITIONS:
    - How does this location affect lighting?
@@ -418,6 +418,8 @@ async def generate_vehicle_variation(
     Returns:
         CompleteVehicleVariation or None on error
     """
+    import asyncio
+    
     if variation_seed is None:
         variation_seed = random.randint(1, 1000000)
     
@@ -429,7 +431,7 @@ async def generate_vehicle_variation(
         vehicle_info = BASE_VEHICLE_TYPES.get(base_vehicle, BASE_VEHICLE_TYPES["car_modern"])
         location_info = BASE_LOCATIONS.get(base_location, BASE_LOCATIONS["factory"])
         
-        # Step 1: Generate vehicle visual details
+        # Step 1: Generate vehicle visual details with timeout
         logger.info(f"[Mode9 Variations] Generating visuals for {base_vehicle}...")
         
         vehicle_prompt = VEHICLE_VARIATION_PROMPT.format(
@@ -437,10 +439,14 @@ async def generate_vehicle_variation(
             base_location=base_location,
         )
         
-        vehicle_response = await llm.ainvoke(vehicle_prompt)
-        vehicle_visuals = _parse_vehicle_visuals(vehicle_response.content, base_vehicle)
+        try:
+            vehicle_response = await asyncio.wait_for(llm.ainvoke(vehicle_prompt), timeout=30.0)
+            vehicle_visuals = _parse_vehicle_visuals(vehicle_response.content, base_vehicle)
+        except asyncio.TimeoutError:
+            logger.warning(f"[Mode9 Variations] Vehicle generation timeout (30s), using fallback")
+            return None
         
-        # Step 2: Generate location details
+        # Step 2: Generate location details with timeout
         logger.info(f"[Mode9 Variations] Generating location details for {base_location}...")
         
         loc_prompt = LOCATION_ENVIRONMENT_PROMPT.format(
@@ -448,10 +454,14 @@ async def generate_vehicle_variation(
             vehicle_description=vehicle_visuals.visual_description,
         )
         
-        loc_response = await llm.ainvoke(loc_prompt)
-        location = _parse_location_details(loc_response.content, base_location)
+        try:
+            loc_response = await asyncio.wait_for(llm.ainvoke(loc_prompt), timeout=30.0)
+            location = _parse_location_details(loc_response.content, base_location)
+        except asyncio.TimeoutError:
+            logger.warning(f"[Mode9 Variations] Location generation timeout (30s), using fallback")
+            return None
         
-        # Step 3: Generate stage visuals
+        # Step 3: Generate stage visuals with timeout
         logger.info(f"[Mode9 Variations] Generating assembly stage visuals...")
         
         stage_keys = ["empty_space", "frame_chassis", "engine", "body_panels", "wheels", "interior", "paint_finish"]
@@ -464,8 +474,12 @@ async def generate_vehicle_variation(
             stage_list=stage_list,
         )
         
-        stage_response = await llm.ainvoke(stage_prompt)
-        stage_visuals = _parse_stage_visuals(stage_response.content, stage_keys)
+        try:
+            stage_response = await asyncio.wait_for(llm.ainvoke(stage_prompt), timeout=30.0)
+            stage_visuals = _parse_stage_visuals(stage_response.content, stage_keys)
+        except asyncio.TimeoutError:
+            logger.warning(f"[Mode9 Variations] Stage visuals timeout (30s), using fallback")
+            return None
         
         variation = CompleteVehicleVariation(
             base_vehicle=base_vehicle,

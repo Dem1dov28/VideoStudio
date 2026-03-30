@@ -93,6 +93,7 @@ async def _run_pipeline_task(
                 mode8_house_style=getattr(req, "mode8_house_style", None),
                 mode8_location=getattr(req, "mode8_location", None),
                 mode8_num_stages=getattr(req, "mode8_num_stages", 5),
+                mode8_num_floors=getattr(req, "mode8_num_floors", 2),
                 mode9_vehicle_type=getattr(req, "mode9_vehicle_type", None),
                 mode9_location=getattr(req, "mode9_location", None),
                 mode9_num_stages=getattr(req, "mode9_num_stages", 5),
@@ -229,6 +230,7 @@ class StartRequest(BaseModel):
     mode8_house_style: str | None = None  # "modern", "contemporary", "minimalist", "scandinavian", "cottage", "villa", "farmhouse", "colonial", "victorian", "mediterranean", "cabin", "log_house", "chalet", "adobe", "mansion", "estate"
     mode8_location: str | None = None  # "suburbs", "urban_edge", "planned_community", "forest", "wooded_area", "seaside", "lakefront", "riverside", "countryside", "farmland", "vineyard", "mountains", "hillside", "valley", "desert", "oasis", "tropical", "island"
     mode8_num_stages: int = 5
+    mode8_num_floors: int = 2  # Number of floors in the house
     # Mode 9: Vehicle Assembly Timelapse
     mode9_vehicle_type: str | None = None  # "airplane_passenger", "airplane_private", "car_modern", "car_sport", "truck_cargo", "tractor", "excavator", "ship_cargo", "yacht", "helicopter", "drone", and 21 more...
     mode9_location: str | None = None  # "construction_site", "factory", "shipyard", "hangar", "empty_field", "forest_clearing", "desert", "mountain_valley", "city_outskirts", "port", and 9 more...

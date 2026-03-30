@@ -17,49 +17,79 @@ function detectStep(logs) {
   const joined = logs.map(l => l.text).join('\n');
 
   // Done
-  if (joined.includes('LOCAL ONLY mode') || joined.includes('Pipeline DONE') || joined.includes('Mode 3 Pipeline DONE') || joined.includes('Mode 5 Pipeline DONE')) return STEPS.length - 1;
-  // Video assembly (Mode 2 + Mode 3)
+  if (
+    joined.includes('LOCAL ONLY mode') || 
+    joined.includes('Pipeline DONE') || 
+    joined.includes('Mode 3 Pipeline DONE') || 
+    joined.includes('Mode 5 Pipeline DONE') ||
+    joined.includes('Mode 8 Pipeline DONE') ||
+    joined.includes('Mode 9 Pipeline DONE')
+  ) return STEPS.length - 1;
+  
+  // Video assembly (Mode 2 + Mode 3 + Mode 8 + Mode 9)
   if (
     joined.includes('Video Editor Agent') ||
     joined.includes('Assembling') ||
     joined.includes('Mode3 Assembler') ||
     joined.includes('Rendering →') ||
-    joined.includes('assemble_video')
+    joined.includes('assemble_video') ||
+    joined.includes('Mode8 Assembler') ||
+    joined.includes('Mode9 Assembler') ||
+    joined.includes(' assembling ') ||
+    joined.includes('Final video duration')
   ) return 5;
+  
   // TTS / voiceover
   if (
     joined.includes('Synthesizing') ||
     joined.includes('[TTS]') ||
     joined.includes('voiceover')
   ) return 4;
-  // Images
+  
+  // Images (Mode 8 & 9 use FastGen for video generation with images)
   if (
     joined.includes('Image Generator Agent') ||
     joined.includes('ImageAgent') ||
     joined.includes('fast-gen') ||
     joined.includes('DALL-E') ||
-    joined.includes('HuggingFace')
+    joined.includes('HuggingFace') ||
+    joined.includes('[Mode8]') ||
+    joined.includes('[Mode9]') ||
+    joined.includes('Generating reference images') ||
+    joined.includes('Generating video clips') ||
+    joined.includes('Stage ') && joined.includes('image')
   ) return 3;
+  
   // Fact check
   if (
     joined.includes('Fact Checker Agent') ||
     joined.includes('Fact check done') ||
     joined.includes('[FactChecker]')
   ) return 2;
-  // Scenario
+  
+  // Scenario (Mode 8 & 9)
   if (
     joined.includes('ScenarioWriter') ||
     joined.includes('Scenario Writer Agent') ||
     joined.includes('Scenario ready') ||
-    joined.includes('Mode5 Scenario Writer')
+    joined.includes('Mode5 Scenario Writer') ||
+    joined.includes('[Mode8] Scenario:') ||
+    joined.includes('[Mode9] Scenario:') ||
+    joined.includes('Building Stages:') ||
+    joined.includes('Assembly Stages:') ||
+    joined.includes('Generating Building Scenario') ||
+    joined.includes('Generating Assembly Scenario')
   ) return 1;
+  
   // Mode 3: prompt agent
   if (joined.includes('Mode3 Prompt') || joined.includes('Mode 3 Pipeline')) return 1;
+  
   // Fact miner
   if (
     joined.includes('Fact Miner Agent') ||
     joined.includes('[FactMiner]')
   ) return 0;
+  
   return 0;
 }
 

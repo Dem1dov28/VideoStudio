@@ -32,6 +32,7 @@ async def run_mode8_pipeline(
     house_style: str | None = None,
     location: str | None = None,
     num_stages: int = 5,
+    num_floors: int = 2,  # NEW: Number of floors
     language: str = "ru",
     control: dict | None = None,
 ) -> dict[str, Any]:
@@ -44,6 +45,7 @@ async def run_mode8_pipeline(
         house_style: House style preference (modern, cottage, villa, cabin, farmhouse, random).
         location: Location preference (suburbs, forest, seaside, countryside, mountains, random).
         num_stages: Number of building stages (5-8).
+        num_floors: Number of floors in the house (1-3).
         language: Output language ("ru" or "en").
         control: Pause/cancel control dict.
 
@@ -61,7 +63,7 @@ async def run_mode8_pipeline(
     logger.info(
         f"=== Mode 8 Pipeline | House Building Timelapse | "
         f"session={session_id} | style={house_style or 'random'} | "
-        f"location={location or 'random'} | stages={num_stages} ==="
+        f"location={location or 'random'} | stages={num_stages} | floors={num_floors} ==="
     )
 
     # Step 1: Generate scenario (building stages)
@@ -72,6 +74,7 @@ async def run_mode8_pipeline(
         house_style=house_style,
         location=location,
         num_stages=num_stages,
+        num_floors=num_floors,  # NEW: pass floors
         language=language,
         control=control,
     )
@@ -115,6 +118,19 @@ async def run_mode8_pipeline(
     # Get preview path from enriched scenario if available
     preview_path = enriched_scenario.get("preview_path")
     
+    # Log preview path for debugging
+    if preview_path:
+        logger.success(f"[Mode8] Preview path found: {preview_path}")
+        preview_path_obj = Path(preview_path)
+        if preview_path_obj.exists():
+            logger.info(f"[Mode8] Preview file exists: {preview_path}")
+            logger.info(f"[Mode8] Preview will be appended to final video (0.3s)")
+        else:
+            logger.error(f"[Mode8] Preview file does NOT exist: {preview_path}")
+            preview_path = None  # Reset to None so assembler won't try to add it
+    else:
+        logger.warning("[Mode8] No preview path in enriched scenario - preview will NOT be added to final video")
+    
     loop = asyncio.get_event_loop()
     assembled_path, video_duration = await loop.run_in_executor(
         None,
@@ -145,38 +161,34 @@ async def run_mode8_pipeline(
     )
     logger.success(f"[Mode8] Clickbait title: {clickbait_title_ru}")
     
-    # Generate full publishing metadata with clickbait title
-    publishing_ru = await generate_publishing_metadata(
+    # Generate full publishing metadata with forced clickbait title
+    publishing_ru_raw = await generate_publishing_metadata(
         house_style=house_style_name,
         location=location_name,
         stages=stages,
-        title=clickbait_title_ru,  # Use clickbait title
+        title=title,  # Pass original title to LLM for context
         language="ru",
+        force_title=clickbait_title_ru,  # Force clickbait title
     )
-    publishing_en = await generate_publishing_metadata(
+    publishing_en_raw = await generate_publishing_metadata(
         house_style=house_style_name,
         location=location_name,
         stages=stages,
-        title=clickbait_title_ru,  # Same title for EN version
+        title=title,  # Pass original title to LLM for context
         language="en",
+        force_title=clickbait_title_ru,  # Force same clickbait title for EN
     )
     
-    # Combine both versions with clickbait title
+    # Create final publishing (titles already forced in generate_publishing_metadata)
     publishing = {
-        "ru": {
-            "title": clickbait_title_ru,
-            **publishing_ru,  # Merge rest of RU metadata
-        },
-        "en": {
-            "title": clickbait_title_ru,  # Use same Russian clickbait title for EN
-            **publishing_en,  # Merge rest of EN metadata
-        },
+        "ru": publishing_ru_raw,
+        "en": publishing_en_raw,
     }
 
     # Record in history
     from agents.topics_history import mark_topic_used
     mark_topic_used(
-        topic=f"[Timelapse] {clickbait_title_ru}",
+        topic=f"[Timelapse] {title}",  # Keep original topic format
         session_id=session_id,
         video_path=str(assembled_path),
         video_angle=f"style={house_style_name},location={location_name},stages={len(stages)},duration={video_duration:.2f}s",

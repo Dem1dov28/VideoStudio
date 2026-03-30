@@ -615,6 +615,8 @@ async def generate_architectural_variation(
     Returns:
         CompleteArchitecturalVariation или None при ошибке
     """
+    import asyncio
+    
     if variation_seed is None:
         variation_seed = random.randint(1, 1000000)
     
@@ -628,7 +630,7 @@ async def generate_architectural_variation(
         style_info = BASE_STYLES.get(base_style, BASE_STYLES["modern"])
         location_info = BASE_LOCATIONS.get(base_location, BASE_LOCATIONS["suburbs"])
         
-        # Шаг 1: Генерируем архитектурные детали
+        # Шаг 1: Генерируем архитектурные детали с timeout
         logger.info(f"[Mode8 Variations] Generating architecture for {base_style}...")
         
         arch_prompt = ARCHITECTURE_GENERATION_PROMPT.format(
@@ -636,13 +638,17 @@ async def generate_architectural_variation(
             base_location=base_location,
         )
         
-        arch_response = await llm.ainvoke(arch_prompt)
-        arch_content = arch_response.content
+        try:
+            arch_response = await asyncio.wait_for(llm.ainvoke(arch_prompt), timeout=30.0)
+            arch_content = arch_response.content
+        except asyncio.TimeoutError:
+            logger.warning(f"[Mode8 Variations] Architecture generation timeout (30s), using fallback")
+            return None
         
         # Парсим архитектурные детали (упрощённо — извлекаем из текста)
         architecture = _parse_architectural_details(arch_content, base_style)
         
-        # Шаг 2: Генерируем детали локации
+        # Шаг 2: Генерируем детали локации с timeout
         logger.info(f"[Mode8 Variations] Generating location details for {base_location}...")
         
         loc_prompt = LOCATION_GENERATION_PROMPT.format(
@@ -650,12 +656,16 @@ async def generate_architectural_variation(
             architecture_description=architecture.style_description,
         )
         
-        loc_response = await llm.ainvoke(loc_prompt)
-        loc_content = loc_response.content
+        try:
+            loc_response = await asyncio.wait_for(llm.ainvoke(loc_prompt), timeout=30.0)
+            loc_content = loc_response.content
+        except asyncio.TimeoutError:
+            logger.warning(f"[Mode8 Variations] Location generation timeout (30s), using fallback")
+            return None
         
         location = _parse_location_details(loc_content, base_location)
         
-        # Шаг 3: Генерируем визуальные описания для стадий
+        # Шаг 3: Генерируем визуальные описания для стадий с timeout
         logger.info(f"[Mode8 Variations] Generating stage visuals...")
         
         stage_list = "\n".join([f"- {stage}" for stage in STAGE_KEYS])
@@ -666,8 +676,12 @@ async def generate_architectural_variation(
             stage_list=stage_list,
         )
         
-        stage_response = await llm.ainvoke(stage_prompt)
-        stage_content = stage_response.content
+        try:
+            stage_response = await asyncio.wait_for(llm.ainvoke(stage_prompt), timeout=30.0)
+            stage_content = stage_response.content
+        except asyncio.TimeoutError:
+            logger.warning(f"[Mode8 Variations] Stage visuals timeout (30s), using fallback")
+            return None
         
         stage_visuals = _parse_stage_visuals(stage_content)
         

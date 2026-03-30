@@ -211,6 +211,7 @@ def _build_image_prompt(
     """
     house_style = scenario.get("house_style", "modern")
     location = scenario.get("location", "suburbs")
+    num_floors = scenario.get("num_floors", 2)  # NEW: Get floors from scenario
     stage_key = scene.get("stage_key", "empty_land")
 
     style_visual = HOUSE_STYLE_VISUALS.get(house_style, HOUSE_STYLE_VISUALS["modern"])
@@ -232,13 +233,31 @@ def _build_image_prompt(
 
 {title_line}
 
+━━━ CRITICAL: STATIC CAMERA - NO MOVEMENT! ━━━
+⚠️ THIS IS A STATIC IMAGE — CAMERA IS COMPLETELY LOCKED!
+- Camera is completely motionless — tripod-mounted, locked-off position
+- Camera angle CANNOT change — think: camera is bolted to concrete
+- If camera moves even 1 degree, the entire timelapse will be ruined
+- This is THE MOST IMPORTANT rule for construction timelapse
+- Absolutely static camera, like the attached reference photo in FastGen
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 ━━━ CRITICAL: BACKGROUND STAYS THE SAME! ━━━
 The BACKGROUND (sky, trees, neighboring houses, street, landscape) MUST REMAIN EXACTLY THE SAME across all stages!
 - Same sky, same clouds position
 - Same trees, same grass, same ground
 - Same neighboring buildings, same street
 - ONLY THE HOUSE CHANGES — background is FROZEN!
-- This is essential for smooth timelapse video.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+━━━ CAMERA CALIBRATION DATA (ABSOLUTE PRECISION REQUIRED) ━━━
+CAMERA PARAMETERS - MUST BE IDENTICAL FOR EVERY SINGLE IMAGE:
+- Position: X=0.0m (center), Y=8.0m (height - elevated for full house view)
+- Angle: Horizontal=0°, Vertical=-10° (slight downward angle from height)
+- Focal Length: 35mm full-frame equivalent (wide enough for entire house)
+- Horizon Line: 60% from bottom edge (elevated viewpoint)
+- Cloud Motion: ALWAYS moving RIGHT (never static, never left)
+- These parameters are LOCKED - ZERO tolerance for variation
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ━━━ CONTENT SAFETY (MANDATORY) ━━━
@@ -255,15 +274,20 @@ STYLE: Photorealistic, shot on smartphone camera, natural lighting, authentic co
 
 {title_line}
 
+**HOUSE SPECIFICATIONS:**
+• Number of floors: {num_floors} floor{'s' if num_floors > 1 else ''}
+• House design: MUST remain consistent across all stages
+
 ━━━ SCENE SPECIFICATIONS ━━━
 {visual_prompt}
 
 COMPOSITION:
-- Wide shot showing the entire building site
+- ⚠️ CRITICAL: Use EXACT camera calibration parameters from above - NO variations allowed
+- Wide shot showing the ENTIRE house and building site (house occupies 40-50% of frame)
 - Vertical 9:16 aspect ratio (TikTok/Reels/Shorts format)
-- Camera positioned at consistent angle (same perspective as other stages)
-- Natural daylight, sun at ~45 degrees
-- Realistic shadows and lighting
+- ⚠️ Camera angle is LOCKED - same perspective for ALL stages (see calibration data)
+- Natural daylight, sun position consistent (sun at ~45° elevation from horizon)
+- Realistic shadows and lighting (shadows must match across all stages)
 - Construction materials visible: concrete, bricks, wood, tools, equipment
 - Real textures: rough concrete, brick patterns, dirt, grass
 - WORKERS visible if appropriate for this stage
@@ -283,13 +307,31 @@ CRITICAL REQUIREMENTS:
 
 {title_line}
 
+━━━ CRITICAL: STATIC CAMERA - NO MOVEMENT! ━━━
+⚠️ THIS IS A STATIC IMAGE — CAMERA IS COMPLETELY LOCKED!
+- Camera is completely motionless — tripod-mounted, locked-off position
+- Camera angle CANNOT change — think: camera is bolted to concrete
+- If camera moves even 1 degree, the entire timelapse will be ruined
+- This is THE MOST IMPORTANT rule for construction timelapse
+- Absolutely static camera, like the attached reference photo in FastGen
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 ━━━ CRITICAL: BACKGROUND STAYS THE SAME! ━━━
 The BACKGROUND (sky, trees, neighboring houses, street, landscape) MUST REMAIN EXACTLY THE SAME across all stages!
 - Same sky, same clouds position
 - Same trees, same grass, same ground
 - Same neighboring buildings, same street
 - ONLY THE HOUSE CHANGES — background is FROZEN!
-- This is essential for smooth timelapse video.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+━━━ CAMERA CALIBRATION DATA (ABSOLUTE PRECISION REQUIRED) ━━━
+CAMERA PARAMETERS - MUST BE IDENTICAL FOR EVERY SINGLE IMAGE:
+- Position: X=0.0m (center), Y=8.0m (height - elevated for full house view)
+- Angle: Horizontal=0°, Vertical=-10° (slight downward angle from height)
+- Focal Length: 35mm full-frame equivalent (wide enough for entire house)
+- Horizon Line: 60% from bottom edge (elevated viewpoint)
+- Cloud Motion: ALWAYS moving RIGHT (never static, never left)
+- These parameters are LOCKED - ZERO tolerance for variation
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ━━━ CONTENT SAFETY (MANDATORY) ━━━
@@ -307,6 +349,10 @@ STYLE: Photorealistic, shot on smartphone camera, natural lighting, authentic co
 
 {title_line}
 
+**HOUSE SPECIFICATIONS:**
+• Number of floors: {num_floors} floor{'s' if num_floors > 1 else ''}
+• House design: MUST remain consistent across all stages
+
 HOUSE STYLE: {style_visual['visual']}
 Features: {style_visual['features']}
 
@@ -317,11 +363,12 @@ SCENE DESCRIPTION:
 {visual_prompt}
 
 COMPOSITION:
-- Wide shot showing the entire building site
+- ⚠️ CRITICAL: Use EXACT camera calibration parameters from above - NO variations allowed
+- Wide shot showing the ENTIRE house and building site (house occupies 40-50% of frame)
 - Vertical 9:16 aspect ratio (TikTok/Reels/Shorts format)
-- Camera positioned at consistent angle (same perspective as other stages)
-- Natural daylight, sun at ~45 degrees
-- Realistic shadows and lighting
+- ⚠️ Camera angle is LOCKED - same perspective for ALL stages (see calibration data)
+- Natural daylight, sun position consistent (sun at ~45° elevation from horizon)
+- Realistic shadows and lighting (shadows must match across all stages)
 - Construction materials visible: concrete, bricks, wood, tools, equipment
 - Real textures: rough concrete, brick patterns, dirt, grass
 - WORKERS visible if appropriate for this stage
@@ -354,6 +401,7 @@ def _build_video_prompt(
     """
     house_style = scenario.get("house_style", "modern")
     location = scenario.get("location", "suburbs")
+    num_floors = scenario.get("num_floors", 2)  # NEW: Get floors from scenario
 
     style_visual = HOUSE_STYLE_VISUALS.get(house_style, HOUSE_STYLE_VISUALS["modern"])
     loc_visual = LOCATION_VISUALS.get(location, LOCATION_VISUALS["suburbs"])
@@ -473,13 +521,42 @@ SPECIFIC MICRO-ACTIONS VISIBLE:
 {actions_text}
 - These actions happen in sequence, showing real work being done"""
 
-    prompt = f"""A highly satisfying construction timelapse showing WORK IN PROGRESS between two stages.
+    prompt = f"""⚠️ CRITICAL: HOUSE STRUCTURE MUST REMAIN COMPLETELY UNCHANGED THROUGHOUT THIS VIDEO!
+⚠️ The house itself does NOT grow, change, or add new fragments during this video.
+⚠️ ONLY workers and machinery move around the FIXED house structure.
+⚠️ Think: house is a STATIC PHOTO - workers are DYNAMIC overlay.
+
+A highly satisfying construction timelapse showing WORK IN PROGRESS between two stages.
 
 {transformation_title}
 
 HOUSE STYLE: {style_visual['visual']}
 LOCATION: {loc_visual['visual']}
+NUM FLOORS: {num_floors} floor{'s' if num_floors > 1 else ''} house under construction
+
+**BUILDING STABILITY RULE (MOST IMPORTANT):**
+• House structure: 100% IDENTICAL from start to end of video
+• No new walls, roofs, or fragments appear - house is already built
+• ONLY workers/machinery moving AROUND the fixed house
+• Camera captures workers working, NOT house changing
 {peak_section}
+
+━━━ CONSTRUCTION PROGRESS CONTEXT ━━━
+This video shows the transition from "{start_state}" to "{end_state}".
+MAIN ACTIVITY: {action}
+
+WORK ALREADY COMPLETED (visible in START frame):
+- Foundation: {'DONE - visible at ground level' if scene.get('has_foundation') else 'NOT YET BUILT'}
+- Walls: {'DONE - walls erected' if scene.get('has_walls') else 'NOT YET BUILT'}
+- Roof: {'DONE - roof installed' if scene.get('has_roof') else 'NOT YET BUILT'}
+- Windows/Doors: {'DONE - installed' if scene.get('has_windows') else 'NOT YET INSTALLED'}
+- Facade Finish: {'DONE - completed' if scene.get('has_facade') else 'NOT YET FINISHED'}
+
+WORK TO BE DONE IN THIS VIDEO (will appear in END frame):
+- Focus on completing: {action}
+- This stage adds: {stage_name_en} progress
+- After this video: structure moves closer to completion
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ━━━ CRITICAL: SHOW THE WORK, NOT JUST THE RESULT ━━━
 {workers_section}
 {machinery_section}
@@ -533,7 +610,15 @@ MAIN ACTIVITY: {action}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {lighting_section}
 
-FRAMING: Vertical 9:16. Wide shot of construction site.
+FRAMING: Vertical 9:16. ⚠️ Wide shot composition is FIXED - same framing for ALL stages.
+
+━━━ CAMERA CALIBRATION (LOCKED) ━━━
+⚠️ CRITICAL: Camera parameters MUST match image calibration exactly:
+- Position: X=0.0m, Y=1.5m, Z=5.0m
+- Angle: 0° horizontal, 0° vertical
+- Focal Length: 50mm full-frame
+- Horizon Line: 40% from bottom
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 AUDIO: Construction site ambience — machinery sounds, tools, footsteps, activity. NO MUSIC. NO VOICE.
 
@@ -570,9 +655,12 @@ def _build_keyframe_video_prompt(
     - Camera: static/locked-off (CRITICAL for timelapse consistency)
     - Temporal: time_lapse (compressed time)
     - Environment: outdoor construction site
+    
+    CRITICAL: ALL keyframe videos use STATIC CAMERA - NO movement except final drone showcase.
     """
     house_style = scenario.get("house_style", "modern")
     location = scenario.get("location", "suburbs")
+    num_floors = scenario.get("num_floors", 2)  # NEW: Get floors from scenario
 
     style_visual = HOUSE_STYLE_VISUALS.get(house_style, HOUSE_STYLE_VISUALS["modern"])
     loc_visual = LOCATION_VISUALS.get(location, LOCATION_VISUALS["suburbs"])
@@ -591,14 +679,34 @@ def _build_keyframe_video_prompt(
     machinery_short = (machinery[:80] + "...") if machinery and len(machinery) > 80 else (machinery or "equipment operating")
     
     # PROFESSIONAL VIDEO PROMPT (based on video skills)
+    # CRITICAL: House stays IDENTICAL - only workers move
     # Formula: Shot + Action + Camera + Temporal + Technical
     # Optimized for FastGen (~700 chars)
-    prompt = f"""Wide shot (WS), construction timelapse: {stage_name_en}.
+    prompt = f"""⚠️ CRITICAL: HOUSE STRUCTURE MUST REMAIN COMPLETELY UNCHANGED!
+⚠️ The house does NOT grow/change/add fragments - it's already complete.
+⚠️ ONLY workers/machinery move around the FIXED structure.
+
+⚠️ FIXED CAMERA: Wide shot composition is LOCKED - same framing for ALL stages.
+Construction timelapse: {stage_name_en}.
 {style_visual['visual']}, {loc_visual['visual']}.
+NUM FLOORS: {num_floors} floor{'s' if num_floors > 1 else ''} house under construction
+
+**BUILDING STABILITY RULE:**
+• House: 100% IDENTICAL start to end
+• No construction on house - already built
+• ONLY workers moving AROUND fixed house
 
 SUBJECT: {action}. Workers: {workers_short}. Equipment: {machinery_short}.
 
-CAMERA: Locked-off tripod, static frame. CRITICAL: camera must not move.
+━━━ CAMERA CALIBRATION (LOCKED PARAMETERS) ━━━
+- Position: X=0.0m, Y=8.0m (height - elevated), Z=25.0m (distance - far) — NEVER changes
+- Angle: 0° horizontal, -10° vertical (slight downward angle) — ALWAYS identical
+- Focal Length: 35mm full-frame — NO zooming allowed
+- Horizon Line: 60% from bottom — MUST stay fixed
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CAMERA: Locked-off tripod, static frame. CRITICAL: camera must not move - SAME position across ALL stages.
+CLOUDS: ALWAYS moving RIGHT — never static, never left, always visible motion
 TEMPORAL: Time-lapse, forward motion ONLY, step-by-step progress.
 
 TRANSITION: "{start_state}" → "{end_state}".
@@ -608,7 +716,9 @@ BACKGROUND: Sky, trees, street stay SAME. Only house evolves.
 
 SAFETY: Generic content ONLY. NO brands, logos, copyrighted material. Generic equipment.
 
-TECHNICAL: Vertical 9:16, 1080x1920, cinematic, photorealistic."""
+TECHNICAL: Vertical 9:16, 1080x1920, cinematic, photorealistic.
+
+STYLE: Photorealistic, shot on smartphone camera, natural lighting. NOT 3D render, NOT CGI."""
 
     return prompt
 
@@ -620,74 +730,123 @@ def _build_drone_showcase_image_prompt(
     """
     Build a prompt for generating DRONE SHOWCASE IMAGE (end frame for drone video).
     
-    PURPOSE: Create a beautiful aerial view showing house + full property context.
+    PURPOSE: Create a smooth aerial pullback showing the house from a slightly elevated angle.
     
     KEY REQUIREMENTS:
-    - SAME house (identical design, materials, colors)
-    - DIFFERENT camera angle (higher elevation, wider view)
-    - Show FULL property: garden, driveway, landscaping, surroundings
-    - Cinematic real estate photography quality
+    - SAME house (identical design, materials, colors) — EXACT COPY from reference
+    - FARTHER AWAY — drone shows the house from a bit more distance (but still close)
+    - MODERATE elevation — just enough to see the house better, not bird's eye
+    - House fills most of the frame — NOT a tiny building in vast landscape
     """
     house_style = scenario.get("house_style", "modern")
     location = scenario.get("location", "suburbs")
+    num_floors = scenario.get("num_floors", 2)  # NEW: Get floors from scenario
 
     style_visual = HOUSE_STYLE_VISUALS.get(house_style, HOUSE_STYLE_VISUALS["modern"])
     loc_visual = LOCATION_VISUALS.get(location, LOCATION_VISUALS["suburbs"])
 
-    # Drone showcase image prompt - aerial view with full property context
-    prompt = f"""━━━ ★★★ DRONE SHOWCASE IMAGE ★★★ ━━━
-PURPOSE: Create the FINAL FRAME for a cinematic drone showcase video.
-This image will be the END POINT of a smooth camera movement from construction view to aerial showcase.
+    # Drone showcase image prompt — FARTHER AWAY aerial view with signs of life
+    prompt = f"""━━━ ★★★ DRONE SHOWCASE IMAGE — LIVED-IN HOUSE FROM FARTHER AWAY ★★★ ━━━
+PURPOSE: Create the FINAL FRAME for a smooth drone pullback video showing a house that people ALREADY LIVE IN, viewed from SLIGHTLY FARTHER AWAY than construction shots.
+This image will be the END POINT of a gentle camera movement from ground-level construction view to a slightly elevated and MORE DISTANT perspective with visible signs of habitation.
 
-━━━ CRITICAL: HOUSE MUST REMAIN IDENTICAL ━━━
+━━━ CRITICAL: HOUSE MUST BE IDENTICAL TO REFERENCE + SIGNS OF LIFE ━━━
 The house must be EXACTLY the same as in the reference image:
-- SAME design, architecture, materials, colors
-- SAME roof shape, window placement, proportions
-- SAME exterior finish and textures
-- DO NOT change the house itself — ONLY change the camera viewpoint
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- SAME design, architecture, materials, colors — NO CHANGES ALLOWED
+- SAME roof shape, window placement, proportions — EXACT COPY
+- SAME exterior finish, textures, facade details
+- SAME surrounding landscape, trees, driveway — EVERYTHING IDENTICAL
+- THE HOUSE ITSELF DOES NOT CHANGE — ONLY THE CAMERA POSITION IS FARTHER AWAY
 
-SUBJECT: {style_visual['visual']}
+BUT NOW ADD SIGNS THAT PEOPLE ARE LIVING HERE:
+- Parked car/vehicle in driveway (modern family car, generic brand)
+- Warm interior lights ON in windows (visible glow from inside rooms)
+- Outdoor furniture on porch/patio (chairs, small table, decorative cushions)
+- Potted plants near entrance (decorative flower pots by front door)
+- Garden decorations (solar pathway lights along walkway)
+- Mailbox at end of driveway (residential mailbox on post)
+- Welcome mat at front door
+- Possibly outdoor lantern or string lights on porch
+
+DO NOT change ANYTHING about the house structure itself — ONLY add these living decorations and move camera farther away.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+**HOUSE SPECIFICATIONS:**
+• Number of floors: {num_floors} floor{'s' if num_floors > 1 else ''}
+• House design: MUST remain consistent with construction stages
+
+SUBJECT: {style_visual['visual']} — now fully lived-in and decorated, viewed from FARTHER AWAY
 LOCATION CONTEXT: {loc_visual['visual']}
 
-━━━ CAMERA ANGLE: ELEVATED DRONE VIEW ━━━
-- HIGH ELEVATION: 30-50 meters above ground (bird's eye perspective)
-- WIDE FIELD OF VIEW: Show entire property + surroundings
-- ANGLED DOWNWARD: Camera tilted down ~30-45 degrees
-- CINEMATIC COMPOSITION: Rule of thirds, balanced framing
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━ CAMERA ANGLE: FARTHER ELEVATED DRONE VIEW ━━━
+- MODERATE ELEVATION: 10-20 meters above ground (slightly higher than construction shots)
+- FARTHER DISTANCE: 25-40 meters from the house (drone moves BACK to show more context)
+- HOUSE STILL DOMINATES: House fills 50-65% of the image (still the hero, but with more surroundings)
+- SLIGHT DOWNWARD ANGLE: Camera tilted down ~20-30 degrees
+- MORE CONTEXT VISIBLE: Show driveway, front yard, nearby trees, immediate neighborhood hints
+- DO NOT show: distant landscape, full property boundaries, far-away elements
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-━━━ WHAT TO SHOW (HOUSE + ENVIRONMENT) ━━━
-PRIMARY FOCUS: The completed house (same as reference)
-ENVIRONMENT TO INCLUDE:
-- Full property boundaries and lot shape
-- Driveway and walkways leading to house
-- Garden, lawn, landscaping around house
-- Trees, shrubs, vegetation on the property
-- Street or road access
-- Neighboring properties in background (if suburbs)
-- Natural landscape context (fields, hills, water if applicable)
+━━━ WHAT TO SHOW (HOUSE AS THE HERO WITH LIFE) ━━━
+PRIMARY FOCUS: The completed house — LARGE and DETAILED in frame, FULLY LIVED-IN
 
-The goal is to show the house IN ITS FULL CONTEXT, not isolated.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+VISIBLE SIGNS OF HABITATION (CRITICAL):
+1. VEHICLE: One modern family car parked in driveway (generic sedan or SUV, neutral color)
+   - Positioned naturally, not staged
+   - Adds realism and scale
+
+2. INTERIOR LIGHTS: Warm yellow/orange glow visible through windows
+   - Shows people are inside living their lives
+   - Creates cozy, welcoming atmosphere
+   - Multiple windows lit (living room, kitchen, bedrooms)
+
+3. OUTDOOR DECORATIONS:
+   - Patio furniture: 2-4 chairs + small table on porch/deck
+   - Decorative cushions in neutral colors
+   - Potted plants/flowers by front entrance (2-3 large decorative pots)
+   - Solar pathway lights along walkway (small glowing markers)
+   - Welcome mat at front door
+   - Residential mailbox on post near driveway
+
+4. AMBIANCE DETAILS:
+   - Possibly string lights or lantern on porch (subtle, not Christmas lights)
+   - Maybe garden flag or house numbers visible
+   - Personal touches that say "someone lives here"
+
+House should be the CLEAR MAIN SUBJECT, occupying majority of the image, but with MORE SURROUNDINGS visible than construction shots.
+Show roof details, facade texture, windows clearly, plus additional context like full driveway, front yard landscaping.
+Include more surroundings: complete driveway, front yard edges, several trees, street hints.
+Background should show MORE context than construction shots — viewer feels "pulled back to see the full property".
+The viewer sees the house from FARTHER AWAY while it remains the HERO — large, detailed, impressive, and FULLY LIVED-IN.
+
+ABSOLUTELY AVOID:
+- Wide shots where house is small in the center (house must still dominate!)
+- Bird's eye view from high altitude
+- Showing entire neighborhood or vast landscape
+- Any camera position that makes the house look distant or tiny
+- Construction equipment, workers, tools (this is AFTER construction)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 LIGHTING: Golden hour (sunset or sunrise) for cinematic quality
-- Warm, soft light with long shadows
-- Beautiful side-lighting that reveals depth and dimension
+- Warm, soft light with gentle shadows
+- Interior lights create warm glow in windows (contrast with exterior light)
+- Beautiful lighting that reveals house details and depth
 - Professional real estate photography aesthetic
 
 STYLE: Ultra photorealistic, cinematic aerial photography
 - Shot on professional drone (DJI Mavic 3 or similar)
-- High resolution, sharp details
+- High resolution, sharp architectural details
 - Rich colors, excellent dynamic range
-- Premium real estate marketing quality
-- Emotional, aspirational atmosphere
+- Premium quality with intimate, close perspective
+- Emotional, aspirational "dream home" atmosphere
 
 TECHNICAL: Vertical 9:16, 1080x1920, ultra detailed, photorealistic.
 
 SAFETY: Generic content ONLY. NO brands, logos, copyrighted material.
+- Car must be GENERIC (no visible emblems or brand identifiers)
+- All decorations must be original designs
 
-GOAL: Create a stunning aerial showcase image that reveals the full beauty of the property and its surroundings."""
+GOAL: Create an intimate aerial showcase where the house remains the HERO — large, detailed, impressive, and CLEARLY LIVED-IN with visible signs that a family has moved in and made it their home."""
 
     return prompt
 
@@ -716,16 +875,17 @@ def _build_final_drone_video_prompt(
     """
     house_style = scenario.get("house_style", "modern")
     location = scenario.get("location", "suburbs")
+    num_floors = scenario.get("num_floors", 2)  # NEW: Get floors from scenario
 
     style_visual = HOUSE_STYLE_VISUALS.get(house_style, HOUSE_STYLE_VISUALS["modern"])
     loc_visual = LOCATION_VISUALS.get(location, LOCATION_VISUALS["suburbs"])
 
-    # Random movement selection for variety
+    # Random movement selection for variety - ALL STATIC SHOTS, NO CAMERA MOTION
     movements = [
-        "slow pull-back and upward: camera starts at ground-level construction view, gently moves backward and rises to elevated aerial position, revealing the full property",
-        "smooth orbit with elevation gain: camera circles around the house while ascending from ground level to bird's eye view, showing all angles",
-        "rise-up reveal: camera starts low near ground at construction viewpoint, slowly rises upward to high aerial position while pulling back",
-        "diagonal fly-back: camera passes alongside the house diagonally while moving backward and upward from construction view to aerial overview",
+        "static elevated aerial shot from 8-15 meters height — camera is COMPLETELY LOCKED-OFF on tripod, NO movement, NO pull-back, NO rising — single fixed frame showcasing the lived-in house",
+        "static moderate aerial view from 10-12 meters — camera is FULLY STATIC, zero motion, fixed position — one beautiful photograph of the occupied home",
+        "static high-angle shot from 8-15 meters elevation — camera is TRIPOD-MOUNTED and locked, ABSOLUTELY NO movement — single still showcase image",
+        "static diagonal aerial perspective from 12-15 meters — camera is COMPLETELY STILL, NO flying, NO motion — one fixed cinematic frame",
     ]
     selected_movement = random.choice(movements)
 
@@ -737,69 +897,92 @@ def _build_final_drone_video_prompt(
     ]
     selected_time = random.choice(times_of_day)
 
-    # TWO-FRAME TRANSITION PROMPT
-    # CRITICAL: This video transitions FROM construction view TO aerial showcase
-    prompt = f"""━━━ ★★★ TRANSITION: CONSTRUCTION → AERIAL SHOWCASE ★★★ ━━━
-THIS VIDEO SHOWS A SMOOTH CAMERA MOVEMENT BETWEEN TWO FRAMES:
-- START FRAME: Construction site view (ground-level, human perspective)
-- END FRAME: Beautiful aerial showcase view (elevated drone perspective)
+    # TWO-FRAME TRANSITION PROMPT — ACTUALLY A SINGLE STATIC SHOT
+    # CRITICAL: This is NOT a transformation video — it's ONE STATIC AERIAL PHOTO
+    prompt = f"""━━━ ★★★ SINGLE STATIC AERIAL SHOT: LIVED-IN HOUSE SHOWCASE ★★★ ━━━
+THIS IS NOT A VIDEO WITH CAMERA MOVEMENT.
+This is ONE BEAUTIFUL STATIC PHOTOGRAPH from elevated drone perspective.
 
-The video MUST smoothly transition from the start frame to the end frame.
+━━━ CRITICAL: STATIC CAMERA (MOST IMPORTANT) ━━━
+- Camera is COMPLETELY LOCKED-OFF on tripod at 8-15 meters height
+- ZERO camera movement — NO pull-back, NO rising, NO orbiting, NO flying
+- This is a SINGLE STILL FRAME, not a motion video
+- Think: "beautiful drone photograph", not "drone video"
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-A cinematic drone showcase of the COMPLETED house. This is the FINAL RESULT — NO construction, NO workers, NO machinery.
+A cinematic DRONE PHOTOGRAPH of the COMPLETED, LIVED-IN house. This is the FINAL RESULT — NO construction, NO workers, NO machinery.
 
-SUBJECT: {style_visual['visual']}
+SUBJECT: {style_visual['visual']} — now fully lived-in with visible signs of habitation
 LOCATION: {loc_visual['visual']}
 
 ━━━ CRITICAL: THIS IS A SHOWCASE, NOT CONSTRUCTION ━━━
-The house is FULLY BUILT and must remain UNCHANGED throughout.
-NO building activities.
-NO workers.
-NO machinery.
-NO transformation.
-ONLY the finished, beautiful result.
+The house is FULLY BUILT and OCCUPIED. Must show signs that people live here:
+
+VISIBLE SIGNS OF HABITATION (3-4 KEY ELEMENTS ONLY):
+1. VEHICLE: One modern family car parked in driveway (generic sedan/SUV, neutral color)
+2. INTERIOR LIGHTS: Warm yellow/orange glow visible through 3-5 windows
+3. OUTDOOR FURNITURE: Small patio set on porch (2 chairs + tiny table OR decorative cushions)
+4. POTTED PLANTS: 2-3 decorative flower pots by front entrance
+
+**HOUSE SPECIFICATIONS:**
+• Number of floors: {num_floors} floor{'s' if num_floors > 1 else ''}
+• House design: MUST remain consistent with construction stages
+
+OPTIONAL SUBTLE DETAILS (choose 0-1):
+- Solar pathway lights (2-3 small markers along walkway)
+- Welcome mat at front door
+- Residential mailbox on post near driveway
+
+DO NOT overload scene — select only 3-4 main elements total.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-━━━ CAMERA MOVEMENT: SMOOTH TRANSITION ━━━
+━━━ STATIC CAMERA SPECIFICATIONS ━━━
 {selected_movement}
 
-KEY REQUIREMENTS:
-- Video STARTS from the construction viewpoint (start frame)
-- Video ENDS at the aerial showcase viewpoint (end frame)
-- Movement must be SMOOTH, GRADUAL, and CINEMATIC
-- No sudden jumps or cuts
-- Natural, flowing camera motion
-- The house remains IDENTICAL throughout — only camera position changes
+PIXEL-PERFECT REQUIREMENTS:
+- House position in frame: EXACT SAME as reference image (last construction stage)
+- House size: IDENTICAL proportions, NO scaling
+- Perspective: MATCHING vanishing points from reference
+- This is THE SAME house from slightly elevated viewpoint — NOT a different photo
+- House fills 70-80% of frame (dominates composition)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-FRAMING EVOLUTION:
-- START: Ground-level view focused on house
-- MIDDLE: Gradual ascent revealing more surroundings
-- END: High aerial overview showing full property + context
+FRAMING (FIXED, NO EVOLUTION):
+- Single elevated view from 8-15 meters height
+- House is CLEAR HERO — large, detailed, impressive
+- Immediate context only: driveway edge, closest trees, front yard
+- Background minimal: sky and subtle hints of surroundings
+- Viewer feels "close to the house", NOT looking from far away
 
 LIGHTING: {selected_time}
 - Realistic shadows consistent with scene
 - Warm cinematic glow
+- Interior lights create warm yellow/orange glow in windows (visible throughout — this is a static shot)
 - Professional real estate photography quality
+- Lighting emphasizes the "lived-in" cozy atmosphere
 
-ENVIRONMENT MOTION:
-- Slight breeze in trees
-- Gentle grass movement
-- Natural environmental life
+ENVIRONMENT (STATIC, NO MOTION):
+- Still air or very slight breeze in trees (subtle, almost frozen)
+- Minimal grass movement — this is essentially a photograph
+- Calm, peaceful atmosphere
+- Soft glow from interior lights (steady, not pulsing)
 
 STYLE:
 - Ultra realistic
 - Cinematic
 - Calm and satisfying
 - Premium real estate showcase quality
-- Emotional payoff for viewer
+- Emotional payoff for viewer — sense of "home sweet home"
+- Aspirational family living atmosphere
 
-TECHNICAL: Vertical 9:16, 1080x1920, cinematic drone footage, smooth motion.
+TECHNICAL: Vertical 9:16, 1080x1920, cinematic drone PHOTOGRAPH, sharp details.
 
 SAFETY: Generic content ONLY. NO brands, logos, copyrighted material.
+- Car must be GENERIC (no visible emblems or brand identifiers)
+- All decorations must be original designs
+- Keep decorations minimal — 3-4 elements maximum
 
-GOAL: Create a stunning, smooth transition that reveals the full beauty of the completed property from an aerial perspective."""
+GOAL: Create ONE stunning, intimate aerial photograph where the house remains the HERO — large, detailed, impressive, and CLEARLY LIVED-IN with 3-4 visible signs that a family has moved in and made it their home. Camera is COMPLETELY STATIC — this is a beautiful still image, not a motion video."""
 
     return prompt
 # ═══════════════════════════════════════════════════════════════════════════
@@ -957,6 +1140,9 @@ async def generate_house_videos(
 
     if not scenes:
         raise ValueError("[Mode8] No scenes to generate")
+    
+    # Get house info for video prompts
+    num_floors = scenario.get("num_floors", 2)  # Default 2 floors
 
     fastgen_key = getattr(settings, "fastgen_api_key", "") or ""
     if not fastgen_key:
@@ -1176,18 +1362,34 @@ async def generate_house_videos(
     # Generate ALL videos in parallel
     video_paths = await asyncio.gather(*video_tasks, return_exceptions=True)
     
-    # Separate video results from preview result (last task might be preview)
+    # ═══════════════════════════════════════════════════════════════════════
+    # SEPARATE PREVIEW RESULT FROM VIDEO RESULTS
+    # ═══════════════════════════════════════════════════════════════════════
     preview_path = None
-    if generate_preview and len(video_paths) > num_total_videos:
-        # Last item is preview result
-        preview_result = video_paths.pop()  # Remove and get preview
+    
+    # Check if preview task was added and extract its result
+    if generate_preview and len(video_tasks) > 0:
+        # Preview task is always the LAST one added (after drone shot)
+        # We need to check if the last task actually produced a preview
+        preview_result = video_paths[-1] if len(video_paths) > 0 else None
+        
         if isinstance(preview_result, Path):
+            # Successfully generated preview - remove it from video_paths
             preview_path = preview_result
+            video_paths = video_paths[:-1]  # Remove last item (preview)
             logger.success(f"[Mode8] Clickbait preview generated: {preview_path.name}")
+            logger.info(f"[Mode8] Preview full path: {preview_path.absolute()}")
+            # Verify file exists
+            if not preview_path.exists():
+                logger.error(f"[Mode8] Preview file does not exist: {preview_path}")
+                preview_path = None
         elif isinstance(preview_result, Exception):
+            # Preview generation failed - log error but continue
             logger.error(f"[Mode8] Preview generation failed: {preview_result}")
+            video_paths = video_paths[:-1] if len(video_paths) > 0 else video_paths
         else:
-            logger.warning("[Mode8] Preview generation returned None")
+            # No preview was generated (task returned None or not added)
+            logger.warning("[Mode8] No preview result from last task - preview will NOT be added")
 
     # Handle results
     valid_paths: list[Path | None] = []

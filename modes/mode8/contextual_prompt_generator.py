@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from typing import Any
 
 from loguru import logger
@@ -58,6 +59,7 @@ class ScenarioContext:
     overall_narrative: str = ""
     style_consistency_notes: str = ""
     location_atmosphere: str = ""
+    num_floors: int = 2  # NEW: Number of floors from UI
     
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -65,6 +67,7 @@ class ScenarioContext:
             "overall_narrative": self.overall_narrative,
             "style_consistency_notes": self.style_consistency_notes,
             "location_atmosphere": self.location_atmosphere,
+            "num_floors": self.num_floors,
         }
 
 
@@ -100,6 +103,7 @@ TASK: Analyze the building scenario and create a detailed visual progression pla
 SCENARIO DETAILS:
 - House Style: {house_style}
 - Location: {location}
+- Number of Floors: {num_floors} floor{'s' if num_floors > 1 else ''}
 - Total Stages: {total_stages}
 
 STAGES TO ANALYZE:
@@ -115,7 +119,7 @@ For EACH stage, provide:
 CRITICAL REQUIREMENTS:
 - Each stage must have DISTINCT visual elements (no repetition)
 - Create clear visual progression (empty land → foundation → walls → roof → finished)
-- Consider camera angles and lighting changes
+- ⚠️ CRITICAL: Camera MUST remain COMPLETELY STATIC — NO angle changes allowed
 - Ensure architectural consistency while adding variety
 
 Respond with structured JSON following the ScenarioContext schema."""
@@ -138,6 +142,7 @@ CURRENT STAGE DETAILS:
 ARCHITECTURAL CONTEXT:
 - House Style: {house_style}
 - Location: {location}
+- Number of Floors: {num_floors} floor{'s' if num_floors > 1 else ''}
 - Camera Specs: {camera_specs}
 
 PREVIOUS IMAGE PROMPTS (DO NOT REPEAT):
@@ -149,51 +154,132 @@ Write a detailed, cinematic image prompt that:
 2. DOES NOT repeat elements from previous stages (see above)
 3. Maintains architectural consistency
 4. Uses specific, vivid details (NOT generic descriptions)
-5. Includes camera angle, lighting, and composition details
+5. Includes lighting and composition details (camera angle is FIXED - see calibration data below)
+6. **CRITICAL: ENTIRE HOUSE MUST BE FULLY VISIBLE** - compose the shot so the complete house structure fits within the frame with surrounding landscape context
+7. **FRAMING REQUIREMENT**: House should occupy 40-50% of frame - far enough to show full building, not cropped or partial view
 
 CRITICAL RULES:
 - NEVER use phrases like "similar to", "same as", "like before"
 - ALWAYS describe what's NEW and DIFFERENT in this stage
 - Use concrete visual details (materials, textures, colors, shadows)
 - Make each prompt feel like a professional photograph
+- **COMPOSITION RULE**: Frame the shot to capture the ENTIRE house - imagine you're photographing from 25 meters away at 8 meters height
+- **FULL VISIBILITY**: Every part of the house must be in frame - from foundation to roof, left edge to right edge
+- **NO CROPPING**: Never crop any part of the house - the whole structure must fit completely in the shot
+
+⚠️ STATIC CAMERA RULE (ABSOLUTELY CRITICAL):
+- Camera must be COMPLETELY STATIC - mounted on tripod, locked-off position
+- Background (sky, clouds, trees, grass, landscape, neighboring houses) MUST stay EXACTLY identical across ALL stages
+- ONLY THE HOUSE CONSTRUCTION changes - the background is FROZEN and cannot change
+- Camera angle, height, distance, perspective - everything must remain IDENTICAL
+- If camera moves even 1 degree between stages, the entire timelapse video will be ruined
+- Think of it as: camera is bolted to concrete - ZERO movement allowed
+- This is THE MOST IMPORTANT rule for construction timelapse
+
+━━━ CAMERA CALIBRATION DATA (MATHEMATICAL PRECISION REQUIRED) ━━━
+CAMERA PARAMETERS - MUST BE IDENTICAL FOR EVERY SINGLE IMAGE:
+- Position: X=0.0m (center), Y=8.0m (height - elevated), Z=25.0m (distance - far)
+- Angle: Horizontal=0°, Vertical=-10° (slight downward angle from height)
+- Focal Length: 35mm full-frame equivalent (wide enough for full house)
+- Horizon Line: 60% from bottom edge (elevated viewpoint)
+- Cloud Motion: ALWAYS moving RIGHT (never static, never left)
+- Framing: ENTIRE house must be fully visible with surrounding landscape
+- These parameters are LOCKED - ZERO tolerance for variation
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STYLE: Photorealistic, shot on smartphone camera, natural lighting, authentic construction site look. NOT 3D render, NOT CGI, NOT animated, NOT cartoon. Must look like REAL smartphone footage.
 
 Write the prompt in English for AI image generation."""
 
 
-VIDEO_PROMPT_GENERATION_PROMPT = """You are an expert AI video prompt engineer for construction timelapse transitions.
+VIDEO_PROMPT_GENERATION_PROMPT = """You are an expert AI video prompt engineer for construction timelapse.
 
-TASK: Generate a DYNAMIC video prompt for transition from Stage {from_index} to Stage {from_index_plus1}.
+TASK: Generate detailed structured video prompt (150-180 words) for transition: {from_stage_name} -> {to_stage_name}.
 
-TRANSITION ANALYSIS:
-FROM: {from_stage_name} → TO: {to_stage_name}
+⚠️ CRITICAL RULE #0 - BUILDING STABILITY (MOST IMPORTANT):
+The HOUSE ITSELF MUST REMAIN COMPLETELY UNCHANGED throughout this video!
+- The house does NOT grow, change, or add new fragments during this video
+- ONLY workers and machinery move around the FIXED house structure
+- Think: house is a STATIC PHOTO - workers are DYNAMIC overlay
+- Camera captures workers working, NOT house changing
 
-IMAGE PROMPTS FOR THESE STAGES:
-- From Stage Image: {from_image_prompt}
-- To Stage Image: {to_image_prompt}
+IMAGE PROMPTS (visual reference):
+- From Stage: {from_image_prompt}
+- To Stage: {to_image_prompt}
 
 PREVIOUS VIDEO PROMPTS (AVOID REPETITION):
 {previous_video_prompts}
 
-CONTEXT FROM SCENARIO ANALYSIS:
-{scenario_context}
+CONTEXT FOR CONTINUITY:
+- Building Type: House with {num_floors} floors
+- Overall Progression: Stage {from_index} of {total_stages} total stages
+- What's Already Built: Previous stages completed successfully
+- What Comes Next: After this transition, construction continues upward/forward
 
-YOUR TASK:
-Create a captivating video transition prompt that:
-1. Shows the TRANSFORMATION PROCESS (not just before/after)
-2. Focuses on WHAT CHANGES between these two specific stages
-3. Uses dynamic action verbs (building, installing, rising, assembling)
-4. Includes worker activities and machinery in motion
-5. AVOIDS repeating transition patterns from previous videos
+---
+OUTPUT FORMAT (STRICT STRUCTURE WITH LINE BREAKS):
 
+**TRANSITION:** [{from_stage_name}] -> [{to_stage_name}]
+
+**CAMERA & CONTINUITY:** (4 bullets - VERY concise)
+• Fixed tripod (X=0.0m, Y=8.0m, Z=25.0m), 35mm focal length
+• Horizon at 60% from bottom, elevated viewpoint
+• Sky, trees, landscape unchanged across frames
+• Only house construction changes - background frozen
+• ENTIRE house fully visible with surrounding landscape
+
+**KEY VISUAL CHANGES** (3 bullets - main focus, detailed):
+• [Specific element transformation with materials + dimensions]
+• [Worker/machinery action with tools + method]
+• [Structural element assembly with components]
+
+**MOTION TYPE:** [timelapse]
+
+**MOTION DETAIL:** (3 bullets - concise)
+• Continuous forward build, smooth progression
+• No reversing - only forward advancement
+• Active workers/machinery, tools: [specific tools]
+
+**BUILDING HEIGHT CONTEXT:** (2 bullets - REQUIRED)
+• Current floor: [ground/first/second], height: ~[X] meters
+• Vertical progress: building grows upward
+
+**VISUAL FOCUS:** [2-3 words - REQUIRED]
+
+**LIGHTING & ATMOSPHERE:** (2 bullets - REQUIRED)
+• Time: [morning/midday], lighting: [bright/diffused]
+• Weather: clear construction conditions
+
+---
 CRITICAL RULES:
-- This is a TIMELAPSE transition, not instant transformation
-- Show REAL CONSTRUCTION WORK (workers, tools, materials moving)
-- NEVER use "magical appearance" or "instant change" language
-- Describe SPECIFIC construction actions for THIS transition
-- Keep camera FIXED (tripod-mounted look)
-- Forward motion ONLY (no reversing)
 
-Write the prompt in English for AI video generation."""
+1. TARGET 150-180 WORDS TOTAL (allocate words wisely across ALL sections)
+2. Include ALL sections above - EVERY section required
+3. CAMERA: Keep very concise (20 words max)
+4. KEY VISUAL CHANGES: Main detail here (50-60 words)
+5. MOTION DETAIL: Concise (25 words max)
+6. BUILDING HEIGHT CONTEXT: Required (20 words)
+7. VISUAL FOCUS: Required (2-3 words)
+8. LIGHTING & ATMOSPHERE: Required (20 words)
+9. FORMAT REQUIREMENT: Use line breaks between sections
+10. NO narrative filler:
+    - "as the scene progresses"
+    - "we can see"
+    - "the camera captures"
+    - "carefully", "diligently", "skillfully"
+    - "showcasing", "illustrating"
+
+11. NO magical transformations:
+    - NO instant appearance
+    - ALL changes by visible agents (workers/machinery)
+
+12. BE SPECIFIC:
+    ❌ SIMPLE: "pouring concrete"
+    ✅ DETAILED: "wet concrete poured from mixer into forms with rebar"
+
+13. WORD ALLOCATION MATTERS: Don't spend 100 words on first 2 sections - save words for VISUAL FOCUS and LIGHTING!
+
+Write in English. Generate EVERY section. Balance word count across all sections."""""
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -228,17 +314,23 @@ class ContextAnalyzer:
             
             house_style = scenario.get("house_style", "modern")
             location = scenario.get("location", "suburbs")
+            num_floors = scenario.get("num_floors", 2)  # NEW: Get floors from scenario
             
             # Build prompt
             prompt = CONTEXT_ANALYSIS_PROMPT.format(
                 house_style=house_style,
                 location=location,
+                num_floors=num_floors,  # NEW: Pass floors to context analysis
                 total_stages=len(stages),
                 stages_list=stages_list,
             )
             
-            # Invoke LLM
-            response = await llm.ainvoke(prompt)
+            # Invoke LLM with timeout
+            try:
+                response = await asyncio.wait_for(llm.ainvoke(prompt), timeout=30.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"[Mode8 Context] Context analysis timeout (30s), using fallback")
+                raise Exception("Timeout")
             
             # Parse response (extract JSON)
             context_data = _parse_context_response(response.content)
@@ -262,6 +354,7 @@ class ContextAnalyzer:
                 overall_narrative=context_data.get("overall_narrative", ""),
                 style_consistency_notes=context_data.get("style_consistency_notes", ""),
                 location_atmosphere=context_data.get("location_atmosphere", ""),
+                num_floors=num_floors,  # NEW: Pass floors from scenario
             )
             
             logger.success(f"[Mode8 Context] Analyzed {len(visual_progression)} stages")
@@ -299,6 +392,7 @@ def _parse_context_response(content: str) -> dict[str, Any]:
 def _create_fallback_context(scenario: dict[str, Any]) -> ScenarioContext:
     """Create minimal context if LLM fails."""
     stages = scenario.get("scenes", [])
+    num_floors = scenario.get("num_floors", 2)  # NEW: Get floors from scenario
     visual_progression = []
     
     for i, stage in enumerate(stages):
@@ -317,6 +411,7 @@ def _create_fallback_context(scenario: dict[str, Any]) -> ScenarioContext:
         overall_narrative="Standard construction progression",
         style_consistency_notes="Maintain consistent architectural style",
         location_atmosphere="typical construction site",
+        num_floors=num_floors,  # NEW: Pass floors to fallback context
     )
 
 
@@ -406,6 +501,17 @@ class ImagePromptGenerator:
             # Get camera specs
             camera_specs = _get_camera_specs_for_scenario(scenario_context)
             
+            # CRITICAL: Add static camera warning to camera specs
+            camera_specs_with_warning = f"""{camera_specs}
+
+⚠️ CRITICAL CAMERA RULE (MOST IMPORTANT):
+- Camera must be COMPLETELY STATIC (tripod-mounted, locked-off)
+- Camera position CANNOT change between stages
+- Background (sky, trees, landscape) MUST remain EXACTLY the same
+- ONLY THE HOUSE changes - background is FROZEN
+- This is essential for smooth timelapse video
+- If camera moves even slightly, the entire video will be ruined"""
+            
             # Build prompt
             prompt_text = IMAGE_PROMPT_GENERATION_PROMPT.format(
                 stage_index=stage.get("index", 0) + 1,
@@ -419,12 +525,17 @@ class ImagePromptGenerator:
                 progression_notes=progression_notes,
                 house_style=scenario_context.style_consistency_notes,
                 location=scenario_context.location_atmosphere,
-                camera_specs=camera_specs,
+                num_floors=scenario_context.num_floors,
+                camera_specs=camera_specs_with_warning,  # Use enhanced version
                 previous_image_prompts=prev_prompts_text,
             )
             
-            # Invoke LLM
-            response = await llm.ainvoke(prompt_text)
+            # Invoke LLM with timeout
+            try:
+                response = await asyncio.wait_for(llm.ainvoke(prompt_text), timeout=30.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"[Mode8 Images] Image prompt generation timeout (30s), using fallback")
+                raise Exception("Timeout")
             
             generated_prompt = response.content.strip()
             
@@ -452,9 +563,17 @@ class ImagePromptGenerator:
 
 
 def _get_camera_specs_for_scenario(context: ScenarioContext) -> str:
-    """Extract camera specs from context."""
-    # For now, return generic specs
-    return "Wide shot, natural daylight, tripod-mounted camera, consistent angle across all stages"
+    """Extract camera specs from context with FIXED calibration parameters matching video_generator.py."""
+    # CONSISTENT parameters across ALL mode8 files for full house visibility
+    return """⚠️ FIXED CAMERA PARAMETERS (LOCKED - for ENTIRE HOUSE visibility):
+- Position: X=0.0m (center), Y=8.0m (height - elevated), Z=25.0m (distance - far)
+- Angle: Horizontal=0°, Vertical=-10° (slight downward angle from height)
+- Focal Length: 35mm full-frame equivalent (wide enough for full house)
+- Horizon Line: 60% from bottom edge (elevated viewpoint)
+- Cloud Motion: ALWAYS moving RIGHT (never static, never left)
+- Camera: tripod-mounted, locked-off, COMPLETELY STATIC
+- Framing: ENTIRE house must be fully visible with surrounding landscape
+- STYLE: Photorealistic smartphone photo, NOT 3D render, NOT CGI"""
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -500,6 +619,7 @@ class VideoPromptGenerator:
                 to_stage=to_stage,
                 from_image_prompt=from_image_prompt,
                 to_image_prompt=to_image_prompt,
+                scenario=scenario,  # NEW: Pass scenario dict
                 scenario_context=context,
                 previous_video_prompts=previous_prompts,
                 language=language,
@@ -519,6 +639,7 @@ class VideoPromptGenerator:
         to_stage: dict[str, Any],
         from_image_prompt: str,
         to_image_prompt: str,
+        scenario: dict[str, Any],
         scenario_context: ScenarioContext,
         previous_video_prompts: list[GeneratedPrompt],
         language: str = "en",
@@ -529,39 +650,172 @@ class VideoPromptGenerator:
             
             from_index = from_stage.get("index", 0)
             
-            # Build previous video prompts context
+            # Build previous video prompts context (concise)
             if previous_video_prompts:
                 prev_videos_text = "\n\n".join([
-                    f"--- Transition {p.stage_index + 1} ---\n{p.prompt_text}"
-                    for p in previous_video_prompts[-3:]  # Last 3 prompts
+                    f"--- Transition {p.stage_index + 1} ---\n{p.prompt_text[:300]}"
+                    for p in previous_video_prompts[-3:]  # Last 3 prompts only
                 ])
             else:
                 prev_videos_text = "None (first video transition)"
             
-            # Build scenario context summary
+            # Simplified scenario summary with essential context
+            total_stages = len(scenario.get('scenes', []))
+            num_floors = scenario.get("num_floors", 2)
+            
             scenario_summary = f"""
-Overall Narrative: {scenario_context.overall_narrative}
-Style Consistency: {scenario_context.style_consistency_notes}
-Location Atmosphere: {scenario_context.location_atmosphere}
-Total Transitions: {len(previous_video_prompts) + 1}
+Building Info:
+- Floors: {num_floors} floors total
+- Total Construction Stages: {total_stages}
+- Current Transition: {from_index + 1} of {total_stages - 1} video transitions
+- Style: {scenario.get('house_style', 'modern')}
+- Location: {scenario.get('location', 'suburbs')}
             """.strip()
             
-            # Build prompt
+            # Get num_floors from scenario
+            num_floors = scenario.get("num_floors", 2)
+            
+            # Build prompt with strict format and full context
             prompt_text = VIDEO_PROMPT_GENERATION_PROMPT.format(
-                from_index=from_index + 1,
-                from_index_plus1=from_index + 2,
                 from_stage_name=from_stage.get("name_en", ""),
                 to_stage_name=to_stage.get("name_en", ""),
-                from_image_prompt=from_image_prompt[:500],
-                to_image_prompt=to_image_prompt[:500],
+                from_image_prompt=from_image_prompt[:400],  # More context
+                to_image_prompt=to_image_prompt[:400],
                 previous_video_prompts=prev_videos_text,
-                scenario_context=scenario_summary,
+                from_index=from_index + 1,
+                total_stages=len(scenario.get('scenes', [])),
+                num_floors=scenario.get("num_floors", 2),
             )
             
-            # Invoke LLM
-            response = await llm.ainvoke(prompt_text)
+            # Invoke LLM with timeout
+            try:
+                response = await asyncio.wait_for(llm.ainvoke(prompt_text), timeout=30.0)
+                generated_prompt = response.content.strip()
+            except asyncio.TimeoutError:
+                logger.warning(f"[Mode8 Videos] Video prompt generation timeout (30s), using fallback")
+                raise Exception("Timeout")
             
-            generated_prompt = response.content.strip()
+            # === VALIDATION 1: Word count enforcement (TARGET: 150-180 words) ===
+            words = generated_prompt.split()
+            if len(words) < 150:
+                logger.warning(f"[Mode8 Videos] Prompt too short ({len(words)} words), regenerating with more detail...")
+                retry_prompt = f"""RETRY: Your prompt is too short ({len(words)} words). Target is 150-180 words.
+                
+Expand these sections:
+- Add more detail to KEY VISUAL CHANGES (materials, tools, methods)
+- Elaborate on MOTION DETAIL (specific tools operating)
+- Include complete BUILDING HEIGHT CONTEXT (floor level, vertical progress)
+- Add complete LIGHTING & ATMOSPHERE details (time of day, shadows, weather)
+
+Original request:
+{prompt_text[:600]}
+
+Regenerate with richer details while maintaining structure."""
+                try:
+                    response = await asyncio.wait_for(llm.ainvoke(retry_prompt), timeout=30.0)
+                    generated_prompt = response.content.strip()
+                    words = generated_prompt.split()  # Re-count
+                except asyncio.TimeoutError:
+                    logger.warning(f"[Mode8 Videos] Retry attempt timeout (30s), keeping original prompt")
+                    # Keep the original generated_prompt from first attempt
+            
+            if len(words) > 180:
+                logger.warning(f"[Mode8 Videos] Prompt too long ({len(words)} words), truncating intelligently...")
+                # Smart truncate: keep line breaks and structure
+                lines = generated_prompt.splitlines()
+                truncated_lines = []
+                current_word_count = 0
+                for line in lines:
+                    line_words = line.split()
+                    if current_word_count + len(line_words) <= 180:
+                        truncated_lines.append(line)
+                        current_word_count += len(line_words)
+                    else:
+                        # Partial line to fit exactly 180
+                        remaining = 180 - current_word_count
+                        if remaining > 0:
+                            truncated_lines.append(' '.join(line_words[:remaining]))
+                        break
+                generated_prompt = '\n'.join(truncated_lines)
+                words = generated_prompt.split()
+            
+            # Log final word count
+            logger.info(f"[Mode8 Videos] Final word count: {len(generated_prompt.split())}/180")
+            
+            # === VALIDATION 2: Bullet structure check ===
+            if "•" not in generated_prompt:
+                logger.warning("[Mode8 Videos] No bullet points detected, regenerating with stricter instructions...")
+                retry_prompt = f"""RETRY: You MUST use bullet points (•) in KEY VISUAL CHANGES section.
+                
+Previous attempt failed structure check.
+
+Original request:
+{prompt_text[:500]}
+
+Regenerate with EXACT format:
+
+**KEY VISUAL CHANGES** (MAX 3 BULLETS):
+• [specific change 1]
+• [specific change 2]
+• [specific change 3]
+"""
+                try:
+                    response = await asyncio.wait_for(llm.ainvoke(retry_prompt), timeout=30.0)
+                    generated_prompt = response.content.strip()
+                except asyncio.TimeoutError:
+                    logger.warning(f"[Mode8 Videos] Bullet point retry timeout (30s), keeping original prompt")
+                    # Keep the original generated_prompt
+            
+            # === VALIDATION 3: Aggressive filler phrase removal ===
+            filler_phrases = [
+                "the camera captures",
+                "we can see",
+                "as the scene progresses",
+                "in the foreground",
+                "in the background",
+                "carefully",
+                "diligently",
+                "skillfully",
+                "showcasing",
+                "illustrating",
+                "highlighting",
+                "emphasizing",
+                "demonstrating",
+            ]
+            for phrase in filler_phrases:
+                generated_prompt = generated_prompt.replace(phrase, "").strip()
+            
+            # Clean up multiple spaces from removals
+            while "  " in generated_prompt:
+                generated_prompt = generated_prompt.replace("  ", " ")
+            
+            # === VALIDATION 4: Magic transformation detection ===
+            magic_phrases = [
+                "instantly appears",
+                "magically forms",
+                "suddenly materializes",
+                "without warning",
+                "poof into existence",
+            ]
+            for phrase in magic_phrases:
+                if phrase in generated_prompt.lower():
+                    logger.error(f"[Mode8 Videos] Detected magic transformation: '{phrase}', replacing")
+                    generated_prompt = generated_prompt.replace(phrase, "is constructed by workers")
+            
+            # === VALIDATION 5: Repetition check ===
+            if previous_video_prompts:
+                from difflib import SequenceMatcher
+                for prev in previous_video_prompts[-3:]:
+                    similarity = SequenceMatcher(None, generated_prompt.lower(), prev.prompt_text.lower()).ratio()
+                    if similarity > 0.7:  # 70% similar = too much
+                        logger.warning(f"[Mode8 Videos] Prompt too similar to previous transition ({similarity:.0%})")
+                        # Could trigger regeneration here if needed
+            
+            # Final cleanup
+            generated_prompt = generated_prompt.strip()
+            
+            # Log metrics
+            logger.info(f"[Mode8 Videos] Generated: {len(generated_prompt)} chars, {len(generated_prompt.split())} words")
             
             return GeneratedPrompt(
                 stage_index=from_index,
@@ -569,7 +823,7 @@ Total Transitions: {len(previous_video_prompts) + 1}
                 prompt_text=generated_prompt,
                 language=language,
                 prompt_type="video",
-                analysis_notes=f"Transition analysis: {from_stage.get('name_en')} → {to_stage.get('name_en')}",
+                analysis_notes=f"Transition: {from_stage.get('name_en')} → {to_stage.get('name_en')}",
             )
             
         except Exception as e:
