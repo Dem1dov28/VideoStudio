@@ -263,6 +263,10 @@ def _assemble_mode4_impl(
                 vc.close()
             except Exception:
                 pass
+        try:
+            temp_audio.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     logger.success(f"[Mode4 Assembler] Done → {output_path}")
     return output_path

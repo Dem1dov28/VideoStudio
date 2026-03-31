@@ -629,6 +629,8 @@ def _get_video_metadata() -> list[dict]:
             if not session_dir.is_dir() or session_dir.name.startswith("_"):
                 continue
             for mp4 in session_dir.glob("*.mp4"):
+                if not _is_public_session_mp4(mp4.name):
+                    continue
                 sid = session_dir.name
                 key = (sid, mp4.name)
                 if key in seen:
@@ -799,9 +801,14 @@ def _resolve_video_path(session_id: str, filename: str) -> Path | None:
     return None
 
 
+def _is_public_session_mp4(filename: str) -> bool:
+    """Служебные файлы (temp audio MoviePy `_m4_snd_*` и т.п.) не в библиотеку и не в превью."""
+    return not Path(filename).name.startswith("_")
+
+
 def _pick_legacy_thumbnail_path(legacy_dir: Path) -> Path | None:
     """Предпочесть финальные video_ru / video_en, не клип clip_*.mp4."""
-    mp4s = sorted(legacy_dir.glob("*.mp4"))
+    mp4s = sorted(p for p in legacy_dir.glob("*.mp4") if _is_public_session_mp4(p.name))
     if not mp4s:
         return None
     for name in ("video_ru.mp4", "video_en.mp4"):
@@ -825,7 +832,7 @@ async def serve_video_thumbnail(
     path: Path | None = None
     if video_file and legacy.is_dir():
         safe_name = Path(video_file).name
-        if safe_name.endswith(".mp4"):
+        if safe_name.endswith(".mp4") and _is_public_session_mp4(safe_name):
             candidate = (legacy / safe_name).resolve()
             try:
                 candidate.relative_to(legacy.resolve())
