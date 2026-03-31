@@ -139,6 +139,9 @@ async def _run_pipeline_task(
             mode8_location=getattr(req, "mode8_location", None),
             mode8_num_stages=getattr(req, "mode8_num_stages", 5),
             mode8_num_floors=getattr(req, "mode8_num_floors", 2),
+            mode8_use_keyframes=getattr(req, "mode8_use_keyframes", False),
+            mode8_start_frame_path=getattr(req, "mode8_start_frame_path", None),
+            mode8_end_frame_path=getattr(req, "mode8_end_frame_path", None),
             mode9_vehicle_type=getattr(req, "mode9_vehicle_type", None),
             mode9_location=getattr(req, "mode9_location", None),
             mode9_num_stages=getattr(req, "mode9_num_stages", 5),
@@ -288,6 +291,10 @@ class StartRequest(BaseModel):
     mode8_house_style: str | None = None  # "modern", "contemporary", "minimalist", "scandinavian", "cottage", "villa", "farmhouse", "colonial", "victorian", "mediterranean", "cabin", "log_house", "chalet", "adobe", "mansion", "estate"
     mode8_location: str | None = None  # "suburbs", "urban_edge", "planned_community", "forest", "wooded_area", "seaside", "lakefront", "riverside", "countryside", "farmland", "vineyard", "mountains", "hillside", "valley", "desert", "oasis", "tropical", "island"
     mode8_num_stages: int = 5
+    mode8_num_floors: int = 2
+    mode8_use_keyframes: bool = False
+    mode8_start_frame_path: str | None = None
+    mode8_end_frame_path: str | None = None
     # Mode 9: Vehicle Assembly Timelapse
     mode9_vehicle_type: str | None = None  # "airplane_passenger", "airplane_private", "car_modern", "car_sport", "truck_cargo", "tractor", "excavator", "ship_cargo", "yacht", "helicopter", "drone", and 21 more...
     mode9_location: str | None = None  # "construction_site", "factory", "shipyard", "hangar", "empty_field", "forest_clearing", "desert", "mountain_valley", "city_outskirts", "port", and 9 more...
@@ -328,7 +335,22 @@ def _validate_start_request(req: StartRequest) -> None:
     elif req.mode == 5:
         if not req.topic or not req.topic.strip():
             raise HTTPException(400, "Mode 5: введите тему для длинного видео")
-    elif req.mode in (6, 7, 8, 9, 10):
+    elif req.mode == 8:
+        if getattr(req, "mode8_use_keyframes", False):
+            sp = (getattr(req, "mode8_start_frame_path", None) or "").strip()
+            ep = (getattr(req, "mode8_end_frame_path", None) or "").strip()
+            if not sp or not ep:
+                raise HTTPException(
+                    400,
+                    "Mode 8 (keyframes): загрузите стартовый и конечный кадр",
+                )
+            for label, pth in (("стартового кадра", sp), ("конечного кадра", ep)):
+                if not Path(pth).is_file():
+                    raise HTTPException(
+                        400,
+                        f"Mode 8: файл {label} не найден на сервере",
+                    )
+    elif req.mode in (6, 7, 9, 10):
         pass
     elif not req.topic and not req.auto_topic:
         raise HTTPException(400, "Provide 'topic' or set 'auto_topic: true'")
@@ -346,6 +368,13 @@ def _ensure_regenerate_assets_exist(req: StartRequest) -> None:
             raise HTTPException(400, "Фото «дом ДО» не найдено — перегенерация невозможна.")
         if req.mode3_end_image_path and not Path(req.mode3_end_image_path).is_file():
             raise HTTPException(400, "Фото «дом ПОСЛЕ» не найдено — перегенерация невозможна.")
+    if req.mode == 8 and getattr(req, "mode8_use_keyframes", False):
+        for label, pth in (
+            ("стартового кадра", getattr(req, "mode8_start_frame_path", None)),
+            ("конечного кадра", getattr(req, "mode8_end_frame_path", None)),
+        ):
+            if pth and not Path(pth).is_file():
+                raise HTTPException(400, f"Файл {label} для Mode 8 не найден — перегенерация невозможна.")
     if req.reference_image_path and not Path(req.reference_image_path).is_file():
         raise HTTPException(400, "Референсное изображение не найдено на сервере.")
     if req.custom_title_bg_path and not Path(req.custom_title_bg_path).is_file():

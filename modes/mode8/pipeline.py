@@ -26,6 +26,152 @@ from modes.mode8.video_assembler import assemble_mode8_video
 from modes.mode8.publishing_metadata import generate_publishing_metadata
 
 
+async def _run_mode8_user_keyframes_pipeline(
+    session_id: str,
+    local_only: bool,
+    start_frame_path: str,
+    end_frame_path: str,
+    language: str,
+    control: dict | None,
+) -> dict[str, Any]:
+    """Один ролик FastGen по двум загруженным кадрам (как в UI «Свои keyframes»)."""
+    import asyncio
+
+    from modes.mode8.clickbait_titles import generate_clickbait_title
+    from modes.mode8.video_generator import _build_keyframe_video_prompt, _generate_keyframe_video
+    from pipeline_control import checkpoint
+
+    videos_dir = settings.videos_dir
+    clips_dir = videos_dir / session_id / "clips"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+
+    start_p = Path(start_frame_path).resolve()
+    end_p = Path(end_frame_path).resolve()
+    if not start_p.is_file() or not end_p.is_file():
+        raise FileNotFoundError("Mode 8 keyframes: файлы не найдены")
+
+    await checkpoint(control)
+    logger.info("[Mode8] Режим пользовательских keyframes: один переход start→end")
+
+    minimal_scenario: dict[str, Any] = {
+        "title": "Custom keyframe transition",
+        "house_style": "modern",
+        "location": "suburbs",
+        "num_floors": 2,
+        "house_style_name": "custom",
+        "location_name": "keyframes",
+        "scenes": [],
+    }
+    minimal_scene: dict[str, Any] = {
+        "name_en": "Construction transition",
+        "start_state_en": "initial frame composition",
+        "end_state_en": "final frame composition",
+        "action_en": "smooth timelapse transition strictly matching both keyframes",
+        "workers_en": "construction crew active on site",
+        "machinery_en": "generic construction equipment",
+    }
+
+    video_prompt = _build_keyframe_video_prompt(minimal_scene, minimal_scenario, language)
+    clip_path = await _generate_keyframe_video(
+        index=0,
+        prompt=video_prompt,
+        start_frame=start_p,
+        end_frame=end_p,
+        output_dir=clips_dir,
+    )
+    if not clip_path or not Path(clip_path).exists():
+        raise RuntimeError("[Mode8] Не удалось сгенерировать видео по двум кадрам")
+
+    await checkpoint(control)
+    output_path = videos_dir / f"video_{session_id}.mp4"
+    loop = asyncio.get_event_loop()
+    assembled_path, video_duration = await loop.run_in_executor(
+        None,
+        functools.partial(
+            assemble_mode8_video,
+            [clip_path],
+            output_path,
+            title="Custom keyframes",
+            preview_image_path=None,
+            preview_duration=0.3,
+        ),
+    )
+
+    video_path = str(assembled_path.resolve())
+    logger.success(f"[Mode8] Custom keyframes | duration={video_duration:.2f}s")
+
+    house_style_name = "custom"
+    location_name = "keyframes"
+    title = "House timelapse (custom keyframes)"
+    stages: list[Any] = []
+
+    logger.info("Step 4/4 - Publishing metadata (custom keyframes)...")
+    clickbait_title_ru = generate_clickbait_title(
+        content_type="house",
+        style_or_type=house_style_name,
+        location=location_name,
+        duration_seconds=video_duration,
+        language="ru",
+    )
+    clickbait_title_en = generate_clickbait_title(
+        content_type="house",
+        style_or_type=house_style_name,
+        location=location_name,
+        duration_seconds=video_duration,
+        language="en",
+    )
+    publishing_ru_raw = await generate_publishing_metadata(
+        house_style=house_style_name,
+        location=location_name,
+        stages=stages,
+        title=title,
+        language="ru",
+        force_title=clickbait_title_ru,
+    )
+    publishing_en_raw = await generate_publishing_metadata(
+        house_style=house_style_name,
+        location=location_name,
+        stages=stages,
+        title=title,
+        language="en",
+        force_title=clickbait_title_en,
+    )
+    publishing = {"ru": publishing_ru_raw, "en": publishing_en_raw}
+
+    enriched_scenario = {
+        **minimal_scenario,
+        "custom_keyframes": True,
+        "start_frame": str(start_p),
+        "end_frame": str(end_p),
+    }
+
+    from agents.topics_history import mark_topic_used
+
+    mark_topic_used(
+        topic=f"[Timelapse] {title}",
+        session_id=session_id,
+        video_path=str(assembled_path),
+        video_angle="mode=custom_keyframes",
+        publishing=publishing,
+    )
+
+    _ = local_only
+    logger.success(f"=== Mode 8 CUSTOM KEYFRAMES DONE | video={video_path} ===")
+
+    return {
+        "session_id": session_id,
+        "video_path": video_path,
+        "topic": title,
+        "scenario": enriched_scenario,
+        "house_style": house_style_name,
+        "location": location_name,
+        "stages": 0,
+        "trend": None,
+        "report": None,
+        "publishing": publishing,
+    }
+
+
 async def run_mode8_pipeline(
     session_id: str | None = None,
     local_only: bool = True,
@@ -35,6 +181,10 @@ async def run_mode8_pipeline(
     num_floors: int = 2,  # NEW: Number of floors
     language: str = "ru",
     control: dict | None = None,
+    *,
+    use_keyframes: bool = False,
+    start_frame_path: str | None = None,
+    end_frame_path: str | None = None,
 ) -> dict[str, Any]:
     """
     Run the House Building Timelapse video pipeline.
@@ -59,6 +209,19 @@ async def run_mode8_pipeline(
     videos_dir = settings.videos_dir
     clips_dir = videos_dir / session_id / "clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
+
+    sf = (start_frame_path or "").strip()
+    ef = (end_frame_path or "").strip()
+    if use_keyframes and sf and ef:
+        logger.info(f"=== Mode 8 Pipeline | CUSTOM KEYFRAMES | session={session_id} ===")
+        return await _run_mode8_user_keyframes_pipeline(
+            session_id=session_id,
+            local_only=local_only,
+            start_frame_path=sf,
+            end_frame_path=ef,
+            language=language,
+            control=control,
+        )
 
     logger.info(
         f"=== Mode 8 Pipeline | House Building Timelapse | "
