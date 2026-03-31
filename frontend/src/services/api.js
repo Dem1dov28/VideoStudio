@@ -114,6 +114,12 @@ export const api = {
   setRateLimit: (limit) => request('/api/rate-limit/set', { method: 'POST', body: JSON.stringify({ limit }) }),
   checkRateLimit: () => request('/api/rate-limit/check', { method: 'POST' }),
   incrementRateLimit: () => request('/api/rate-limit/increment', { method: 'POST' }),
+  // Queue API (server-side)
+  queueAdd: (payload) => request('/api/queue/add', { method: 'POST', body: JSON.stringify({ payload }) }),
+  queueStatus: () => request('/api/queue/status'),
+  queueDelete: (itemId) => request(`/api/queue/${itemId}`, { method: 'DELETE' }),
+  queueMove: (itemId, direction) =>
+    request(`/api/queue/${itemId}/move`, { method: 'POST', body: JSON.stringify({ direction }) }),
 };
 
 /** Subscribe to SSE log stream. Returns cleanup function. */

@@ -18,6 +18,7 @@ from typing import Any
 
 from loguru import logger
 from pydantic import BaseModel
+from agents.topics_history import get_used_topics
 
 from modes.mode8.architectural_variations import (
     get_architectural_variation,
@@ -978,6 +979,106 @@ def select_location(preferred: str | None = None) -> str:
     return "suburbs"
 
 
+def _extract_recent_mode8_pairs(limit: int = 30) -> list[tuple[str, str]]:
+    """
+    Extract recent (style, location) pairs from topics history.
+    Uses mode8-specific marker from video_angle:
+    "style=...,location=...,stages=...,duration=...".
+    """
+    items = get_used_topics()
+    if not items:
+        return []
+    pairs: list[tuple[str, str]] = []
+    def _normalize_style(value: str) -> str:
+        v = (value or "").strip().lower()
+        if v in HOUSE_STYLES:
+            return v
+        for key, meta in HOUSE_STYLES.items():
+            if v == str(meta.get("name", "")).strip().lower():
+                return key
+            if v == str(meta.get("name_en", "")).strip().lower():
+                return key
+        return ""
+
+    def _normalize_location(value: str) -> str:
+        v = (value or "").strip().lower()
+        if v in LOCATIONS:
+            return v
+        for key, meta in LOCATIONS.items():
+            if v == str(meta.get("name", "")).strip().lower():
+                return key
+            if v == str(meta.get("name_en", "")).strip().lower():
+                return key
+        return ""
+
+    for entry in reversed(items):
+        angle = str(entry.get("video_angle", ""))
+        if "style=" not in angle or "location=" not in angle:
+            continue
+        style = ""
+        location = ""
+        for part in angle.split(","):
+            part = part.strip()
+            if part.startswith("style="):
+                style = part.split("=", 1)[1].strip()
+            elif part.startswith("location="):
+                location = part.split("=", 1)[1].strip()
+        style_key = _normalize_style(style)
+        location_key = _normalize_location(location)
+        if style_key and location_key:
+            pairs.append((style_key, location_key))
+            if len(pairs) >= limit:
+                break
+    return pairs
+
+
+def _apply_diversity_policy(style_key: str, loc_key: str) -> tuple[str, str]:
+    """
+    Anti-repeat policy:
+    - If the selected pair is overused in recent history, switch to least-used alternatives.
+    - Honors user fixed choice if explicit non-random values were already resolved upstream.
+    """
+    recent_pairs = _extract_recent_mode8_pairs(limit=30)
+    if not recent_pairs:
+        return style_key, loc_key
+
+    pair_count = sum(1 for s, l in recent_pairs if s == style_key and l == loc_key)
+    if pair_count <= 1:
+        return style_key, loc_key
+
+    style_counts: dict[str, int] = {}
+    location_counts: dict[str, int] = {}
+    pair_counts: dict[tuple[str, str], int] = {}
+    for s, l in recent_pairs:
+        style_counts[s] = style_counts.get(s, 0) + 1
+        location_counts[l] = location_counts.get(l, 0) + 1
+        pair_counts[(s, l)] = pair_counts.get((s, l), 0) + 1
+
+    style_candidates = sorted(
+        HOUSE_STYLES.keys(),
+        key=lambda s: (style_counts.get(s, 0), random.random()),
+    )
+    location_candidates = sorted(
+        LOCATIONS.keys(),
+        key=lambda l: (location_counts.get(l, 0), random.random()),
+    )
+
+    best = (style_key, loc_key)
+    best_score = pair_counts.get((style_key, loc_key), 0) * 10 + style_counts.get(style_key, 0) + location_counts.get(loc_key, 0)
+    for s in style_candidates[:8]:
+        for l in location_candidates[:8]:
+            score = pair_counts.get((s, l), 0) * 10 + style_counts.get(s, 0) + location_counts.get(l, 0)
+            if score < best_score:
+                best = (s, l)
+                best_score = score
+    if best != (style_key, loc_key):
+        logger.info(
+            f"[Mode8 Diversity] Rebalanced pair to reduce repeats: "
+            f"{style_key}/{loc_key} -> {best[0]}/{best[1]}"
+        )
+    return best
+
+
 def get_stage_sequence(num_stages: int) -> list[str]:
     """
     Get appropriate stage sequence based on number of stages.
@@ -1400,6 +1501,9 @@ async def generate_building_scenario(
     # Select style and location
     style_key = select_house_style(house_style)
     loc_key = select_location(location)
+    # Diversity policy applies only when user did not fix both values explicitly.
+    if (house_style in (None, "random")) or (location in (None, "random")):
+        style_key, loc_key = _apply_diversity_policy(style_key, loc_key)
 
     style = HOUSE_STYLES[style_key]
     loc = LOCATIONS[loc_key]

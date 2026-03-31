@@ -209,7 +209,8 @@ async def _count_error_blocks(page: Page) -> int:
         }""")
         return int(count) if count else 0
     except Exception as e:
-        logger.debug(f"[FastGen] Could not count error blocks: {e}")
+        if not _is_browser_closed_error(e):
+            logger.debug(f"[FastGen] Could not count error blocks: {e}")
         return 0
 
 
@@ -253,6 +254,7 @@ def _is_browser_closed_error(exc: BaseException) -> bool:
         or "target closed" in msg
         or "browser has been closed" in msg
         or "context has been closed" in msg
+        or "connection closed" in msg
     )
 
 

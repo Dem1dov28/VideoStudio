@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../services/api';
 
 const RateLimitContext = createContext(null);
@@ -11,6 +11,16 @@ const STORAGE_KEY = 'rateLimit';
 function getCurrentHourKey() {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}-${now.getHours()}`;
+}
+
+/**
+ * Milliseconds until next hour boundary (HH:00:00.000)
+ */
+function getMsUntilNextHour() {
+  const now = new Date();
+  const next = new Date(now);
+  next.setMinutes(60, 0, 0);
+  return Math.max(0, next.getTime() - now.getTime());
 }
 
 /**
@@ -63,14 +73,22 @@ export function RateLimitProvider({ children }) {
   }));
 
   const [isInitialized, setIsInitialized] = useState(false);
+  const stateRef = useRef(state);
+  const backendAvailableRef = useRef(true);
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
   /**
-   * Fetch rate limit status from backend and initialize from localStorage
+   * Fetch rate limit status + server-side queue.
+   * localStorage is kept only as a fallback when backend is unavailable.
    */
   const fetchRateLimitStatus = useCallback(async () => {
     try {
       // Get backend status
       const backendStatus = await api.getRateLimitStatus();
+      const backendQueue = await api.queueStatus();
       
       // Load from localStorage
       const stored = loadFromStorage();
@@ -80,11 +98,12 @@ export function RateLimitProvider({ children }) {
         limit: stored?.limit ?? backendStatus.limit,
         used: backendStatus.used,
         remaining: backendStatus.remaining,
-        hourKey: backendStatus.hourKey,
-        nextReset: backendStatus.next_reset,
-        queue: stored?.queue || [],
+        hourKey: backendStatus.hour_key ?? backendStatus.hourKey,
+        nextReset: backendStatus.next_reset ?? backendStatus.nextReset,
+        queue: backendQueue?.queue || stored?.queue || [],
       }));
       
+      backendAvailableRef.current = true;
       setIsInitialized(true);
     } catch (error) {
       // Network error - server unavailable, use localStorage only
@@ -100,6 +119,7 @@ export function RateLimitProvider({ children }) {
           queue: stored.queue || [],
         }));
       }
+      backendAvailableRef.current = false;
       setIsInitialized(true);
     }
   }, []); // NO dependencies - stable function
@@ -160,7 +180,20 @@ export function RateLimitProvider({ children }) {
       
       if (!checkResult.allowed) {
         // Limit reached - add to queue
-        return addToQueue(payload);
+        try {
+          const res = await api.queueAdd(payload);
+          const qs = await api.queueStatus().catch(() => null);
+          setState(prev => ({
+            ...prev,
+            queue: qs?.queue ?? prev.queue,
+            isChecking: false,
+          }));
+          return { status: 'queued', queue_item: res?.item };
+        } catch {
+          const q = addToQueue(payload);
+          setState(prev => ({ ...prev, isChecking: false }));
+          return q;
+        }
       }
 
       // Start pipeline immediately
@@ -202,7 +235,14 @@ export function RateLimitProvider({ children }) {
         if (pipelineError.response?.status === 429 || pipelineError.message?.includes('rate_limit')) {
           // Hour changed or race condition - add to queue
           console.warn('[RateLimit] Race condition detected, adding to queue');
-          return addToQueue(payload);
+          try {
+            const res = await api.queueAdd(payload);
+            const qs = await api.queueStatus().catch(() => null);
+            if (qs?.queue) setState(prev => ({ ...prev, queue: qs.queue }));
+            return { status: 'queued', queue_item: res?.item };
+          } catch {
+            return addToQueue(payload);
+          }
         }
         
         throw pipelineError;
@@ -250,251 +290,168 @@ export function RateLimitProvider({ children }) {
   }, []);
 
   /**
-   * Add video to queue and try to start immediately if limit available
+   * Add video to SERVER queue (persistent).
+   * Server worker will auto-start items when allowed (including at HH:00).
    */
   const queueVideo = useCallback(async (payload) => {
-    const queueItem = {
-      id: Date.now(),
-      topic: payload.topic || `Видео #${Date.now()}`,
-      mode: payload.mode || 1,
-      timestamp: Date.now(),
-      payload: { ...payload },
-    };
-
-    // First, check if we can start immediately
-    const hasAvailableSlots = state.used < state.limit;
-    
-    if (hasAvailableSlots) {
-      console.log(`[RateLimit] queueVideo: available slots detected (used=${state.used}, limit=${state.limit}), starting immediately`);
-      
-      try {
-        // Try to start immediately
-        const startResult = await api.startPipeline(payload);
-        
-        // Update usage
-        setState(prev => {
-          const newUsed = prev.used + 1;
-          const newRemaining = prev.limit - newUsed;
-          
-          const newState = {
-            ...prev,
-            used: newUsed,
-            remaining: newRemaining,
-          };
-          
-          saveToStorage({
-            limit: prev.limit,
-            hourKey: prev.hourKey,
-            used: newUsed,
-            queue: prev.queue,
-            lastReset: new Date().toISOString(),
-          });
-          
-          return newState;
-        });
-        
-        console.log(`[RateLimit] Started immediately: session=${startResult.session_id}`);
-        
-        return {
-          status: 'started',
-          session_id: startResult.session_id,
-        };
-      } catch (error) {
-        console.error('[RateLimit] Failed to start immediately, adding to queue:', error);
-        // If failed, add to queue anyway
+    try {
+      const res = await api.queueAdd(payload);
+      const qs = await api.queueStatus().catch(() => null);
+      if (qs?.queue) {
+        setState(prev => ({ ...prev, queue: qs.queue }));
       }
-    }
-    
-    // No available slots or start failed - add to queue
-    console.log(`[RateLimit] queueVideo: adding to queue (used=${state.used}, limit=${state.limit})`);
-    
-    setState(prev => {
-      const newQueue = [...prev.queue, queueItem];
-      
-      saveToStorage({
-        limit: prev.limit,
-        hourKey: prev.hourKey,
-        used: prev.used,
-        queue: newQueue,
-        lastReset: new Date().toISOString(),
-      });
-      
       return {
-        ...prev,
-        queue: newQueue,
+        status: 'queued',
+        queue_item: res?.item,
       };
-    });
-
-    return {
-      status: 'queued',
-      queue_item: queueItem,
-    };
-  }, [state.used, state.limit]);
+    } catch (e) {
+      // Fallback: local queue if server is unavailable
+      return addToQueue(payload);
+    }
+  }, [addToQueue]);
 
   /**
    * Remove video from queue
    */
   const removeFromQueue = useCallback((index) => {
-    setState(prev => {
-      const newQueue = prev.queue.filter((_, i) => i !== index);
-      
-      // Save to localStorage
-      saveToStorage({
-        limit: prev.limit,
-        hourKey: prev.hourKey,
-        used: prev.used,
-        queue: newQueue,
-        lastReset: new Date().toISOString(),
+    const current = stateRef.current;
+    const item = current.queue?.[index];
+    const id = item?.id || item?.item_id;
+
+    if (!id) {
+      // fallback: local only
+      setState(prev => ({ ...prev, queue: prev.queue.filter((_, i) => i !== index) }));
+      return;
+    }
+
+    api.queueDelete(id)
+      .then(() => api.queueStatus())
+      .then((qs) => {
+        if (qs?.queue) setState(prev => ({ ...prev, queue: qs.queue }));
+      })
+      .catch(() => {
+        // fallback: local only
+        setState(prev => ({ ...prev, queue: prev.queue.filter((_, i) => i !== index) }));
       });
-      
-      return {
-        ...prev,
-        queue: newQueue,
-      };
-    });
   }, []);
 
   /**
    * Process queue when hour changes
    */
   const processQueue = useCallback(async () => {
-    console.log(`[RateLimit] Starting queue processing: queue=${state.queue.length}, used=${state.used}, limit=${state.limit}`);
-    
-    // Check if we have available slots and items in queue
-    const hasAvailableSlots = state.used < state.limit;
-    const hasQueueItems = state.queue.length > 0;
-    
-    if (!hasAvailableSlots || !hasQueueItems) {
-      console.log(`[RateLimit] Queue processing skipped: used=${state.used}, limit=${state.limit}, queue=${state.queue.length}`);
+    // Server is source of truth; worker handles queue starts.
+    if (backendAvailableRef.current) {
+      await fetchRateLimitStatus().catch(() => {});
       return;
     }
 
-    // Process videos one by one until limit reached or queue empty
+    const stored = loadFromStorage();
+    const live = stateRef.current;
+
+    const limit = stored?.limit ?? live.limit;
+    let used = stored?.used ?? live.used;
+    let queue = [...(stored?.queue ?? live.queue)];
+    const hourKey = stored?.hourKey ?? live.hourKey;
+
+    console.log(`[RateLimit] Starting queue processing: queue=${queue.length}, used=${used}, limit=${limit}`);
+
+    if (used >= limit || queue.length === 0) {
+      console.log(`[RateLimit] Queue processing skipped: used=${used}, limit=${limit}, queue=${queue.length}`);
+      return;
+    }
+
     let processedCount = 0;
     let errorCount = 0;
-    const maxAttempts = Math.min(state.queue.length, state.limit - state.used);
-    
+    const maxAttempts = Math.min(queue.length, limit - used);
+
     console.log(`[RateLimit] Will attempt to start ${maxAttempts} video(s) from queue`);
 
     for (let attempt = 0; attempt < maxAttempts && errorCount < 3; attempt++) {
-      // Get current state (not snapshot!) to check remaining slots
-      const currentState = loadFromStorage();
-      const currentUsed = currentState?.used ?? state.used;
-      const currentLimit = currentState?.limit ?? state.limit;
-      
-      if (currentUsed >= currentLimit) {
-        console.log(`[RateLimit] Queue processing stopped: limit reached (${currentUsed}/${currentLimit})`);
-        break;
-      }
-      
-      // Get first item from queue (always index 0 since we remove after each success)
-      const queue = loadFromStorage()?.queue || [];
-      if (queue.length === 0) {
-        console.log(`[RateLimit] Queue processing stopped: queue is empty`);
-        break;
-      }
-      
-      const item = queue[0]; // Always take first item
-      if (!item) continue;
+      if (used >= limit || queue.length === 0) break;
+
+      const item = queue[0];
+      if (!item) break;
 
       try {
         console.log(`[RateLimit] Starting queue item #${attempt + 1}: ${item.topic} (Mode ${item.mode})`);
-        
-        // Start the pipeline
-        const startResult = await api.startPipeline(item.payload);
-        
-        // Update usage and remove from queue
-        setState(prev => {
-          const newUsed = prev.used + 1;
-          const newRemaining = prev.limit - newUsed;
-          
-          // Remove FIRST item from queue (index 0)
-          const newQueue = prev.queue.filter((_, idx) => idx !== 0);
-          
-          const newState = {
-            ...prev,
-            used: newUsed,
-            remaining: newRemaining,
-            queue: newQueue,
-          };
-          
-          // Save to localStorage
-          saveToStorage({
-            limit: prev.limit,
-            hourKey: prev.hourKey,
-            used: newUsed,
-            queue: newQueue,
-            lastReset: new Date().toISOString(),
-          });
-          
-          console.log(`[RateLimit] Started successfully: used=${newUsed}, remaining=${newRemaining}, queue_left=${newQueue.length}`);
-          return newState;
-        });
-        
+        await api.startPipeline(item.payload);
+        queue = queue.slice(1);
+        used += 1;
         processedCount++;
-        
-        // Wait a bit between starts to avoid race conditions
+
         if (attempt < maxAttempts - 1) {
-          await new Promise(resolve => setTimeout(resolve, 2000));
+          await new Promise(resolve => setTimeout(resolve, 1500));
         }
-        
       } catch (error) {
-        console.error(`[RateLimit] Failed to start queue item:`, error);
+        console.error('[RateLimit] Failed to start queue item:', error);
         errorCount++;
-        
-        // Check if it's a rate limit error - if so, stop processing
-        if (error.response?.status === 429 || error.message?.includes('rate_limit')) {
+
+        if (error?.status === 429 || error?.response?.status === 429 || error?.message?.includes('rate_limit')) {
           console.warn('[RateLimit] Queue processing stopped: rate limit reached');
-          // Don't remove from queue - will retry next hour
-          return; // Stop processing more items
+          break;
         }
-        
-        // Other errors - leave in queue and continue to next
+
         if (errorCount >= 3) {
           console.error('[RateLimit] Too many errors, stopping queue processing');
-          return;
+          break;
         }
       }
     }
-    
+
+    setState(prev => ({
+      ...prev,
+      used,
+      remaining: Math.max(0, limit - used),
+      queue,
+      hourKey,
+    }));
+
+    saveToStorage({
+      limit,
+      hourKey,
+      used,
+      queue,
+      lastReset: new Date().toISOString(),
+    });
+
     console.log(`[RateLimit] Queue processing completed: started=${processedCount}, errors=${errorCount}`);
-  }, [state.queue, state.limit, state.used, state.remaining]);
+  }, [fetchRateLimitStatus]);
 
   /**
    * Check if hour has changed and reset if needed
    */
   const checkNewHour = useCallback(() => {
-    const currentHourKey = getCurrentHourKey();
-    
-    // Check locally first (no API call)
-    if (currentHourKey !== state.hourKey) {
-      console.log(`[RateLimit] Hour changed: ${state.hourKey} → ${currentHourKey}`);
-      
-      // Reset usage
-      setState(prev => ({
-        ...prev,
-        used: 0,
-        remaining: prev.limit,
-        hourKey: currentHourKey,
-      }));
-      
-      // Save to localStorage
-      saveToStorage({
-        limit: state.limit,
-        hourKey: currentHourKey,
-        used: 0,
-        queue: state.queue,
-        lastReset: new Date().toISOString(),
-      });
-      
-      // Process queue automatically after 1 second
-      setTimeout(() => processQueue(), 1000);
-      
-      // DO NOT call fetchRateLimitStatus here - it causes infinite loop!
-      // The state update above is sufficient
+    if (backendAvailableRef.current) {
+      fetchRateLimitStatus().catch(() => {});
+      return;
     }
-    // If hour hasn't changed, do nothing (no API call)
-  }, [state.hourKey, state.limit, state.queue, processQueue]);
+
+    const currentHourKey = getCurrentHourKey();
+    const prevState = stateRef.current;
+
+    if (currentHourKey === prevState.hourKey) return;
+
+    console.log(`[RateLimit] Hour changed: ${prevState.hourKey} → ${currentHourKey}`);
+
+    setState(prev => ({
+      ...prev,
+      used: 0,
+      remaining: prev.limit,
+      hourKey: currentHourKey,
+    }));
+
+    saveToStorage({
+      limit: prevState.limit,
+      hourKey: currentHourKey,
+      used: 0,
+      queue: prevState.queue,
+      lastReset: new Date().toISOString(),
+    });
+
+    setTimeout(() => {
+      processQueue();
+    }, 400);
+  }, [processQueue, fetchRateLimitStatus]);
 
   /**
    * Initialize and setup polling
@@ -502,15 +459,44 @@ export function RateLimitProvider({ children }) {
   useEffect(() => {
     // Initial fetch
     fetchRateLimitStatus();
-    
-    // Poll every 60 seconds to check for hour change
-    const interval = setInterval(() => {
-      checkNewHour();
-    }, 60000); // 60 seconds
-    
-    return () => clearInterval(interval);
+
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Empty deps - only run on mount
+
+  /**
+   * Run hour check exactly at HH:00 and keep a fallback poll.
+   * This prevents "stuck queue" when 60s interval drifts.
+   */
+  useEffect(() => {
+    if (!isInitialized) return undefined;
+
+    let timeoutId;
+
+    const scheduleNextBoundaryCheck = () => {
+      const delay = getMsUntilNextHour() + 200;
+      timeoutId = setTimeout(() => {
+        checkNewHour();
+        scheduleNextBoundaryCheck();
+      }, delay);
+    };
+
+    scheduleNextBoundaryCheck();
+    const fallbackInterval = setInterval(checkNewHour, 30000);
+
+    return () => {
+      clearTimeout(timeoutId);
+      clearInterval(fallbackInterval);
+    };
+  }, [isInitialized, checkNewHour]);
+
+  // Keep UI synchronized with server queue/status.
+  useEffect(() => {
+    if (!isInitialized) return undefined;
+    const interval = setInterval(() => {
+      fetchRateLimitStatus().catch(() => {});
+    }, 10000);
+    return () => clearInterval(interval);
+  }, [isInitialized, fetchRateLimitStatus]);
 
   const value = {
     ...state,

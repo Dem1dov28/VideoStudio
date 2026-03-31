@@ -11,6 +11,7 @@ Mode 7: Animal Keyboard Videos
 Mode 8: House Building Timelapse
 Mode 9: Vehicle Assembly Timelapse
 Mode 10: Beach cleanup timelapse (логика как mode 8)
+Mode 11: Monument deconstruction timelapse
 """
 
 from __future__ import annotations
@@ -61,6 +62,8 @@ async def _run_pipeline_wrapped(
     mode10_beach_type: str | None = None,
     mode10_coast_setting: str | None = None,
     mode10_num_stages: int = 5,
+    mode11_structure_type: str | None = None,
+    mode11_num_stages: int = 5,
     control: dict | None = None,
 ) -> dict[str, Any]:
     """Internal pipeline runner with session context."""
@@ -77,6 +80,19 @@ async def _run_pipeline_wrapped(
             coast_setting=mode10_coast_setting,
             num_stages=mode10_num_stages,
             language=language or "ru",
+            control=control,
+        )
+
+    # Mode 11: Monument Deconstruction Timelapse
+    if mode == 11:
+        await checkpoint(control)
+        from modes.mode11.pipeline import run_mode11_pipeline
+        return await run_mode11_pipeline(
+            session_id=session_id,
+            local_only=local_only,
+            structure_type=mode11_structure_type,
+            language=language or "ru",
+            num_stages=mode11_num_stages,
             control=control,
         )
 
@@ -281,6 +297,8 @@ async def run_pipeline(
     mode10_beach_type: str | None = None,
     mode10_coast_setting: str | None = None,
     mode10_num_stages: int = 5,
+    mode11_structure_type: str | None = None,
+    mode11_num_stages: int = 5,
     control: dict | None = None,
 ) -> dict[str, Any]:
     """Route to the appropriate pipeline by mode with session context."""
@@ -328,6 +346,11 @@ async def run_pipeline(
             mode9_vehicle_type=mode9_vehicle_type,
             mode9_location=mode9_location,
             mode9_num_stages=mode9_num_stages,
+            mode10_beach_type=mode10_beach_type,
+            mode10_coast_setting=mode10_coast_setting,
+            mode10_num_stages=mode10_num_stages,
+            mode11_structure_type=mode11_structure_type,
+            mode11_num_stages=mode11_num_stages,
             control=control,
         )
     finally:

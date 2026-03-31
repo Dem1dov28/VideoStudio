@@ -214,20 +214,15 @@ VIDEO_PROMPT_GENERATION_PROMPT = """You are an expert AI video prompt engineer f
 
 TASK: Generate detailed structured video prompt (150-180 words) for transition: {from_stage_name} -> {to_stage_name}.
 
-⚠️ CRITICAL RULE #0 - HOUSE STRUCTURE STABILITY ABSOLUTE (MOST IMPORTANT):
-The ENTIRE HOUSE STRUCTURE MUST REMAIN 100% UNCHANGED throughout this video!
+⚠️ CRITICAL RULE #0 - PHYSICAL CONSISTENCY (MOST IMPORTANT):
+This transition MUST move from the "from stage" frame to the "to stage" frame through realistic construction work.
 
-**ARCHITECTURAL ELEMENTS THAT CANNOT CHANGE:**
-- ROOF: Shape, slope, material CANNOT change (flat OR pitched OR gabled - whatever exists, stays IDENTICAL)
-- WALLS: Height, width, position CANNOT change (walls are FROZEN)
-- WINDOWS/DOORS: Size, location, style CANNOT change (if present, they stay FIXED)
-- FOUNDATION: Dimensions CANNOT change (foundation is STATIC)
-- **NUMBER OF FLOORS: MUST STAY EXACTLY {num_floors} {floor_word} - CANNOT add or remove floors during video**
-- The house does NOT grow, modify, or transform during this video
-- ONLY workers and machinery move around the FIXED structure
-- Think: house is a STATIC PHOTO - workers are DYNAMIC overlay
-- Camera captures workers working, NOT house changing
-- House structure is LOCKED - only construction ACTIVITY happens around it
+**ARCHITECTURAL CONSISTENCY CONSTRAINTS:**
+- House identity must remain the same (same project, same footprint/orientation)
+- Structural changes are ALLOWED only when they match the target stage (from → to)
+- No magical instant transformations; every change must be caused by visible workers/equipment
+- **NUMBER OF FLOORS: MUST STAY EXACTLY {num_floors} {floor_word} across this transition**
+- The model must show believable step-by-step construction progression
 
 IMAGE PROMPTS (visual reference - these define the FIXED structure):
 - From Stage: {from_image_prompt}
@@ -251,7 +246,7 @@ OUTPUT FORMAT (STRICT STRUCTURE WITH LINE BREAKS):
 • Fixed tripod (X=0.0m, Y=8.0m, Z=25.0m), 35mm focal length
 • Horizon at 60% from bottom, elevated viewpoint
 • Sky, trees, landscape unchanged across frames
-• ONLY workers/machinery move - house structure FROZEN
+• House identity preserved; structural progress follows from-stage to to-stage
 • ENTIRE house fully visible with surrounding landscape
 
 **KEY VISUAL CHANGES** (3 bullets - main focus, detailed):
@@ -309,17 +304,15 @@ CRITICAL RULES:
     ❌ WRONG: "windows appear in walls"
     ✅ CORRECT: "workers install window frames into openings"
 
-13. HOUSE STRUCTURE IS FIXED:
-    - Roof shape (flat/pitched/gabled) - WHATEVER EXISTS, STAYS SAME
-    - Wall dimensions - WHATEVER EXISTS, STAYS SAME
-    - Window/door locations - WHATEVER EXISTS, STAYS SAME
-    - Foundation size - WHATEVER EXISTS, STAYS SAME
-    - **Number of floors ({num_floors} {floor_word}) - WHATEVER EXISTS, STAYS SAME - CANNOT add/remove floors**
-    - You CANNOT change architectural elements - ONLY workers move
+13. HOUSE CONSISTENCY + TARGET STAGE MATCH:
+    - Keep same house identity (footprint/orientation/style family)
+    - Allow only those structural changes that move scene from FROM stage to TO stage
+    - **Number of floors ({num_floors} {floor_word}) must stay unchanged**
+    - No unrelated redesigns or random geometry jumps
 
 14. WORD ALLOCATION MATTERS: Don't spend 100 words on first 2 sections - save words for KEY VISUAL CHANGES and LIGHTING!
 
-Write in English. Generate EVERY section. Balance word count across all sections. Focus on WORKER ACTIVITY around FIXED structure."""""
+Write in English. Generate EVERY section. Balance word count across all sections. Focus on WORKER ACTIVITY and realistic construction progression."""""
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -526,6 +519,7 @@ class ImagePromptGenerator:
             # Generate prompt with full history
             prompt = await ImagePromptGenerator.generate_single(
                 stage=stage,
+                scenario=scenario,
                 stage_context=stage_context,
                 scenario_context=context,
                 previous_prompts=previous_prompts,
@@ -543,6 +537,7 @@ class ImagePromptGenerator:
     @staticmethod
     async def generate_single(
         stage: dict[str, Any],
+        scenario: dict[str, Any],
         stage_context: StageContext | None,
         scenario_context: ScenarioContext,
         previous_prompts: list[GeneratedPrompt],
@@ -585,18 +580,15 @@ class ImagePromptGenerator:
             floor_word = "floors" if num_floors > 1 else "floor"
             
             # === CRITICAL: Get detailed house style and location data ===
-            from modes.mode8.video_generator import HOUSE_STYLE_VISUALS, LOCATION_VISUALS
             from modes.mode8.scenario_writer import HOUSE_STYLES, LOCATIONS, LOCATION_DYNAMIC_FEATURES
             
-            # Get scenario-level style and location
-            house_style_key = stage.get("house_style", scenario_context.style_consistency_notes or "modern")
-            location_key = stage.get("location", scenario_context.location_atmosphere or "suburbs")
-            
-            # Fallback to scenario dict if available
-            scenario_dict = stage.get("_scenario_ref", {})
-            if scenario_dict:
-                house_style_key = scenario_dict.get("house_style", house_style_key)
-                location_key = scenario_dict.get("location", location_key)
+            # Get scenario-level style and location (STRICT keys from scenario, not текстовые поля контекста)
+            house_style_key = scenario.get("house_style", "modern")
+            location_key = scenario.get("location", "suburbs")
+            if house_style_key not in HOUSE_STYLES:
+                house_style_key = "modern"
+            if location_key not in LOCATIONS:
+                location_key = "suburbs"
             
             house_style_data = HOUSE_STYLES.get(house_style_key, HOUSE_STYLES["modern"])
             location_data = LOCATIONS.get(location_key, LOCATIONS["suburbs"])

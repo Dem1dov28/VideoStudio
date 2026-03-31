@@ -67,6 +67,7 @@ const MODES = [
   { id: 8, label: 'House Timelapse', desc: 'Строительство дома: пустой участок → готовый дом', icon: '🏗️' },
   { id: 9, label: 'Vehicle Assembly', desc: 'Сборка транспорта: рама → двигатель → кузов → готовый автомобиль', icon: '🚗' },
   { id: 10, label: 'Уборка пляжа', desc: 'Timelapse: грязный пляж → уборка → чистый берег', icon: '🏖️' },
+  { id: 11, label: 'Выбор постройки', desc: 'Выбор постройки -> генерировать', icon: '🏛️' },
 ];
 
 const KEYBOARD_LABELS = {
@@ -81,11 +82,22 @@ const KEYBOARD_LABELS = {
   liquid_metal: 'Жидкий металл',
 };
 
+const MODE11_STRUCTURES = [
+  { key: 'colosseum', label: '🏟️ Колизей' },
+  { key: 'eiffel_tower', label: '🗼 Эйфелева башня' },
+  { key: 'great_wall', label: '🧱 Великая Китайская стена' },
+  { key: 'giza_pyramids', label: '🔺 Пирамиды Гизы' },
+  { key: 'taj_mahal', label: '🕌 Тадж-Махал' },
+  { key: 'christ_redeemer', label: '✝️ Христос-Искупитель' },
+  { key: 'statue_of_liberty', label: '🗽 Статуя Свободы' },
+  { key: 'hanging_gardens', label: '🌿 Висячие сады Семирамиды' },
+];
+
 export default function Generate() {
   const navigate = useNavigate();
   const { mode, setMode } = useMode();
   const { lang, setLang } = useLanguage();
-  const { checkAndStartVideo, addToQueue, queueVideo } = useRateLimit();
+  const { checkAndStartVideo } = useRateLimit();
 
   /* form state */
   const [topic, setTopic]           = useState('');
@@ -128,6 +140,9 @@ export default function Generate() {
   const [mode10BeachType, setMode10BeachType] = useState('tropical');
   const [mode10CoastSetting, setMode10CoastSetting] = useState('morning_calm');
   const [mode10NumStages, setMode10NumStages] = useState(5);
+  // Mode 11: monument reverse deconstruction
+  const [mode11StructureType, setMode11StructureType] = useState('colosseum');
+  const [mode11NumStages, setMode11NumStages] = useState(5);
 
   /* scenario editing state */
   const [step, setStep]             = useState('select_mode');   // 'select_mode' | 'form' | 'generating_scenario' | 'editing' | 'launching'
@@ -304,7 +319,7 @@ export default function Generate() {
     }
   }
 
-  /* Mode 8: House Building Timelapse — ВСЕГДА в очередь */
+  /* Mode 8: House Building Timelapse */
   async function handleMode8Launch() {
     setError('');
     setStep('launching');
@@ -325,19 +340,22 @@ export default function Generate() {
         mode8_num_stages: mode8NumStages,
         mode8_num_floors: mode8NumFloors,
       };
-      
-      // ALWAYS add to queue (never start immediately)
-      const result = queueVideo(payload);
-      
+
+      const result = await checkAndStartVideo(payload);
+
       setStep('form');
-      setError('Видео добавлено в очередь. Запустится при обновлении лимита.');
+      if (result.status === 'started') {
+        setStartedSession(result.session_id);
+      } else if (result.status === 'queued') {
+        setError('Лимит исчерпан. Видео добавлено в очередь и запустится в следующем часе.');
+      }
     } catch (e) {
       setError(e.message);
       setStep('form');
     }
   }
 
-  /* Mode 10: уборка пляжа — ВСЕГДА в очередь */
+  /* Mode 10: уборка пляжа */
   async function handleMode10Launch() {
     setError('');
     setStep('launching');
@@ -357,19 +375,56 @@ export default function Generate() {
         mode10_coast_setting: mode10CoastSetting === 'random' ? null : mode10CoastSetting,
         mode10_num_stages: mode10NumStages,
       };
-      
-      // ALWAYS add to queue (never start immediately)
-      const result = queueVideo(payload);
-      
+
+      const result = await checkAndStartVideo(payload);
+
       setStep('form');
-      setError('Видео добавлено в очередь. Запустится при обновлении лимита.');
+      if (result.status === 'started') {
+        setStartedSession(result.session_id);
+      } else if (result.status === 'queued') {
+        setError('Лимит исчерпан. Видео добавлено в очередь и запустится в следующем часе.');
+      }
     } catch (e) {
       setError(e.message);
       setStep('form');
     }
   }
 
-  /* Mode 9: Vehicle Assembly Timelapse — ВСЕГДА в очередь */
+  /* Mode 11: reverse monument timelapse */
+  async function handleMode11Launch() {
+    setError('');
+    setStep('launching');
+    try {
+      const payload = {
+        topic: null,
+        auto_topic: false,
+        num_scenes: mode11NumStages,
+        mode11_num_stages: mode11NumStages,
+        use_scenario: false,
+        local_only: localOnly,
+        show_subtitles: false,
+        show_watermark: false,
+        scenario: null,
+        mode: 11,
+        language: 'ru',
+        mode11_structure_type: mode11StructureType,
+      };
+
+      const result = await checkAndStartVideo(payload);
+
+      setStep('form');
+      if (result.status === 'started') {
+        setStartedSession(result.session_id);
+      } else if (result.status === 'queued') {
+        setError('Лимит исчерпан. Видео добавлено в очередь и запустится в следующем часе.');
+      }
+    } catch (e) {
+      setError(e.message);
+      setStep('form');
+    }
+  }
+
+  /* Mode 9: Vehicle Assembly Timelapse */
   async function handleMode9Launch() {
     setError('');
     setStep('launching');
@@ -389,12 +444,15 @@ export default function Generate() {
         mode9_location: mode9Location === 'random' ? null : mode9Location,
         mode9_num_stages: mode9NumStages,
       };
-      
-      // ALWAYS add to queue (never start immediately)
-      const result = queueVideo(payload);
-      
+
+      const result = await checkAndStartVideo(payload);
+
       setStep('form');
-      setError('Видео добавлено в очередь. Запустится при обновлении лимита.');
+      if (result.status === 'started') {
+        setStartedSession(result.session_id);
+      } else if (result.status === 'queued') {
+        setError('Лимит исчерпан. Видео добавлено в очередь и запустится в следующем часе.');
+      }
     } catch (e) {
       setError(e.message);
       setStep('form');
@@ -599,7 +657,7 @@ export default function Generate() {
             {/* Header */}
             <div className="mb-6">
               <h1 className="text-2xl font-bold text-white mb-1">
-                {mode === 3 ? 'Реставрация дома' : mode === 4 ? 'Цитата + фото' : mode === 5 ? 'Длинные видео' : mode === 6 ? 'Cartoon Drama' : mode === 7 ? 'ASMR Keyboard' : mode === 8 ? 'House Timelapse' : mode === 9 ? 'Vehicle Assembly' : mode === 10 ? 'Уборка пляжа' : 'Создать видео'}
+                {mode === 3 ? 'Реставрация дома' : mode === 4 ? 'Цитата + фото' : mode === 5 ? 'Длинные видео' : mode === 6 ? 'Cartoon Drama' : mode === 7 ? 'ASMR Keyboard' : mode === 8 ? 'House Timelapse' : mode === 9 ? 'Vehicle Assembly' : mode === 10 ? 'Уборка пляжа' : mode === 11 ? 'Выбор постройки' : 'Создать видео'}
               </h1>
               <p className="text-[#71717a] text-sm">
                 {mode === 3
@@ -618,6 +676,8 @@ export default function Generate() {
                               ? 'Timelapse сборки транспорта: рама → двигатель → кузов → колёса → готовый автомобиль/самолёт/трактор. Фотореалистичный стиль.'
                               : mode === 10
                                 ? 'Timelapse уборки: загрязнённый пляж → сбор мусора, грабли, техника → чистый берег. Тот же пайплайн, что у стройки дома, но сюжет — экология.'
+                                : mode === 11
+                                  ? 'Выберите постройку и нажмите «Генерировать». Сцены фиксируются в одной локации и одном ракурсе.'
                                 : 'AI-агенты напишут сценарий, сгенерируют изображения и смонтируют видео.'}
               </p>
             </div>
@@ -1504,6 +1564,62 @@ export default function Generate() {
                   </p>
                 </div>
               </div>
+            ) : mode === 11 ? (
+              <div className="space-y-4">
+                <div className="card p-5">
+                  <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
+                    Выбор постройки
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {MODE11_STRUCTURES.map(opt => (
+                      <button
+                        key={opt.key}
+                        type="button"
+                        onClick={() => setMode11StructureType(opt.key)}
+                        className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                          mode11StructureType === opt.key
+                            ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                            : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="card p-5">
+                  <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
+                    Число сцен
+                  </label>
+                  <div className="flex gap-2">
+                    {[5, 7].map(n => (
+                      <button
+                        key={n}
+                        type="button"
+                        onClick={() => setMode11NumStages(n)}
+                        className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                          mode11NumStages === n
+                            ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                            : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                        }`}
+                      >
+                        {n === 5 ? 'Быстро (5 сцен)' : 'Детально (7 сцен)'}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-[#52525b] mt-3">
+                    5 сцен — меньше клипов и быстрее. 7 сцен — полная шкала от целого монумента до площадки.
+                  </p>
+                </div>
+
+                <div className="card p-4 bg-gradient-to-br from-amber-900/20 to-yellow-900/10 border-amber-700/30">
+                  <div className="text-sm font-semibold text-amber-300 mb-2">🏛️ Выбор постройки -> генерировать</div>
+                  <p className="text-xs text-[#a1a1aa]">
+                    Выберите один объект и запускайте генерацию. Локация и ракурс фиксированы на всех кадрах.
+                  </p>
+                </div>
+              </div>
             ) : mode === 4 ? (
               <div className="space-y-4">
                 <div className="card p-5">
@@ -1771,7 +1887,7 @@ export default function Generate() {
                     className="overflow-hidden"
                   >
                     <div className="px-5 pb-5 border-t border-[#27272f] pt-4 space-y-4">
-                      {mode !== 3 && mode !== 4 && mode !== 6 && mode !== 7 && mode !== 8 && mode !== 9 && mode !== 10 && (
+                      {mode !== 3 && mode !== 4 && mode !== 6 && mode !== 7 && mode !== 8 && mode !== 9 && mode !== 10 && mode !== 11 && (
                       <div>
                         <div className="flex justify-between mb-2">
                           <label className="text-xs font-medium text-[#a1a1aa]">Количество сцен</label>
@@ -1796,7 +1912,7 @@ export default function Generate() {
                         <Toggle value={localOnly} onChange={setLocalOnly} />
                       </div>
 
-                      {((mode !== 3 && mode !== 5 && mode !== 7 && mode !== 8 && mode !== 9 && mode !== 10) || mode === 4) ? (
+                      {((mode !== 3 && mode !== 5 && mode !== 7 && mode !== 8 && mode !== 9 && mode !== 10 && mode !== 11) || mode === 4) ? (
                       <div className="flex items-center justify-between">
                         <div>
                           <div className="text-sm font-medium text-[#e4e4f0]">Субтитры</div>
@@ -1808,7 +1924,7 @@ export default function Generate() {
                       </div>
                       ) : null}
 
-                      {mode !== 3 && mode !== 4 && mode !== 7 && mode !== 8 && mode !== 9 && mode !== 10 && (
+                      {mode !== 3 && mode !== 4 && mode !== 7 && mode !== 8 && mode !== 9 && mode !== 10 && mode !== 11 && (
                       <div>
                         <div className="text-sm font-medium text-[#e4e4f0] mb-2">Язык субтитров</div>
                         <div className="text-xs text-[#71717a] mb-2">Язык озвучки и текста на видео</div>
@@ -1917,11 +2033,20 @@ export default function Generate() {
                   className="btn-primary flex-1 flex items-center justify-center gap-2 text-base py-4"
                 >
                   <RiSparklingLine className="text-lg" />
-                  Сгенерировать timelapse
+                  Генерировать
                 </button>
               ) : mode === 10 ? (
                 <button
                   onClick={handleMode10Launch}
+                  disabled={isLoading}
+                  className="btn-primary flex-1 flex items-center justify-center gap-2 text-base py-4"
+                >
+                  <RiSparklingLine className="text-lg" />
+                  Сгенерировать timelapse
+                </button>
+              ) : mode === 11 ? (
+                <button
+                  onClick={handleMode11Launch}
                   disabled={isLoading}
                   className="btn-primary flex-1 flex items-center justify-center gap-2 text-base py-4"
                 >

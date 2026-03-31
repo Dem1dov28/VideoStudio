@@ -23,7 +23,7 @@ export function ModeProvider({ children }) {
     } catch {}
   }, [mode]);
 
-  const setMode = (m) => setModeState([1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(m) ? m : 1);
+  const setMode = (m) => setModeState([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].includes(m) ? m : 1);
 
   return (
     <ModeContext.Provider value={{ mode, setMode }}>

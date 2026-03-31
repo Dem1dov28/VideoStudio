@@ -109,7 +109,7 @@ export default function RateLimitPanel() {
                           {item.topic || `Видео #${String(item.id).slice(-6)}`}
                         </div>
                         <div className="text-[10px] text-[#71717a]">
-                          Mode {item.mode} • {new Date(item.timestamp).toLocaleTimeString()}
+                          Mode {item.mode} • {new Date(item.created_at ? item.created_at * 1000 : item.timestamp).toLocaleTimeString()}
                         </div>
                       </div>
                       <button

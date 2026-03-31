@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import asyncio
 import random
+import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -1029,6 +1031,61 @@ async def _generate_single_image_with_ref(
 # VIDEO GENERATION
 # ═══════════════════════════════════════════════════════════════════════════
 
+
+def _probe_video_duration(path: Path) -> float | None:
+    """
+    Lightweight validation of a video file using ffprobe.
+    Returns duration in seconds or None if ffprobe is not available / fails.
+    """
+    if not path or not path.exists():
+        return None
+    cmd = [
+        "ffprobe",
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
+        "-show_format",
+        "-show_streams",
+        str(path),
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        data = json.loads(result.stdout or "{}")
+        fmt = data.get("format") or {}
+        duration_str = fmt.get("duration")
+        if not duration_str:
+            return None
+        return float(duration_str)
+    except Exception as e:
+        logger.warning(f"[Mode8] ffprobe validation failed for {path.name}: {e}")
+        return None
+
+
+def _is_video_valid(path: Path, min_duration: float = 1.0) -> bool:
+    """
+    Check that video file exists and has reasonable duration.
+    If ffprobe is unavailable, treats file as valid (best-effort).
+    """
+    if not path or not path.exists():
+        return False
+    duration = _probe_video_duration(path)
+    if duration is None:
+        # Cannot verify duration — assume OK to avoid breaking pipeline
+        return True
+    if duration < min_duration:
+        logger.warning(
+            f"[Mode8] Video {path.name} is too short: {duration:.2f}s "
+            f"(min expected {min_duration:.2f}s)"
+        )
+        return False
+    return True
+
 async def _generate_single_video(
     index: int,
     prompt: str,
@@ -1097,6 +1154,24 @@ async def _generate_keyframe_video(
                 logger.warning(f"[Mode8] Retrying video {index + 1} ...")
 
     logger.error(f"[Mode8] Keyframe video {index + 1} generation failed after all attempts.")
+    # Fallback path: same FULL prompt, generate non-keyframe video from references.
+    # This increases success rate when FastGen keyframe UI is unstable.
+    logger.warning(
+        f"[Mode8] Keyframe video {index + 1} failed, trying single-video fallback "
+        "with the same full prompt"
+    )
+    try:
+        fallback_result = await _generate_single_video(
+            index=index,
+            prompt=prompt,  # keep the full prompt unchanged
+            reference_image_paths=[start_frame, end_frame],
+            output_dir=output_dir,
+        )
+        if fallback_result and Path(fallback_result).exists():
+            logger.success(f"[Mode8] Fallback video {index + 1} saved: {Path(fallback_result).name}")
+            return fallback_result
+    except Exception as e:
+        logger.error(f"[Mode8] Fallback video {index + 1} failed: {e}")
     return None
 
 
@@ -1261,7 +1336,8 @@ async def generate_house_videos(
         
     logger.info(f"[Mode8] STEP 2: Generating {num_keyframe_videos} KEYFRAME videos + 1 BONUS DRONE SHOT...")
     
-    video_tasks = []
+    video_tasks: list[asyncio.Task] = []
+    preview_task_index: int | None = None
         
     # 2a: Generate ALL keyframe videos (ALL transitions between stages)
     for i in range(num_keyframe_videos):
@@ -1272,12 +1348,10 @@ async def generate_house_videos(
         # Both frames must exist for keyframe generation
         if not start_frame or not end_frame:
             logger.warning(f"[Mode8] Skipping video {i}: missing frames")
-            video_tasks.append(asyncio.create_task(asyncio.sleep(0)))  # Placeholder
             continue
             
         if not Path(start_frame).exists() or not Path(end_frame).exists():
             logger.warning(f"[Mode8] Skipping video {i}: frame files not found")
-            video_tasks.append(asyncio.create_task(asyncio.sleep(0)))  # Placeholder
             continue
     
         # Build SHORT video prompt for FastGen (limited input capacity)
@@ -1301,7 +1375,7 @@ async def generate_house_videos(
             end_frame=Path(end_frame),
             output_dir=output_dir,
         )
-        video_tasks.append(task)
+        video_tasks.append(asyncio.create_task(task))
     
     # 2b: Generate BONUS DRONE SHOT video (transition from construction view to aerial showcase)
     # This is ADDITIONAL final showcase, NOT a replacement for construction video
@@ -1334,7 +1408,7 @@ async def generate_house_videos(
                 output_dir=output_dir,
             )
         
-        video_tasks.append(drone_task)
+        video_tasks.append(asyncio.create_task(drone_task))
         
         # [NEW] Generate CLICKBAIT PREVIEW in PARALLEL with drone shot
         # Preview uses the same final frame but doesn't block video generation
@@ -1352,14 +1426,14 @@ async def generate_house_videos(
                 style_key="dramatic_reveal",
                 language="en",
             )
-            # Add to tasks list but track separately
-            video_tasks.append(preview_task)  # Will be gathered with videos
+            # Add to tasks list and remember its index
+            preview_task_index = len(video_tasks)
+            video_tasks.append(asyncio.create_task(preview_task))
     else:
         logger.warning(f"[Mode8] Skipping BONUS DRONE SHOT: final frame not available")
-        video_tasks.append(asyncio.create_task(asyncio.sleep(0)))  # Placeholder
 
-    # Generate ALL videos in parallel
-    video_paths = await asyncio.gather(*video_tasks, return_exceptions=True)
+    # Generate ALL tasks in parallel (videos + optional preview)
+    video_paths_raw = await asyncio.gather(*video_tasks, return_exceptions=True) if video_tasks else []
     
     # ═══════════════════════════════════════════════════════════════════════
     # SEPARATE PREVIEW RESULT FROM VIDEO RESULTS
@@ -1367,15 +1441,13 @@ async def generate_house_videos(
     preview_path = None
     
     # Check if preview task was added and extract its result
-    if generate_preview and len(video_tasks) > 0:
-        # Preview task is always the LAST one added (after drone shot)
-        # We need to check if the last task actually produced a preview
-        preview_result = video_paths[-1] if len(video_paths) > 0 else None
+    if generate_preview and preview_task_index is not None and 0 <= preview_task_index < len(video_paths_raw):
+        preview_result = video_paths_raw[preview_task_index]
         
         if isinstance(preview_result, Path):
             # Successfully generated preview - remove it from video_paths
             preview_path = preview_result
-            video_paths = video_paths[:-1]  # Remove last item (preview)
+            video_paths_raw[preview_task_index] = None  # Clear preview slot
             logger.success(f"[Mode8] Clickbait preview generated: {preview_path.name}")
             logger.info(f"[Mode8] Preview full path: {preview_path.absolute()}")
             # Verify file exists
@@ -1385,29 +1457,150 @@ async def generate_house_videos(
         elif isinstance(preview_result, Exception):
             # Preview generation failed - log error but continue
             logger.error(f"[Mode8] Preview generation failed: {preview_result}")
-            video_paths = video_paths[:-1] if len(video_paths) > 0 else video_paths
         else:
             # No preview was generated (task returned None or not added)
-            logger.debug("[Mode8] No preview result from last task")
-            # Still remove last item if it was a preview task that returned None
-            video_paths = video_paths[:-1] if len(video_paths) > 0 else video_paths
+            logger.debug("[Mode8] No preview result from preview task position")
 
-    # Handle results
+    # Handle results (filter out preview slot and normalize to list[Path|None] for videos only)
     valid_paths: list[Path | None] = []
-    for i, result in enumerate(video_paths):
+    for i, result in enumerate(video_paths_raw):
         if isinstance(result, Exception):
             logger.error(f"[Mode8] Keyframe video {i + 1} failed: {result}")
             valid_paths.append(None)
         elif result is None:
-            # Placeholder task (skipped)
             valid_paths.append(None)
         else:
-            # Explicitly skip preview paths - they should not be in video_paths anymore
             result_path = Path(result) if not isinstance(result, Path) else result
+            # Skip anything явно относящееся к preview (защитный слой)
             if 'preview' in str(result_path).lower():
                 logger.warning(f"[Mode8] Skipping preview path in video results: {result_path}")
-                continue
-            valid_paths.append(result)
+                valid_paths.append(None)
+            else:
+                valid_paths.append(result_path)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # STEP 2c: LIGHTWEIGHT QUALITY VERIFICATION + LOCAL REGEN FOR BAD CLIPS
+    # ═══════════════════════════════════════════════════════════════════════
+
+    bad_indices: list[int] = []
+    for i, p in enumerate(valid_paths):
+        if not p:
+            bad_indices.append(i)
+            continue
+        video_path = Path(p)
+        if not _is_video_valid(video_path, min_duration=1.0):
+            bad_indices.append(i)
+
+    if bad_indices:
+        logger.warning(
+            f"[Mode8] Detected {len(bad_indices)} problematic videos, "
+            "attempting local regen ONLY for these indices"
+        )
+
+    for idx in bad_indices:
+        try:
+            # Construction transitions (0..num_keyframe_videos-1)
+            if idx < num_keyframe_videos:
+                start_frame = (
+                    ref_image_paths[idx] if idx < len(ref_image_paths) else None
+                )
+                end_frame = (
+                    ref_image_paths[idx + 1]
+                    if idx + 1 < len(ref_image_paths)
+                    else None
+                )
+                if not start_frame or not end_frame:
+                    logger.warning(
+                        f"[Mode8] Regen skipped for video {idx + 1}: missing frames"
+                    )
+                    continue
+                if not Path(start_frame).exists() or not Path(end_frame).exists():
+                    logger.warning(
+                        f"[Mode8] Regen skipped for video {idx + 1}: frame files not found"
+                    )
+                    continue
+
+                # Rebuild prompt: prefer contextual, otherwise builder
+                if contextual_data and idx < len(contextual_data["video_prompts"]):
+                    regen_prompt = contextual_data["video_prompts"][idx]["prompt_text"]
+                else:
+                    regen_prompt = _build_keyframe_video_prompt(
+                        scenes[idx],
+                        scenario,
+                        language,
+                    )
+
+                logger.info(f"[Mode8] Regenerating problematic transition video {idx + 1} ...")
+                regen_path = await _generate_keyframe_video(
+                    index=idx,
+                    prompt=regen_prompt,
+                    start_frame=Path(start_frame),
+                    end_frame=Path(end_frame),
+                    output_dir=output_dir,
+                )
+                if regen_path and Path(regen_path).exists() and _is_video_valid(
+                    Path(regen_path), min_duration=1.0
+                ):
+                    valid_paths[idx] = Path(regen_path)
+                    logger.success(
+                        f"[Mode8] Regen successful for video {idx + 1}: {Path(regen_path).name}"
+                    )
+                else:
+                    logger.error(
+                        f"[Mode8] Regen FAILED for video {idx + 1} — leaving slot empty"
+                    )
+
+            # Bonus drone shot (index == num_keyframe_videos)
+            elif idx == num_keyframe_videos:
+                final_frame_index = len(scenes) - 1
+                final_frame = (
+                    ref_image_paths[final_frame_index]
+                    if final_frame_index < len(ref_image_paths)
+                    else None
+                )
+                if not final_frame or not Path(final_frame).exists():
+                    logger.warning(
+                        "[Mode8] Regen skipped for bonus drone shot: final frame missing"
+                    )
+                    continue
+
+                drone_prompt = _build_final_drone_video_prompt(scenario, language)
+
+                logger.info("[Mode8] Regenerating problematic BONUS DRONE SHOT video ...")
+                if drone_showcase_image and Path(drone_showcase_image).exists():
+                    regen_drone = await _generate_keyframe_video(
+                        index=num_keyframe_videos,
+                        prompt=drone_prompt,
+                        start_frame=Path(final_frame),
+                        end_frame=Path(drone_showcase_image),
+                        output_dir=output_dir,
+                    )
+                else:
+                    regen_drone = await _generate_single_video(
+                        index=num_keyframe_videos,
+                        prompt=drone_prompt,
+                        reference_image_paths=[Path(final_frame)],
+                        output_dir=output_dir,
+                    )
+
+                if regen_drone and Path(regen_drone).exists() and _is_video_valid(
+                    Path(regen_drone), min_duration=1.0
+                ):
+                    valid_paths[idx] = Path(regen_drone)
+                    logger.success(
+                        f"[Mode8] Regen successful for BONUS DRONE SHOT: {Path(regen_drone).name}"
+                    )
+                else:
+                    logger.error(
+                        "[Mode8] Regen FAILED for BONUS DRONE SHOT — leaving slot empty"
+                    )
+            else:
+                # Any index beyond expected videos is ignored (should not happen)
+                logger.warning(
+                    f"[Mode8] Unexpected video index {idx} during regen — ignoring"
+                )
+        except Exception as e:
+            logger.error(f"[Mode8] Regen error for video index {idx}: {e}")
 
     # Enrich scenario with video paths and reference image paths
     enriched_scenes = []

@@ -17,7 +17,7 @@ from urllib.parse import quote
 
 from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pydantic import BaseModel, field_validator
@@ -62,6 +62,11 @@ def _session_topic_from_request(req: "StartRequest") -> str:
         if bt or cs:
             return f"Уборка пляжа: {bt or '?'} / {cs or '?'}"[:100]
         return "Уборка пляжа (таймлапс)"
+    if m == 11:
+        st = (getattr(req, "mode11_structure_type", None) or "").strip()
+        if st:
+            return f"Памятник: {st}"[:100]
+        return "Памятники (деконструкция)"
     if m == 8:
         hs = (getattr(req, "mode8_house_style", None) or "").strip()
         loc = (getattr(req, "mode8_location", None) or "").strip()
@@ -146,6 +151,8 @@ async def _run_pipeline_task(
             mode10_beach_type=getattr(req, "mode10_beach_type", None),
             mode10_coast_setting=getattr(req, "mode10_coast_setting", None),
             mode10_num_stages=getattr(req, "mode10_num_stages", 5),
+            mode11_structure_type=getattr(req, "mode11_structure_type", None),
+            mode11_num_stages=getattr(req, "mode11_num_stages", 5),
             control=control,
         )
 
@@ -205,9 +212,107 @@ async def lifespan(app: FastAPI):
     """Graceful startup and shutdown handler."""
     # Startup
     logger.info("[Server] Starting up...")
+    # Background worker: server-side queue processing
+    from utils.queue_manager import get_queue_manager
+    from utils.rate_limiter import get_rate_limiter
+
+    queue_mgr = get_queue_manager()
+    limiter = get_rate_limiter()
+
+    queue_kick = asyncio.Event()
+    app.state.queue_kick = queue_kick
+
+    async def _try_start_from_queue() -> bool:
+        # Hourly limit is the only gate: if quota remains, start next from queue
+        # (may run several pipelines in parallel when limit > 1).
+        allowed, _reason = limiter.check_allowed()
+        if not allowed:
+            return False
+
+        item = queue_mgr.pop_next()
+        if not item:
+            return False
+
+        try:
+            req = StartRequest.model_validate(item.payload)
+            _normalize_mode_specific_request(req)
+            _validate_start_request(req)
+            session_id = str(int(time.time() * 1000))
+            q: asyncio.Queue = asyncio.Queue()
+            pause_event = asyncio.Event()
+            pause_event.set()
+            control = {
+                "pause_event": pause_event,
+                "cancelled": False,
+                "fastgen_cancel_event": threading.Event(),
+            }
+
+            _sessions[session_id] = {
+                "status": "running",
+                "queue": q,
+                "result": None,
+                "error": None,
+                "started_at": time.time(),
+                "control": control,
+                "topic": _session_topic_from_request(req),
+                "mode": req.mode,
+                "request": req.model_dump(),
+            }
+
+            async def _wrapped():
+                try:
+                    await _run_pipeline_task(session_id, req, q, control)
+                finally:
+                    # whenever a session ends, try to start next
+                    queue_kick.set()
+
+            _sessions[session_id]["task"] = asyncio.create_task(_wrapped())
+            limiter.increment_usage()
+            logger.info(f"[QueueWorker] Started from queue: session={session_id} mode={req.mode}")
+            return True
+        except Exception as e:
+            permanent = isinstance(e, HTTPException) and int(getattr(e, "status_code", 0)) == 400
+            queue_mgr.push_front(item, status="error" if permanent else "queued", last_error=str(e))
+            logger.warning(f"[QueueWorker] Failed to start queued item (re-queued): {e}")
+            return False
+
+    async def _queue_worker():
+        logger.info(f"[QueueWorker] Enabled. Queue file: {queue_mgr.path}")
+        while True:
+            try:
+                # Wake up on: completion, periodic tick, or around hour boundary
+                try:
+                    await asyncio.wait_for(queue_kick.wait(), timeout=10)
+                except asyncio.TimeoutError:
+                    pass
+                queue_kick.clear()
+
+                # Try start as many as possible, but respecting concurrency+limit
+                started_any = False
+                for _ in range(5):
+                    started = await _try_start_from_queue()
+                    if not started:
+                        break
+                    started_any = True
+                    await asyncio.sleep(0.5)
+
+                if started_any:
+                    continue
+            except asyncio.CancelledError:
+                raise
+            except Exception as ex:
+                logger.warning(f"[QueueWorker] Loop error: {ex}")
+                await asyncio.sleep(2)
+
+    worker_task = asyncio.create_task(_queue_worker())
     yield
     # Shutdown
     logger.info("[Server] Shutting down gracefully...")
+    worker_task.cancel()
+    try:
+        await worker_task
+    except Exception:
+        pass
     # Give running pipelines time to cleanup (FastGen browser etc.)
     await asyncio.sleep(0.5)
     logger.info("[Server] Shutdown complete")
@@ -319,6 +424,10 @@ class StartRequest(BaseModel):
     mode10_beach_type: str | None = None
     mode10_coast_setting: str | None = None
     mode10_num_stages: int = 5
+    # Mode 11: популярные сооружения (деконструкция)
+    mode11_structure_type: str | None = None
+    # None = взять num_scenes (очередь / старые клиенты); иначе явно 5 или 7 после нормализации
+    mode11_num_stages: int | None = None
 
     @field_validator("mode4_only_lang", mode="before")
     @classmethod
@@ -351,10 +460,25 @@ def _validate_start_request(req: StartRequest) -> None:
     elif req.mode == 5:
         if not req.topic or not req.topic.strip():
             raise HTTPException(400, "Mode 5: введите тему для длинного видео")
-    elif req.mode in (6, 7, 8, 9, 10):
+    elif req.mode in (6, 7, 8, 9, 10, 11):
         pass
     elif not req.topic and not req.auto_topic:
         raise HTTPException(400, "Provide 'topic' or set 'auto_topic: true'")
+
+
+def _normalize_mode_specific_request(req: StartRequest) -> None:
+    """Force mode-specific invariants that must not depend on UI payload."""
+    if req.mode == 11:
+        raw = req.mode11_num_stages
+        if raw is None:
+            raw = req.num_scenes
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            n = 5
+        req.mode11_num_stages = 7 if n >= 7 else 5
+        req.num_scenes = req.mode11_num_stages
+        req.show_subtitles = False
 
 
 def _ensure_regenerate_assets_exist(req: StartRequest) -> None:
@@ -403,6 +527,7 @@ async def upload_image(file: UploadFile = File(...)):
 
 @app.post("/api/pipeline/start")
 async def start_pipeline(req: StartRequest):
+    _normalize_mode_specific_request(req)
     _validate_start_request(req)
 
     # Check rate limit before starting
@@ -411,14 +536,16 @@ async def start_pipeline(req: StartRequest):
     
     allowed, reason = limiter.check_allowed()
     if not allowed:
-        # Return 429 Too Many Requests with rate limit info
         status = limiter.get_status()
-        return {
-            "error": "rate_limit_reached",
-            "message": reason,
-            "rate_limit": status,
-            "suggestion": "add_to_queue"
-        }, 429
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error": "rate_limit_reached",
+                "message": reason,
+                "rate_limit": status,
+                "suggestion": "add_to_queue",
+            },
+        )
 
     session_id = str(int(time.time() * 1000))
     queue: asyncio.Queue = asyncio.Queue()
@@ -449,6 +576,58 @@ async def start_pipeline(req: StartRequest):
     limiter.increment_usage()
     
     return {"session_id": session_id}
+
+
+# ── Queue API (server-side) ───────────────────────────────────────────────────
+
+class QueueAddRequest(BaseModel):
+    payload: dict
+
+
+@app.post("/api/queue/add")
+async def queue_add(body: QueueAddRequest):
+    from utils.queue_manager import get_queue_manager
+
+    mgr = get_queue_manager()
+    item = mgr.add(body.payload or {})
+    queue_kick = getattr(app.state, "queue_kick", None)
+    if queue_kick is not None:
+        queue_kick.set()
+    return {"queued": True, "item": item.__dict__, "queue_size": len(mgr.snapshot())}
+
+
+@app.get("/api/queue/status")
+async def queue_status():
+    from utils.queue_manager import get_queue_manager
+
+    mgr = get_queue_manager()
+    return {"queue": mgr.snapshot(), "queue_size": len(mgr.snapshot())}
+
+
+@app.delete("/api/queue/{item_id}")
+async def queue_delete(item_id: str):
+    from utils.queue_manager import get_queue_manager
+
+    mgr = get_queue_manager()
+    ok = mgr.remove(item_id)
+    if not ok:
+        raise HTTPException(404, "Queue item not found")
+    return {"deleted": True, "item_id": item_id, "queue_size": len(mgr.snapshot())}
+
+
+class QueueMoveRequest(BaseModel):
+    direction: str
+
+
+@app.post("/api/queue/{item_id}/move")
+async def queue_move(item_id: str, body: QueueMoveRequest):
+    from utils.queue_manager import get_queue_manager
+
+    mgr = get_queue_manager()
+    ok = mgr.move(item_id, (body.direction or "").strip().lower())
+    if not ok:
+        raise HTTPException(400, "Invalid move or item not found")
+    return {"moved": True, "item_id": item_id, "queue_size": len(mgr.snapshot())}
 
 
 @app.get("/api/pipeline/{session_id}/stream")
@@ -584,6 +763,7 @@ async def restart_pipeline(session_id: str):
 
     # Новая сессия с теми же параметрами
     req = StartRequest(**req_data)
+    _normalize_mode_specific_request(req)
     new_sid = str(int(time.time() * 1000))
     queue: asyncio.Queue = asyncio.Queue()
     pause_event = asyncio.Event()
@@ -787,6 +967,7 @@ async def regenerate_video_from_library(
     except Exception as e:
         raise HTTPException(400, f"Сохранённые параметры устарели или повреждены: {e}") from e
 
+    _normalize_mode_specific_request(req)
     _validate_start_request(req)
     _ensure_regenerate_assets_exist(req)
 
