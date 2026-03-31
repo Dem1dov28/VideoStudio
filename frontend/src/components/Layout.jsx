@@ -22,12 +22,26 @@ export default function Layout({ children }) {
 
   useEffect(() => {
     let mounted = true;
+    let consecutiveErrors = 0;
+    const MAX_CONSECUTIVE_ERRORS = 3; // Stop after 3 consecutive errors
 
     const fetchActive = () => {
       api.listPipelineSessions()
-        .then(r => { if (mounted) setActiveSessions(r.sessions || []); })
-        .catch(() => {}); // Failed to fetch — сервер перезапущен/недоступен
+        .then(r => {
+          if (mounted) {
+            setActiveSessions(r.sessions || []);
+            consecutiveErrors = 0; // Reset on success
+          }
+        })
+        .catch((err) => {
+          consecutiveErrors++;
+          if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+            console.warn('[Layout] Server unavailable, stopping polling');
+            // Don't clear sessions - keep last known state
+          }
+        });
     };
+    
     fetchActive();
     const id = setInterval(fetchActive, 8000);  // 8 сек — меньше нагрузка
     return () => { mounted = false; clearInterval(id); };

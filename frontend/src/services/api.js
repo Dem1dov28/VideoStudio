@@ -1,15 +1,32 @@
 const BASE = import.meta.env.VITE_API_URL || '';
 
+// Global flag to prevent error reporting loops
+let isServerUnavailable = false;
+const SERVER_UNAVAILABLE_TIMEOUT = 30000; // 30 seconds cooldown
+
 function reportClientError(message, url = '') {
-  // Не слать на сервер при сетевых ошибках — сервер всё равно недоступен
-  if (/failed to fetch|connection refused|network error/i.test(message)) return;
+  // Don't send errors if server is already unavailable (prevent spam)
+  if (isServerUnavailable) return;
+  
+  // Don't send network errors - server is unavailable anyway
+  if (/failed to fetch|connection refused|network error|ECONNREFUSED/i.test(message)) {
+    isServerUnavailable = true;
+    console.warn('[API] Server unavailable, stopping error reports for 30s');
+    setTimeout(() => {
+      isServerUnavailable = false;
+    }, SERVER_UNAVAILABLE_TIMEOUT);
+    return;
+  }
+  
   try {
     fetch(`${BASE}/api/log/client-error`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message, url }),
-    }).catch(() => {});
-  } catch {}
+    }).catch(() => {}); // Ignore errors silently
+  } catch (e) {
+    // Ignore silently - don't create more errors
+  }
 }
 
 const DEBUG_API = false; // Включить для отладки API

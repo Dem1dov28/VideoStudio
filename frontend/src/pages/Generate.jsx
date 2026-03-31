@@ -85,7 +85,7 @@ export default function Generate() {
   const navigate = useNavigate();
   const { mode, setMode } = useMode();
   const { lang, setLang } = useLanguage();
-  const { checkAndStartVideo, addToQueue } = useRateLimit();
+  const { checkAndStartVideo, addToQueue, queueVideo } = useRateLimit();
 
   /* form state */
   const [topic, setTopic]           = useState('');
@@ -307,7 +307,7 @@ export default function Generate() {
     }
   }
 
-  /* Mode 8: House Building Timelapse — прямой запуск */
+  /* Mode 8: House Building Timelapse — ВСЕГДА в очередь */
   async function handleMode8Launch() {
     if (mode8UseKeyframes) {
       if (!mode8StartFrame?.path) {
@@ -342,22 +342,18 @@ export default function Generate() {
         mode8_end_frame_path: mode8UseKeyframes ? mode8EndFrame?.path : null,
       };
       
-      // Use rate limit check
-      const result = await checkAndStartVideo(payload);
+      // ALWAYS add to queue (never start immediately)
+      const result = queueVideo(payload);
       
       setStep('form');
-      if (result.status === 'started') {
-        setStartedSession(result.session_id);
-      } else if (result.status === 'queued') {
-        setError('Лимит исчерпан. Видео добавлено в очередь и запустится в следующем часе.');
-      }
+      setError('Видео добавлено в очередь. Запустится при обновлении лимита.');
     } catch (e) {
       setError(e.message);
       setStep('form');
     }
   }
 
-  /* Mode 10: уборка пляжа — прямой запуск (как mode 8 без keyframes) */
+  /* Mode 10: уборка пляжа — ВСЕГДА в очередь */
   async function handleMode10Launch() {
     setError('');
     setStep('launching');
@@ -378,22 +374,18 @@ export default function Generate() {
         mode10_num_stages: mode10NumStages,
       };
       
-      // Use rate limit check
-      const result = await checkAndStartVideo(payload);
+      // ALWAYS add to queue (never start immediately)
+      const result = queueVideo(payload);
       
       setStep('form');
-      if (result.status === 'started') {
-        setStartedSession(result.session_id);
-      } else if (result.status === 'queued') {
-        setError('Лимит исчерпан. Видео добавлено в очередь и запустится в следующем часе.');
-      }
+      setError('Видео добавлено в очередь. Запустится при обновлении лимита.');
     } catch (e) {
       setError(e.message);
       setStep('form');
     }
   }
 
-  /* Mode 9: Vehicle Assembly Timelapse — прямой запуск */
+  /* Mode 9: Vehicle Assembly Timelapse — ВСЕГДА в очередь */
   async function handleMode9Launch() {
     setError('');
     setStep('launching');
@@ -414,15 +406,11 @@ export default function Generate() {
         mode9_num_stages: mode9NumStages,
       };
       
-      // Use rate limit check
-      const result = await checkAndStartVideo(payload);
+      // ALWAYS add to queue (never start immediately)
+      const result = queueVideo(payload);
       
       setStep('form');
-      if (result.status === 'started') {
-        setStartedSession(result.session_id);
-      } else if (result.status === 'queued') {
-        setError('Лимит исчерпан. Видео добавлено в очередь и запустится в следующем часе.');
-      }
+      setError('Видео добавлено в очередь. Запустится при обновлении лимита.');
     } catch (e) {
       setError(e.message);
       setStep('form');
