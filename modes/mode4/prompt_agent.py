@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
+import random
 import re
 from pathlib import Path
 
@@ -20,6 +21,76 @@ from config import settings
 from utils.llm import make_llm
 
 VISION_MODEL = settings.openrouter_vision_model
+
+_LOCATION_STEERING_HINTS: tuple[str, ...] = (
+    "covered market arcade with stalls, hanging fabrics, morning bustle",
+    "stone quay with moored boats, coiled rope, gulls, cold drizzle",
+    "cathedral or temple side aisle: stained glass or carved pillars, stone floor, few visitors",
+    "castle or fortress rampart walk: crenellations, distant hills, windy late afternoon",
+    "riverside willows and reed bank, small wooden jetty, golden hour",
+    "vineyard terrace on a slope, rough stone wall, rows of vines, harsh sun",
+    "winter palace or manor gallery: parquet or marble, portraits, tall windows, snow outside",
+    "university lecture hall or examination room: benches, slate or chalkboard, inkstands, gaslight or daylight",
+    "apothecary or alchemist workshop: shelves of jars, mortars, dried herbs, single strong light source",
+    "scriptorium or archive: lecterns, chained books, wax tablets, narrow lancet windows",
+    "blacksmith or armoury forge: anvil, glowing coals, tools on walls, heat haze",
+    "wooden barn or threshing floor: straw, beams, dust in sunbeams",
+    "orchard in bloom or fruit trees, beehives, wooden fence, spring light",
+    "mountain pass or high trail: wind, scree, distant peaks, thin cold air",
+    "desert caravanserai courtyard: arcades, well, pack animals resting, harsh shadows",
+    "steppe or open plain camp: felt tents, fire smoke, wide sky, sunset",
+    "rice paddies or irrigated fields: earthen paths, workers' hats, humid haze",
+    "bamboo grove path or tea-garden pavilion, paper lanterns at dusk",
+    "colonnaded forum or agora edge: merchants, bronze statuary, bright Mediterranean noon",
+    "Roman bath caldarium or tepidarium: marble, steam, oil lamps, echoing vaults",
+    "amphitheatre or circus lower tier: stone seats, sand, long shadows",
+    "trireme or longship deck: oars shipped, salt spray, coastline ahead",
+    "merchant counting-house above a warehouse: ledgers, scales, chests, harbor noise through shutters",
+    "coaching inn courtyard: arriving carriage, lanterns, mud or cobbles, evening rain",
+    "railway station platform era-appropriate: iron and glass canopy, steam, travelers",
+    "opera house or theatre backstage corridor: ropes, costumes on racks, gas footlights glow",
+    "concert salon or music room: fortepiano or harpsichord, gilt frames, candle chandelier",
+    "hospital or lazaretto ward of the period: iron beds, linen screens, weak daylight",
+    "law court or senate antechamber: benches, clerks' desks, solemn light",
+    "prison corridor or debtors' yard: iron grilles, worn stone, gray morning",
+    "ship's cabin or captain's great cabin: maps, compass, stern windows on moving water",
+    "observatory dome interior or terrace: brass instruments, star charts, clear night",
+    "library reading room: tall stacks, rolling ladder, green-shaded lamps",
+    "gentleman's club smoking room or coffeehouse: leather chairs, newspapers, foggy window",
+    "artist's studio: easel, plaster casts, north light window, paint-stained floor",
+    "greenhouse or orangery: humid glass, exotic plants, winter sun",
+    "stable aisle: straw, tack on walls, horses shifting, barn smell",
+    "mill interior: millstones, grain dust, shaft of light from hatch",
+    "bridge midpoint over a river: stone arches below, wind, city or country beyond",
+    "city gate or toll-bar: guards, cart traffic, dust in sun",
+    "monastery cloister: garth garden, fountain, arcades, quiet noon",
+    "synagogue or mosque courtyard appropriate to era: washing fountain, geometric tiles, peaceful hour",
+    "pilgrimage road shrine: votive candles, worn steps, forest or rock backdrop",
+    "fishing village nets and racks: drying fish, tar smell, low sun",
+    "salt pans or drying yard: white crusts, workers, glare",
+    "quarry or marble yard: raw blocks, chisels, dust, harsh light",
+    "fairground or feast-day square: booths, banners, crowd at distance",
+    "cemetery or family crypt entrance: iron gate, yew trees, overcast",
+    "roof or belvedere above the city: chimneys, pigeon flight, wind at sunset",
+    "basement wine cellar: vaulted brick, racks of bottles, single candle",
+    "council war tent or field headquarters: maps on camp table, pennants, twilight",
+    "siege camp edge: earthworks, distant walls, smoke, dawn",
+    "hunting lodge great hall: trophies, firepit, long shadows",
+    "rice-paper screen room or scholar's study: low desk, brush and ink, garden view",
+    "carriage interior moving through rain: blurred window, velvet seat, lamp sway",
+    "lighthouse keeper's gallery: lantern room, sea spray, storm light",
+    "factory floor early industrial: belts, shafts, high windows, soot (only if era allows)",
+    "dockside tavern back room: barrels, low beams, harbor light through door",
+    "formal garden parterre: clipped hedges, gravel path, fountain",
+    "wild moor or heath: wind-bent grass, stone outcrop, lowering sky",
+    "oasis palm fringe: pool, camels resting, heat shimmer",
+    "ice fair or frozen river scene (only if era/climate fits): booths on ice, fur wraps",
+)
+
+
+def _pick_location_steering_hint() -> str:
+    return random.choice(_LOCATION_STEERING_HINTS)
+
 
 _SYSTEM = """Ты — эксперт по кинематографичной AI-генерации и исторической достоверности.
 
@@ -47,7 +118,8 @@ _SYSTEM = """Ты — эксперт по кинематографичной AI-
 
 ## РАЗНООБРАЗИЕ ЛОКАЦИЙ (обязательно):
 - Не циклись на одних и тех же местах (кабинет с книгами, набережная, «римский сад», писательский стол у окна).
-- Каждый раз выбирай **одну** свежую, конкретную локацию, которая **прямо подходит** персонажу и эпохе, но не обязана быть «классической» для цитат.
+- В **каждом** запросе пользователь даёт строку **LOCATION_STEERING_FOR_THIS_REQUEST** — это **обязательная основа** блока ОКРУЖЕНИЕ: перенеси тип места и атмосферу в эпоху и регион персонажа (замени анахронизмы эквивалентами того же **типа** сцены). **Нельзя** игнорировать подсказку и снова ставить «любимый» кабинет/набережную.
+- Каждый раз получается **одна** свежая, конкретная локация, которая **прямо подходит** персонажу и эпохе, но не обязана быть «классической» для цитат.
 - Черпай из широкого круга (всё — в границах эпохи): улочка / рынок / храм или церковь / аркада / вокзал или пристань / каюта или купе / поле или виноградник / терраса / лестница дворца / скрипторий или архив / трактир / баня или термы / сад-огород / мастерская / крыша или башня / зимний двор / подземная сводчатая зала / мост / сенат или зала заседаний / укрепление или лагерь / больничная палата эпохи / концертный зал XIX в. — и т.п.
 - Если образ на фото нейтральный — локацию всё равно зафиксируй однозначно и колоритно; не оставляй «просто комната».
 
@@ -171,8 +243,12 @@ async def run_quote_prompt_agent(
         "Запрещено в EN-версии выдумывать другую внешность."
     ) if source_russian_only and bilingual else ""
 
+    location_steering = _pick_location_steering_hint()
+
     msg = HumanMessage(content=[
         {"type": "text", "text": (
+            f"LOCATION_STEERING_FOR_THIS_REQUEST (обязательная основа окружения; адаптируй под эпоху и регион персонажа, сохрани тип места и настроение; не подменяй на шаблон «кабинет/набережная»):\n"
+            f"{location_steering}\n\n"
             f"Имя личности (НЕ писать в промпте! Используй для эпохи и исторической точности): {person_name}\n\n"
             f"Цитата (вставить в video_prompt в кавычках): {quote}\n\n"
             f"bilingual: {bilingual}\n"

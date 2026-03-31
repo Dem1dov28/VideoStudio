@@ -310,6 +310,7 @@ class StartRequest(BaseModel):
     mode8_house_style: str | None = None  # "modern", "contemporary", "minimalist", "scandinavian", "cottage", "villa", "farmhouse", "colonial", "victorian", "mediterranean", "cabin", "log_house", "chalet", "adobe", "mansion", "estate"
     mode8_location: str | None = None  # "suburbs", "urban_edge", "planned_community", "forest", "wooded_area", "seaside", "lakefront", "riverside", "countryside", "farmland", "vineyard", "mountains", "hillside", "valley", "desert", "oasis", "tropical", "island"
     mode8_num_stages: int = 5
+    mode8_num_floors: int = 2
     # Mode 9: Vehicle Assembly Timelapse
     mode9_vehicle_type: str | None = None  # "airplane_passenger", "airplane_private", "car_modern", "car_sport", "truck_cargo", "tractor", "excavator", "ship_cargo", "yacht", "helicopter", "drone", and 21 more...
     mode9_location: str | None = None  # "construction_site", "factory", "shipyard", "hangar", "empty_field", "forest_clearing", "desert", "mountain_valley", "city_outskirts", "port", and 9 more...
@@ -670,6 +671,8 @@ def _get_video_metadata() -> list[dict]:
             if not session_dir.is_dir() or session_dir.name.startswith("_"):
                 continue
             for mp4 in session_dir.glob("*.mp4"):
+                if not _is_public_session_mp4(mp4.name):
+                    continue
                 sid = session_dir.name
                 key = (sid, mp4.name)
                 if key in seen:
@@ -840,9 +843,14 @@ def _resolve_video_path(session_id: str, filename: str) -> Path | None:
     return None
 
 
+def _is_public_session_mp4(filename: str) -> bool:
+    """Служебные файлы (temp audio MoviePy `_m4_snd_*` и т.п.) не в библиотеку и не в превью."""
+    return not Path(filename).name.startswith("_")
+
+
 def _pick_legacy_thumbnail_path(legacy_dir: Path) -> Path | None:
     """Предпочесть финальные video_ru / video_en, не клип clip_*.mp4."""
-    mp4s = sorted(legacy_dir.glob("*.mp4"))
+    mp4s = sorted(p for p in legacy_dir.glob("*.mp4") if _is_public_session_mp4(p.name))
     if not mp4s:
         return None
     for name in ("video_ru.mp4", "video_en.mp4"):
@@ -869,7 +877,7 @@ async def serve_video_thumbnail(
     # 1) Если передан video_file и есть legacy папка - ищем там
     if video_file and legacy.is_dir():
         safe_name = Path(video_file).name
-        if safe_name.endswith(".mp4"):
+        if safe_name.endswith(".mp4") and _is_public_session_mp4(safe_name):
             candidate = (legacy / safe_name).resolve()
             try:
                 candidate.relative_to(legacy.resolve())

@@ -120,9 +120,6 @@ export default function Generate() {
   const [mode8Location, setMode8Location] = useState('random');
   const [mode8NumStages, setMode8NumStages] = useState(5);
   const [mode8NumFloors, setMode8NumFloors] = useState(2); // Number of floors
-  const [mode8UseKeyframes, setMode8UseKeyframes] = useState(false);
-  const [mode8StartFrame, setMode8StartFrame] = useState(null);
-  const [mode8EndFrame, setMode8EndFrame] = useState(null);
   // Mode 9: Vehicle Assembly Timelapse
   const [mode9VehicleType, setMode9VehicleType] = useState('random');
   const [mode9Location, setMode9Location] = useState('random');
@@ -309,16 +306,6 @@ export default function Generate() {
 
   /* Mode 8: House Building Timelapse — ВСЕГДА в очередь */
   async function handleMode8Launch() {
-    if (mode8UseKeyframes) {
-      if (!mode8StartFrame?.path) {
-        setError('Загрузите начальный кадр');
-        return;
-      }
-      if (!mode8EndFrame?.path) {
-        setError('Загрузите конечный кадр');
-        return;
-      }
-    }
     setError('');
     setStep('launching');
     try {
@@ -333,13 +320,10 @@ export default function Generate() {
         scenario: null,
         mode: 8,
         language: lang,
-        mode8_house_style: mode8UseKeyframes ? null : (mode8HouseStyle === 'random' ? null : mode8HouseStyle),
-        mode8_location: mode8UseKeyframes ? null : (mode8Location === 'random' ? null : mode8Location),
+        mode8_house_style: mode8HouseStyle === 'random' ? null : mode8HouseStyle,
+        mode8_location: mode8Location === 'random' ? null : mode8Location,
         mode8_num_stages: mode8NumStages,
-        mode8_num_floors: mode8NumFloors, // NEW: floors count
-        mode8_use_keyframes: mode8UseKeyframes,
-        mode8_start_frame_path: mode8UseKeyframes ? mode8StartFrame?.path : null,
-        mode8_end_frame_path: mode8UseKeyframes ? mode8EndFrame?.path : null,
+        mode8_num_floors: mode8NumFloors,
       };
       
       // ALWAYS add to queue (never start immediately)
@@ -788,125 +772,6 @@ export default function Generate() {
               </div>
             ) : mode === 8 ? (
               <div className="space-y-4">
-                {/* Keyframes toggle */}
-                <div className="card p-5">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="text-sm font-semibold text-[#e4e4f0]">Ключ. кадры</div>
-                      <div className="text-xs text-[#71717a]">Генерация видео по начальному и конечному кадру</div>
-                    </div>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={mode8UseKeyframes}
-                      onClick={() => setMode8UseKeyframes(!mode8UseKeyframes)}
-                      className={`inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent shadow-sm transition-colors ${
-                        mode8UseKeyframes ? 'bg-brand-600' : 'bg-[#27272f]'
-                      }`}
-                    >
-                      <span
-                        className={`pointer-events-none block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
-                          mode8UseKeyframes ? 'translate-x-4' : 'translate-x-0'
-                        }`}
-                      />
-                    </button>
-                  </div>
-                </div>
-
-                {mode8UseKeyframes ? (
-                  /* Keyframe mode: start + end frame upload */
-                  <>
-                    {/* Start frame upload */}
-                    <div className="card p-5">
-                      <div className="text-sm font-semibold text-[#e4e4f0] mb-1">Начальный кадр</div>
-                      <div className="text-xs text-[#71717a] mb-3">Загрузите изображение для начального кадра видео</div>
-                      <div
-                        className="h-24 flex flex-col items-center justify-center rounded-lg border-2 border-dashed transition-colors cursor-pointer gap-2 border-[#27272f] hover:border-[#71717a]"
-                        onClick={() => document.getElementById('mode8-start-frame')?.click()}
-                      >
-                        {mode8StartFrame?.preview ? (
-                          <img src={mode8StartFrame.preview} alt="Start frame" className="h-20 w-32 object-cover rounded" />
-                        ) : (
-                          <>
-                            <RiImageAddLine className="text-2xl text-[#71717a]" />
-                            <span className="text-xs text-[#71717a]">Нажмите для загрузки</span>
-                          </>
-                        )}
-                      </div>
-                      <input
-                        id="mode8-start-frame"
-                        type="file"
-                        accept="image/jpeg,image/png,image/webp"
-                        className="hidden"
-                        onChange={async (e) => {
-                          const f = e.target.files?.[0];
-                          if (!f) return;
-                          setUploadingRef(true);
-                          try {
-                            const { path } = await api.uploadImage(f);
-                            setMode8StartFrame({ path, preview: URL.createObjectURL(f) });
-                          } catch (err) { setError(err.message); }
-                          finally { setUploadingRef(false); e.target.value = ''; }
-                        }}
-                      />
-                      {mode8StartFrame && (
-                        <button
-                          type="button"
-                          onClick={() => setMode8StartFrame(null)}
-                          className="mt-2 text-xs text-[#71717a] hover:text-red-400"
-                        >
-                          Удалить
-                        </button>
-                      )}
-                    </div>
-
-                    {/* End frame upload */}
-                    <div className="card p-5">
-                      <div className="text-sm font-semibold text-[#e4e4f0] mb-1">Конечный кадр</div>
-                      <div className="text-xs text-[#71717a] mb-3">Загрузите изображение для конечного кадра видео</div>
-                      <div
-                        className="w-full aspect-square flex flex-col items-center justify-center rounded-lg border-2 border-dashed transition-colors cursor-pointer border-[#27272f] hover:border-[#71717a]"
-                        onClick={() => document.getElementById('mode8-end-frame')?.click()}
-                      >
-                        {mode8EndFrame?.preview ? (
-                          <img src={mode8EndFrame.preview} alt="End frame" className="h-full w-full object-cover rounded-lg" />
-                        ) : (
-                          <>
-                            <RiImageAddLine className="text-3xl text-[#71717a]" />
-                            <span className="text-sm text-[#71717a]">Нажмите для загрузки</span>
-                          </>
-                        )}
-                      </div>
-                      <input
-                        id="mode8-end-frame"
-                        type="file"
-                        accept="image/jpeg,image/png,image/webp"
-                        className="hidden"
-                        onChange={async (e) => {
-                          const f = e.target.files?.[0];
-                          if (!f) return;
-                          setUploadingRef(true);
-                          try {
-                            const { path } = await api.uploadImage(f);
-                            setMode8EndFrame({ path, preview: URL.createObjectURL(f) });
-                          } catch (err) { setError(err.message); }
-                          finally { setUploadingRef(false); e.target.value = ''; }
-                        }}
-                      />
-                      {mode8EndFrame && (
-                        <button
-                          type="button"
-                          onClick={() => setMode8EndFrame(null)}
-                          className="mt-2 text-xs text-[#71717a] hover:text-red-400"
-                        >
-                          Удалить
-                        </button>
-                      )}
-                    </div>
-                  </>
-                ) : (
-                  /* Default mode: style/location selection */
-                  <>
                     {/* House style selection */}
                     <div className="card p-5">
                       <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
@@ -1212,16 +1077,12 @@ export default function Generate() {
                         Сколько этажей будет в доме после завершения строительства.
                       </p>
                     </div>
-                  </>
-                )}
 
                 {/* Timelapse Info card */}
                 <div className="card p-4 bg-gradient-to-br from-amber-900/20 to-orange-900/10 border-amber-700/30">
                   <div className="text-sm font-semibold text-amber-300 mb-2">🏗️ Timelapse Режим</div>
                   <p className="text-xs text-[#a1a1aa]">
-                    {mode8UseKeyframes
-                      ? 'AI сгенерирует плавный переход от начального кадра к конечному в стиле timelapse.'
-                      : 'Видео в стиле ускоренной съёмки строительства. Фотореалистичный стиль, как снято на камеру телефона. Звуки строительной площадки.'}
+                    Видео в стиле ускоренной съёмки строительства. Фотореалистичный стиль, как снято на камеру телефона. Звуки строительной площадки.
                   </p>
                 </div>
               </div>
@@ -2070,11 +1931,11 @@ export default function Generate() {
               ) : mode === 8 ? (
                 <button
                   onClick={handleMode8Launch}
-                  disabled={isLoading || (mode8UseKeyframes && (!mode8StartFrame?.path || !mode8EndFrame?.path))}
+                  disabled={isLoading}
                   className="btn-primary flex-1 flex items-center justify-center gap-2 text-base py-4"
                 >
                   <RiSparklingLine className="text-lg" />
-                  {mode8UseKeyframes ? 'Сгенерировать видео' : 'Сгенерировать timelapse'}
+                  Сгенерировать timelapse
                 </button>
               ) : mode === 7 ? (
                 <button
