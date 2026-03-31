@@ -79,6 +79,7 @@ async def run_mode11_pipeline(
 
     output_path = videos_dir / f"video_{session_id}.mp4"
     preview_path = enriched_scenario.get("preview_path")
+    has_preview = bool(preview_path and Path(preview_path).exists())
     loop = asyncio.get_event_loop()
     assembled_path, video_duration = await loop.run_in_executor(
         None,
@@ -87,8 +88,10 @@ async def run_mode11_pipeline(
             valid_paths,
             output_path,
             title=title,
-            preview_image_path=preview_path,
+            preview_image_path=preview_path if has_preview else None,
             preview_duration=0.3,
+            # Avoid 1.5s freeze + clickbait tail; clickbait is the only end card (0.3s).
+            final_hold_duration=0.0 if has_preview else 1.5,
         ),
     )
 

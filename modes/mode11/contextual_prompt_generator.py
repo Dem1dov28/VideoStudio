@@ -18,7 +18,14 @@ from loguru import logger
 
 from utils.json_parse import parse_json_safe
 from utils.llm import make_llm
-from modes.mode11.scenario_writer import build_transition_profiles
+from modes.mode11.scenario_writer import (
+    build_transition_profiles,
+    linear_monument_remaining_pct,
+    monument_remaining_pct_rubric,
+)
+
+# Per-clip video LLM sees two image-prompt excerpts; cap each to limit tokens while keeping quotas + stage detail.
+_MODE11_KEYFRAME_IMG_PROMPT_MAX_CHARS = 3600
 
 
 async def _llm_text(system_text: str, human_text: str, timeout_s: float = 30.0, temperature: float = 0.5) -> str:
@@ -35,13 +42,17 @@ async def _llm_text(system_text: str, human_text: str, timeout_s: float = 30.0, 
     return (resp.content.strip() if hasattr(resp, "content") else str(resp).strip()) or ""
 
 
-def _brief_scene(scene: dict[str, Any]) -> str:
+def _brief_scene(scene: dict[str, Any], num_scenes: int = 0) -> str:
     note = scene.get("photo_director_note_en") or ""
     extra = f" | director={note}" if note else ""
+    pct = scene.get("monument_remaining_pct")
+    pct_note = ""
+    if pct is not None and num_scenes > 1:
+        pct_note = f" | ~{pct}%_of_iconic_mass_remains"
     return (
         f"- idx={scene.get('index')} key={scene.get('stage_key')} "
         f"name={scene.get('name_en', scene.get('name'))} "
-        f"action={scene.get('action_en', scene.get('action'))}{extra}"
+        f"action={scene.get('action_en', scene.get('action'))}{pct_note}{extra}"
     )
 
 
@@ -71,6 +82,7 @@ def _fallback_context_payload(structure: str, location: str, camera_position: st
             "No magical morphing, teleportation, or instant geometry replacement",
             "Intermediate states should remain physically plausible",
             "Reference frames are ordered complete→cleared site: each stage must show strictly MORE damage than the complete anchor — never repair, restore, or rebuild toward completeness",
+            "Linear timelapse pacing: each stage removes about the same share of visible mass vs the iconic complete state (no one huge jump early then microscopic edits late); reconstruction clips must advance through their percentage band steadily over time",
         ],
         "identity_anchors": [
             f"Preserve core identity features of {structure}",
@@ -161,10 +173,20 @@ def _enforce_video_word_count(text: str, min_words: int = 120, max_words: int = 
     return " ".join(out.split()[:max_words]).strip()
 
 
-def _sanitize_prompt_text(text: str, is_video: bool = False) -> str:
+# Mode 11 video prompts must carry landmark labor + pacing; 180 words often drops steel/equipment specifics.
+_MODE11_VIDEO_PROMPT_MAX_WORDS = 260
+
+
+def _sanitize_prompt_text(
+    text: str,
+    is_video: bool = False,
+    *,
+    max_video_words: int | None = None,
+) -> str:
     out = _ensure_required_constraints(text, is_video=is_video)
     if is_video:
-        out = _enforce_video_word_count(out, min_words=120, max_words=180)
+        cap = max_video_words if max_video_words is not None else 180
+        out = _enforce_video_word_count(out, min_words=120, max_words=cap)
     return out
 
 
@@ -173,7 +195,8 @@ async def _analyze_context(scenario: dict[str, Any]) -> dict[str, Any]:
     location = scenario.get("location_name", "Historic location")
     camera_position = scenario.get("camera_position_en", "Fixed three-quarter view, level horizon, upright subject.")
     scenes = scenario.get("scenes", [])
-    scene_list = "\n".join(_brief_scene(s) for s in scenes)
+    nsc = len(scenes)
+    scene_list = "\n".join(_brief_scene(s, num_scenes=nsc) for s in scenes)
 
     narrative_en = (scenario.get("narrative_arc_en") or "").strip()
     profile_note = (scenario.get("stage_count_profile_en") or "").strip()
@@ -244,6 +267,7 @@ async def _generate_image_prompts(scenario: dict[str, Any], analysis_text: str) 
     prompts: list[dict[str, Any]] = []
     prev_text = ""
 
+    n_still = len(scenes)
     for i, scene in enumerate(scenes):
         base_visual = scene.get("visual_prompt", "")
         stage_name = scene.get("name_en", scene.get("name", f"stage_{i+1}"))
@@ -251,12 +275,38 @@ async def _generate_image_prompts(scenario: dict[str, Any], analysis_text: str) 
         director_block = f"Stage-specific director note:\n{director_note}\n" if director_note else ""
         narrative_block = f"Landmark narrative:\n{narrative_en}\n" if narrative_en else ""
         profile_block = f"Density profile:\n{profile_note}\n" if profile_note else ""
+        quota_pct = scene.get("monument_remaining_pct")
+        if quota_pct is None and n_still > 1:
+            quota_pct = linear_monument_remaining_pct(i, n_still)
+        pacing_line = ""
+        if quota_pct is not None and n_still > 1:
+            step = max(1, round(100 / (n_still - 1)))
+            prev_q = linear_monument_remaining_pct(i - 1, n_still) if i > 0 else None
+            next_q = linear_monument_remaining_pct(i + 1, n_still) if i < n_still - 1 else None
+            ladder = (
+                f"0–100 ladder: prev ~{prev_q}% → THIS ~{quota_pct}% → next ~{next_q}% (~{step} points per step). "
+                if prev_q is not None and next_q is not None
+                else ""
+            )
+            rubric = monument_remaining_pct_rubric(quota_pct)
+            cliff = ""
+            if i == n_still - 2:
+                cliff = (
+                    "PENULTIMATE FRAME MUST BE TRACE-LEVEL RUINS, NOT ‘almost complete’ — next frame is bare ground. "
+                )
+            if i == n_still - 1:
+                cliff = "FINAL FRAME: only remove last ~{step}% rubble from near-vanish state. ".format(step=step)
+            pacing_line = (
+                f"LINEAR PHOTO TARGET: ~{quota_pct}% iconic mass remains (~{step} points between neighbors).\n"
+                f"{ladder}{cliff}\n"
+                f"Rubric: {rubric}\n"
+            )
         prompt = f"""Generate an English photorealistic IMAGE prompt for stage {i+1}/{len(scenes)}.
 Structure: {structure}
 Stage: {stage_name}
 Still-image order is ONLY: iconic complete → progressive damage → cleared site. Do NOT describe construction, repair, or restoration in these image prompts.
 
-{narrative_block}{profile_block}{photo_plan_block}
+{pacing_line}{narrative_block}{profile_block}{photo_plan_block}
 
 {director_block}
 Continuity rules:
@@ -280,12 +330,18 @@ Requirements:
 - Horizon must be horizontal and stable
 - Only monument condition changes for THIS stage
 - Monotonic deconstruction: later stages must NEVER look repaired, restored, or more intact than earlier stages; forbid construction crews, repair, rebuilding, or adding mass
+- Match the linear pacing target and rubric: never output penultimate-almost-complete + last-empty; late frames must be mostly gone before the final clear
+- CONTENT PRESERVATION (critical): Your final prompt MUST retain every substantive fact from "Current stage source details" — PHOTO QUOTA percentages, neighbor ladder, 5-/7-scene UNIQUE STAGE DETAIL (heights, tiers, materials, what is removed). You may tighten wording but must NOT drop numbers, structural stages, or anti-cliff rules; do not replace with generic "ruins" language
 - Avoid repeating exact wording from previous prompts
 - No brands/logos/text in frame
 Return only the final prompt text."""
         try:
             out = await _llm_text(
-                system_text="You write precise image prompts for photoreal generation.",
+                system_text=(
+                    "You write precise image prompts for photoreal generation. "
+                    "When the user supplies a long 'Current stage source details' block, your output must embed those "
+                    "requirements (quotas, exact ruin states, dimensions) so the image model cannot miss them."
+                ),
                 human_text=prompt,
                 timeout_s=30.0,
                 temperature=0.55,
@@ -339,6 +395,15 @@ Main action for this clip: {prof.get('action_en', '')}
 Micro-actions:
 {micro_txt}
 """
+        cs = prof.get("completeness_start_pct")
+        ce = prof.get("completeness_end_pct")
+        pacing_video = ""
+        if cs is not None and ce is not None:
+            pacing_video = (
+                f"\nEVEN CLIP PACING: Structural completeness must advance steadily from ~{cs}% to ~{ce}% "
+                "of the iconic monument (100% = fully built). Spread work across the entire clip evenly — "
+                "not a burst at the start nor a nearly static tail.\n"
+            )
 
         narrative_block = f"Landmark narrative (reverse in stills, forward labor here):\n{narrative_en}\n\n" if narrative_en else ""
         profile_block = f"Density profile:\n{profile_note}\n\n" if profile_note else ""
@@ -347,7 +412,7 @@ Structure: {structure}
 Transition playback direction: from LESS complete (from stage) to MORE complete (to stage) — workers ADD mass, detail, and coherence.
 From stage: {from_scene.get('name_en', from_scene.get('name'))}
 To stage: {to_scene.get('name_en', to_scene.get('name'))}
-{labor_block}
+{labor_block}{pacing_video}
 {narrative_block}{profile_block}{video_plan_block}
 
 Continuity rules:
@@ -357,16 +422,17 @@ Camera position (must stay unchanged):
 {camera_position}
 
 From image prompt reference:
-{from_img[:1000]}
+{from_img[:_MODE11_KEYFRAME_IMG_PROMPT_MAX_CHARS]}
 
 To image prompt reference:
-{to_img[:1000]}
+{to_img[:_MODE11_KEYFRAME_IMG_PROMPT_MAX_CHARS]}
 
 Requirements:
 - Fixed camera and identical background (tripod-locked); same high-angle overview; full monument in frame
 - Upright frame, level horizon, no orbital camera moves
 - Show ACTIVE workers and equipment: walking, lifting, riveting, mortaring, planting, rigging — timelapse motion blur
 - The monument STRUCTURE must evolve from start keyframe toward end keyframe through believable staged work (no magical morph)
+- Obey EVEN CLIP PACING if provided — uniform progress through the percentage band for the whole duration
 - Physical reconstruction only; materials behave by weight and order for THIS landmark
 - 120-180 words, concise and actionable
 - No logos/text
@@ -383,7 +449,7 @@ Return only the final prompt text."""
                 f"Reconstruction transition from {from_scene.get('name_en')} to {to_scene.get('name_en')}. "
                 "Fixed camera and same location. Realistic progressive build-up only."
             )
-        out = _sanitize_prompt_text(out, is_video=True)
+        out = _sanitize_prompt_text(out, is_video=True, max_video_words=_MODE11_VIDEO_PROMPT_MAX_WORDS)
         prompts.append(
             {
                 "transition_index": out_idx,
@@ -405,10 +471,21 @@ async def generate_contextual_prompts(
     logger.info("[Mode11 Contextual] Starting monument contextual prompt pipeline...")
 
     scenario_work = dict(scenario)
-    if not scenario_work.get("transition_profiles") and scenario_work.get("structure_type"):
-        stage_sequence = [s.get("stage_key") for s in scenario_work.get("scenes", []) if s.get("stage_key")]
+    st_key = scenario_work.get("structure_type")
+    tprof = list(scenario_work.get("transition_profiles") or [])
+    stage_sequence = [s.get("stage_key") for s in scenario_work.get("scenes", []) if s.get("stage_key")]
+    if not tprof and st_key:
         scenario_work["transition_profiles"] = build_transition_profiles(
-            str(scenario_work["structure_type"]),
+            str(st_key),
+            stage_sequence=stage_sequence or None,
+        )
+    elif (
+        tprof
+        and st_key
+        and any((p or {}).get("completeness_start_pct") is None for p in tprof)
+    ):
+        scenario_work["transition_profiles"] = build_transition_profiles(
+            str(st_key),
             stage_sequence=stage_sequence or None,
         )
 

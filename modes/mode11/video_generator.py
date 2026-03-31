@@ -22,7 +22,11 @@ from config import settings
 from utils.llm import make_llm
 from modes.clickbait_preview import generate_clickbait_preview
 from modes.mode11.contextual_prompt_generator import generate_contextual_prompts
-from modes.mode11.scenario_writer import build_transition_profiles
+from modes.mode11.scenario_writer import (
+    build_transition_profiles,
+    linear_monument_remaining_pct,
+    monument_remaining_pct_rubric,
+)
 
 
 def _probe_video_duration(path: Path) -> float | None:
@@ -171,10 +175,50 @@ def _build_image_prompt(scene: dict[str, Any], index: int, total: int, scenario:
             creative_extra += f"\nLANDMARK NARRATIVE: {nar}\n"
         if prof:
             creative_extra += f"DENSITY PROFILE: {prof}\n"
+    pacing_extra = ""
+    scenes_list = (scenario or {}).get("scenes") or []
+    pct = scene.get("monument_remaining_pct")
+    if pct is None and len(scenes_list) > 1:
+        idx = scene.get("index")
+        if isinstance(idx, int) and 0 <= idx < len(scenes_list):
+            pct = linear_monument_remaining_pct(idx, len(scenes_list))
+    photo_contract = ""
+    if pct is not None and len(scenes_list) > 1:
+        step = max(1, round(100 / (len(scenes_list) - 1)))
+        n = len(scenes_list)
+        prev_p = linear_monument_remaining_pct(index - 1, n) if index > 0 else None
+        next_p = linear_monument_remaining_pct(index + 1, n) if index < n - 1 else None
+        ladder = ""
+        if prev_p is not None and next_p is not None:
+            ladder = (
+                f"Neighbors on 0–100 scale: ~{prev_p}% ← THIS {pct}% → ~{next_p}% (~{step} points per edge). "
+            )
+        elif prev_p is not None:
+            ladder = f"Previous still ~{prev_p}% → THIS ~{pct}% (final step ~{step} points). "
+        else:
+            ladder = f"From complete 100% → THIS ~{pct}% (first step ~{step} points); next ~{next_p}%. "
+        rubric_line = monument_remaining_pct_rubric(pct)
+        cliff = ""
+        if index == n - 2:
+            cliff = (
+                "CRITICAL: This is the PENULTIMATE still — it must look like LATE RUINS/TRACES ONLY, "
+                "not ‘almost built’. The next still is bare ground; if this looks nearly complete, the run is invalid. "
+            )
+        if index == n - 1:
+            cliff = (
+                "CRITICAL: FINAL still — only polish away the last traces from an already empty ruin state; "
+                "no cliff from a full monument. "
+            )
+        photo_contract = (
+            f"\n━━ STILL-IMAGE CONTRACT (highest priority) ━━\n"
+            f"{ladder}{cliff}\n"
+            f"Target rubric: {rubric_line}\n"
+            f"~{pct}% of iconic mass must remain (~{step}-point steps). Obey even if the attached anchor looks ‘too nice’.\n"
+        )
     return f"""Create a photorealistic still image for a landmark deconstruction reference sequence (complete → cleared site).
 
 {scene.get('visual_prompt', '')}
-{site_activity}{director_block}{creative_extra}
+{site_activity}{director_block}{creative_extra}{photo_contract}
 Frame index: {index + 1}/{total}
 Vertical 9:16, realistic texture detail.
 Keep camera and background frozen across all frames.
@@ -196,7 +240,8 @@ async def _llm_enrich_image_prompt(base_prompt: str, structure_name: str) -> str
                 content=(
                     f"Improve this image generation prompt for a landmark deconstruction still-frame sequence of {structure_name} "
                     "(stages go from iconic complete toward cleared site; each frame must be more damaged than the anchor, never repaired). "
-                    "Keep camera-lock rules and realism constraints. Return plain prompt text only.\n\n"
+                    "Keep all numeric percentage quotas, neighbor ladder, rubric, and penultimate/last-frame anti-cliff rules verbatim in spirit; "
+                    "do not replace them with vague poetic damage. Keep camera-lock rules. Return plain prompt text only.\n\n"
                     f"{base_prompt}"
                 )
             ),
@@ -248,12 +293,23 @@ def _build_keyframe_prompt(
         if vplan_txt:
             creative_block += f"Video plan:\n{vplan_txt}\n"
 
+    pacing_clip = ""
+    if reconstruction_mode and transition_profile:
+        cs = transition_profile.get("completeness_start_pct")
+        ce = transition_profile.get("completeness_end_pct")
+        if cs is not None and ce is not None:
+            pacing_clip = (
+                f"\nEVEN CLIP PACING: Visible completeness must move steadily from ~{cs}% → ~{ce}% of the iconic "
+                "monument (100% = fully built). Use the entire clip duration — avoid finishing most growth in the "
+                "first third or crawling with imperceptible change for the last half.\n"
+            )
+
     return f"""⚠️ MONUMENT TIMELAPSE — SAME IDEA AS HOUSE CONSTRUCTION (MODE 8)
 Highly satisfying construction timelapse: START frame → END frame with visible WORK IN PROGRESS.
 
 STRUCTURE: {structure_en} — {location}
 {transition_directive}
-{creative_block}
+{creative_block}{pacing_clip}
 
 START STATE (less complete): {start_scene.get('name_en', start_scene.get('name', 'stage'))}
 END STATE (more complete): {end_scene.get('name_en', end_scene.get('name', 'stage'))}
@@ -471,10 +527,20 @@ async def generate_monument_videos(
     # Images are generated in reverse timeline (complete -> empty),
     # but videos must play forward (empty -> complete).
     transition_profiles: list[dict[str, Any]] = list(scenario.get("transition_profiles") or [])
-    if not transition_profiles and scenario.get("structure_type"):
-        stage_sequence = [s.get("stage_key") for s in scenes if s.get("stage_key")]
+    stage_sequence = [s.get("stage_key") for s in scenes if s.get("stage_key")]
+    st_key = scenario.get("structure_type")
+    if not transition_profiles and st_key:
         transition_profiles = build_transition_profiles(
-            str(scenario["structure_type"]),
+            str(st_key),
+            stage_sequence=stage_sequence or None,
+        )
+    elif (
+        transition_profiles
+        and st_key
+        and any((p or {}).get("completeness_start_pct") is None for p in transition_profiles)
+    ):
+        transition_profiles = build_transition_profiles(
+            str(st_key),
             stage_sequence=stage_sequence or None,
         )
 

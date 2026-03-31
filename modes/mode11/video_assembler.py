@@ -128,7 +128,11 @@ def assemble_mode11_video(
         try:
             from moviepy import ImageClip
             last_frame = final.get_frame(max(0, final.duration - 0.05))
-            freeze_frame = ImageClip(last_frame).set_duration(final_hold_duration).with_fps(fps).resized((target_w, target_h))
+            freeze_frame = (
+                ImageClip(last_frame, duration=final_hold_duration)
+                .with_fps(fps)
+                .resized((target_w, target_h))
+            )
             final = concatenate_videoclips([final, freeze_frame], method="compose")
         except Exception as e:
             logger.warning(f"[Mode11 Assembler] Final hold failed: {e}")
@@ -173,13 +177,22 @@ def assemble_mode11_video(
     if preview_image_path and Path(preview_image_path).exists():
         try:
             from moviepy import ImageClip
-            preview_img = Image.open(str(preview_image_path))
-            preview_clip = ImageClip(np.array(preview_img)).with_duration(preview_duration).with_fps(fps).resized((target_w, target_h))
-            merged = concatenate_videoclips([final, preview_clip], method="compose")
+            preview_img = Image.open(str(preview_image_path)).convert("RGB")
+            arr = np.asarray(preview_img, dtype=np.uint8)
+            preview_clip = (
+                ImageClip(arr, duration=preview_duration)
+                .with_fps(fps)
+                .resized((target_w, target_h))
+                .subclipped(0, preview_duration)
+            )
+            # chain: same resolution as final; avoids compose padding quirks
+            merged = concatenate_videoclips([final, preview_clip], method="chain")
             merged = merged.with_audio(final.audio if final.audio else None)
             final_to_render = merged
         except Exception as e:
             logger.warning(f"[Mode11 Assembler] Preview append failed: {e}")
+
+    total_duration = float(final_to_render.duration)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -205,8 +218,5 @@ def assemble_mode11_video(
             except Exception:
                 pass
 
-    total_duration = float(final.duration) + (
-        preview_duration if preview_image_path and Path(preview_image_path).exists() else 0.0
-    )
     logger.success(f"[Mode11 Assembler] Done -> {output_path}")
     return output_path, total_duration

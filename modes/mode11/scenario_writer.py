@@ -220,6 +220,413 @@ STRUCTURE_STAGE_DETAILS: dict[str, dict[str, str]] = {
     },
 }
 
+# Authoritative per-stage copy for **5-scene runs only** (_select_stage_sequence(5) keys, complete → cleared).
+# Keys match those five milestones: final_complete → major_partial_loss → core_structure_exposed → fragmented_ruins → fully_removed.
+STRUCTURE_FIVE_SCENE_DETAIL_EN: dict[str, dict[str, str]] = {
+    "giza_pyramids": {
+        "final_complete": (
+            "Great Pyramid of Khufu (Cheops) fully finished: smooth bright white limestone casing, gilded pyramidion on "
+            "the apex; original height read ~146.6 m; crisp pyramid geometry."
+        ),
+        "major_partial_loss": (
+            "Outer casing blocks removed and pyramidion taken away; stepped core masonry exposed. Overall height still reads "
+            "similar, but every face is visibly stepped, not smooth slabs."
+        ),
+        "core_structure_exposed": (
+            "Upper half of the pyramid dismantled above ~mid-height (roof line near ~70 m gone). Lower half remains with a "
+            "flat truncated top; internal passages and chambers partly visible or open."
+        ),
+        "fragmented_ruins": (
+            "Only the base survives — roughly the first 10–15 courses (~15 m tall), reading as a truncated platform stump. "
+            "The main pyramid volume above is removed."
+        ),
+        "fully_removed": (
+            "Leveled limestone plateau of the Giza desert: no pyramid mass, only graded desert ground and distant haze — "
+            "same horizon, empty construction-free space."
+        ),
+    },
+    "great_wall": {
+        "final_complete": (
+            "Ming-era wall segment complete: height ~7–8 m, crenellated parapet, watchtowers with loopholes and passage gates, "
+            "continuous ridge-mounted curtain."
+        ),
+        "major_partial_loss": (
+            "Parapet merlons and the upper masonry course stripped off; towers still present but shortened; curtain height "
+            "reduced to ~5 m."
+        ),
+        "core_structure_exposed": (
+            "Tower superstructures demolished down to wall deck level; upper third of wall removed; height near ~3 m; "
+            "loopholes and elevated walkways gone."
+        ),
+        "fragmented_ruins": (
+            "Outer stone/brick facing shells removed; a broad ridge berm of exposed rammed-earth core (rice-paste mortar) "
+            "is all that remains — no neat battlements."
+        ),
+        "fully_removed": (
+            "Mountain ridgeline with natural relief only: no wall line, towers, or earth-core mound — bare geological spine."
+        ),
+    },
+    "colosseum": {
+        "final_complete": (
+            "Complete Flavian amphitheater: three stacked arcaded orders, fourth attic with mast fixtures for the velarium; "
+            "open hypogeum, sand arena, and seating bowl all coherent."
+        ),
+        "major_partial_loss": (
+            "Attic tier and velarium masts dismantled; three arcaded rings remain; arena floor and hypogeum vaults still read "
+            "intact below."
+        ),
+        "core_structure_exposed": (
+            "Third (Corinthian) and second (Ionic) arcaded levels removed; only the first (Doric) tier stands ~12 m; hypogeum "
+            "largely filled/silted and only partly legible."
+        ),
+        "fragmented_ruins": (
+            "First order cleared down to springing of the ground-floor arches; exposed concrete platform ring and stumps of "
+            "travertine piers only — no continuous amphitheater bowl."
+        ),
+        "fully_removed": (
+            "Shallow basin where the ancient artificial lake sat: no standing arches, concrete collar, or arena ring — "
+            "empty depressed Roman ground matching the site footprint."
+        ),
+    },
+    "eiffel_tower": {
+        "final_complete": (
+            "Full iron lattice tower ~300 m to the third platform (~330 m including slender antenna/telegraph spire); public "
+            "lifts; all three platforms and upper lattice complete."
+        ),
+        "major_partial_loss": (
+            "Upper needle and all iron above the third platform (~276 m) removed; new top is the third deck — height read "
+            "~276 m."
+        ),
+        "core_structure_exposed": (
+            "All lattice between second (~115 m) and third platforms removed; lower half with first and second platforms "
+            "remains; upper silhouette halved."
+        ),
+        "fragmented_ruins": (
+            "Only the four inclined legs tied by the first platform (~57 m) remain; central mast and upper platforms gone — "
+            "low ‘table’ of iron at splay-tips only."
+        ),
+        "fully_removed": (
+            "Champ de Mars lawns: concrete piers shaved flush with grade; no tower iron, no stump — open park perspective "
+            "toward Trocadéro axis."
+        ),
+    },
+    "taj_mahal": {
+        "final_complete": (
+            "Complete white-marble mausoleum complex: four flanking minarets, main onion dome, four subsidiary domes/chhatris, "
+            "reflecting canal charbagh, red-sandstone gate screen when in view."
+        ),
+        "major_partial_loss": (
+            "All four minarets and the cluster of small domes removed; main marble block under the primary dome still stands "
+            "symmetrically."
+        ),
+        "core_structure_exposed": (
+            "Marble veneer and pietra dura inlay fully stripped; red sandstone structural core and ribs exposed across drum "
+            "and walls."
+        ),
+        "fragmented_ruins": (
+            "Main dome and upper third of walls dismantled; stump of mausoleum base ~15 m tall above the plinth — no soaring "
+            "silhouette."
+        ),
+        "fully_removed": (
+            "Yamuna riverfront terrace graded flat: no marble mass, domes, or minarets — only leveled podium plane and water "
+            "edge context."
+        ),
+    },
+    "christ_redeemer": {
+        "final_complete": (
+            "Finished Art Deco statue ~38 m including pedestal, ~28 m arm-span; soapstone tile skin over "
+            "reinforced-concrete structure."
+        ),
+        "major_partial_loss": (
+            "Soapstone cladding stripped from head and arms; gray concrete/rebar skeleton exposed there; torso and legs "
+            "still covered in soapstone tiles."
+        ),
+        "core_structure_exposed": (
+            "Every soapstone tile removed; complete exposed concrete carcass of the colossus including limbs and core shaft."
+        ),
+        "fragmented_ruins": (
+            "Reinforced concrete of arms, head, and upper torso above the waist removed; lower legs fused to pedestal block "
+            "remain as a short monolithic stub."
+        ),
+        "fully_removed": (
+            "Corcovado summit natural rock and vegetation only: no statue mass or artificial pedestal podium — open "
+            "mountain viewpoint toward Guanabara Bay."
+        ),
+    },
+    "statue_of_liberty": {
+        "final_complete": (
+            "Completed copper-clad colossus on massive pedestal; ~93 m to torch tip; green patina, raised torch, seven-ray "
+            "diadem."
+        ),
+        "major_partial_loss": (
+            "Torch assembly and upper crown spikes removed; head keeps basic volume but no radiating rays or flame cup."
+        ),
+        "core_structure_exposed": (
+            "Copper skin off head and torch-bearing right arm; riveted steel armature of Eiffel’s design visible in those "
+            "zones; robe still sheeted elsewhere."
+        ),
+        "fragmented_ruins": (
+            "All copper sheets stripped; internal steel mast and armatures largely cut away; granite pedestal mass may remain "
+            "as truncated base."
+        ),
+        "fully_removed": (
+            "Liberty Island foreground without colossal figure or large dressed pedestal block; historic Fort Wood masonry "
+            "may remain at shoreline; harbor water and skyline unchanged."
+        ),
+    },
+    "hanging_gardens": {
+        "final_complete": (
+            "Reconstruction reference: four superposed landscaped terraces ~40–50 m total stack; dense trees, shrubs, and sheet "
+            "water cascades; baked-brick vaults hidden by plant soil."
+        ),
+        "major_partial_loss": (
+            "All plants, humus, and deck soil lifted off; terraces show dull lead waterproof pans and naked brick groin "
+            "vaults — engineering skeleton visible."
+        ),
+        "core_structure_exposed": (
+            "Third and fourth landscaped tiers entirely gone; only two lower tiers remain totaling ~20 m visible ziggurat "
+            "stump."
+        ),
+        "fragmented_ruins": (
+            "Second and first planted decks removed; broad brick podium foundation, hydraulic lift pits, and broken hoists "
+            "only — no vertical garden stack."
+        ),
+        "fully_removed": (
+            "Mesopotamian river plain (Euphrates or Nineveh haze line): flat alluvium without ziggurat or terrace shadows — "
+            "legendary site reads empty."
+        ),
+    },
+}
+
+# **7-scene runs only**: matches FULL_STAGE_SEQUENCE order (complete → cleared).
+# Keys: final_complete → weathered_damage → major_partial_loss → core_structure_exposed → fragmented_ruins → near_disappearance → fully_removed
+STRUCTURE_SEVEN_SCENE_DETAIL_EN: dict[str, dict[str, str]] = {
+    "giza_pyramids": {
+        "final_complete": (
+            "Great Pyramid of Khufu complete: polished white limestone casing, golden pyramidion; all ~2.3 M blocks in "
+            "place; internal chambers and corridors sealed and intact."
+        ),
+        "weathered_damage": (
+            "Pyramidion removed; upper third of casing stripped from each face — stepped core blocks visible at the summit, "
+            "casing preserved only on lower ~two-thirds; silhouette slightly truncated."
+        ),
+        "major_partial_loss": (
+            "All casing gone — fully stepped core like medieval views; internal corridors still largely hidden within masonry."
+        ),
+        "core_structure_exposed": (
+            "Upper half dismantled above the King’s Chamber level — vast flat truncation deck; relieving chambers and "
+            "granite beams exposed from within the mass."
+        ),
+        "fragmented_ruins": (
+            "Chamber-and-corridor zone removed down to ~30–50 m height — only lower third remains; Queen’s Chamber, "
+            "descending corridor, and shafts fully open to the eye."
+        ),
+        "near_disappearance": (
+            "Only roughly the first ten masonry courses plus footing remain — low 3–4 m platform suggesting unfinished "
+            "base; faint ramp berms still readable."
+        ),
+        "fully_removed": (
+            "Leveled Giza plateau limestone: no blocks or foundation pits — bare natural rock plane and desert, same horizon."
+        ),
+    },
+    "great_wall": {
+        "final_complete": (
+            "Ming stone-brick curtain complete: ~8 m tall, crenellated parapet with loopholes; watchtowers every ~200 m with "
+            "lifted gates; continuous fighting walkway on top."
+        ),
+        "weathered_damage": (
+            "Merlons and upper walkway deck removed — wall top flush; tower heights cut by ~⅓ losing upper stories and roof caps."
+        ),
+        "major_partial_loss": (
+            "Towers lowered to wall deck only; upper wall course stripped — height ~5 m; outer ashlar facing off exposing "
+            "rammed-earth core bound with rice mortar."
+        ),
+        "core_structure_exposed": (
+            "Curtain sliced to ~3 m; only a ~4 m-wide earth berm flanked by tatters of side stone cladding — towers gone."
+        ),
+        "fragmented_ruins": (
+            "Earth core shaved to ~1.5 m — broad but very low ridge scarcely reading against mountain slope; compaction "
+            "laminations visible."
+        ),
+        "near_disappearance": (
+            "All fill removed — sporadic foundation stones and leveled 3–4 m wide alignment strips, grass-colonized, hint at "
+            "the old base line."
+        ),
+        "fully_removed": (
+            "Mountain spine with zero wall or earthworks — only native plants and outcrops; no anthropogenic ridge mound."
+        ),
+    },
+    "colosseum": {
+        "final_complete": (
+            "Full amphitheater: three arcaded tiers, fourth attic with velarium masts; hypogeum beneath sand arena; marble "
+            "seat tiers; wooden arena floor; lift shafts and cages in the underground service grid."
+        ),
+        "weathered_damage": (
+            "Attic + velarium hardware stripped; uppermost seating sweeps dismantled — three arch orders still fully wrap the "
+            "ellipse."
+        ),
+        "major_partial_loss": (
+            "Third Corinthian order and part of the second Ionic ring removed — outer height drops to second-tier springing; "
+            "hypogeum largely intact though arena decking is breached."
+        ),
+        "core_structure_exposed": (
+            "Second order gone — sole remaining Doric tier ~12 m; hypogeum filled with soil and refuse so only its roof ghost "
+            "shows."
+        ),
+        "fragmented_ruins": (
+            "First order deconstructed to arch springing line; interior radial walls gone — perimeter travertine piers on a "
+            "concrete ring; hypogeum fully buried under debris."
+        ),
+        "near_disappearance": (
+            "Only foundation platform and isolated pier stumps — travertine rubble defines the footprint; interior graded flat "
+            "with gravel fill."
+        ),
+        "fully_removed": (
+            "Former lake depression: grassed low basin with natural hummocks — no vaulting, concrete, or seating ring remains."
+        ),
+    },
+    "eiffel_tower": {
+        "final_complete": (
+            "Complete tower to ~330 m with broadcast antennas; three platforms, lifts, tricolor paint finish, night lighting."
+        ),
+        "weathered_damage": (
+            "Antenna mast and lattice above 300 m removed — height read 300 m; third gallery at 276 m becomes exposed summit."
+        ),
+        "major_partial_loss": (
+            "Third platform and upper lattice down to ~200 m eliminated — stump near 200 m with central pylon and primary "
+            "Warren trusses only."
+        ),
+        "core_structure_exposed": (
+            "All iron above second platform (115 m) cleared — four legs still tie decks 1 and 2; lifts serve only to level two."
+        ),
+        "fragmented_ruins": (
+            "Second deck gone; each leg shortened to ~⅓ of original height — only lower pylons linked by first platform at 57 m."
+        ),
+        "near_disappearance": (
+            "First gallery removed; legs truncated near 10 m — four concrete socket blocks with anchor bolts and short "
+            "stub columns above grade."
+        ),
+        "fully_removed": (
+            "Champ de Mars park without tower — exposed concrete plinth pads poured for the piers (optionally earth-buried "
+            "later); lawns and axis unobstructed."
+        ),
+    },
+    "taj_mahal": {
+        "final_complete": (
+            "Full complex: white marble mausoleum, four ~40 m minarets, main dome, four subsidiary domes, great gate, "
+            "charbagh canals, flanking mosque and jawab wings."
+        ),
+        "weathered_damage": (
+            "Minarets demolished to stubs; chhatris around the drum removed — central marble block with sole great dome "
+            "remains symmetrically."
+        ),
+        "major_partial_loss": (
+            "Marble veneer stripped from the mausoleum; gate and lateral buildings taken down — red sandstone core exposed; "
+            "formal garden geometry still readable."
+        ),
+        "core_structure_exposed": (
+            "Main dome and upper third of mausoleum walls removed — ~15 m high battered stump resembling unfinished fort "
+            "works."
+        ),
+        "fragmented_ruins": (
+            "Mausoleum walls cleared to stylobate — only ~7 m-high marble-faced platform; canals silted, planting disrupted."
+        ),
+        "near_disappearance": (
+            "Stylobate dismantled and pile foundations drawn — timber piles and well-caisson shadows in the soil only."
+        ),
+        "fully_removed": (
+            "Yamuna foreshore terrace slowly rewilding — graded vacant mud bank without building masses."
+        ),
+    },
+    "christ_redeemer": {
+        "final_complete": (
+            "Completed monument ~38 m with pedestal, 28 m arm span; soapstone skin; night accent lighting; crow’s nest over "
+            "Rio panorama."
+        ),
+        "weathered_damage": (
+            "Soapstone removed from head and hands revealing reinforced-concrete structure there; torso and legs still tiled."
+        ),
+        "major_partial_loss": (
+            "All soapstone cladding gone — entire figure reads as exposed concrete with rebar and formwork scars."
+        ),
+        "core_structure_exposed": (
+            "Arms and head concrete demolished — columnar torso-and-leg shaft rising from pedestal."
+        ),
+        "fragmented_ruins": (
+            "Torso and legs above pedestal jackhammered away — short ~3 m reinforced-concrete plinth cube only."
+        ),
+        "near_disappearance": (
+            "Pedestal dismantled to footing — bearing slab plus anchor bolts at rock interface, no vertical artwork above."
+        ),
+        "fully_removed": (
+            "Corcovado summit: naked bedrock and a small leveled landing — no statue pedestal bulk, jungle skyline intact."
+        ),
+    },
+    "statue_of_liberty": {
+        "final_complete": (
+            "Finished 93 m colossus on pedestal: green copper skin, gold-leafed torch, seven-ray crown; internal Eiffel steel "
+            "armature."
+        ),
+        "weathered_damage": (
+            "Torch rig and crown spikes removed — head volume simplified without rays."
+        ),
+        "major_partial_loss": (
+            "Copper sheets off head and torch arm — skeletal steel visible in those zones; remainder still patinated copper."
+        ),
+        "core_structure_exposed": (
+            "All copper gone — central mast, auxiliary trusses, and interior spiral stair fully visible aerially."
+        ),
+        "fragmented_ruins": (
+            "Steel skeleton cut down to waist — lower trusses plus granite pedestal base remain."
+        ),
+        "near_disappearance": (
+            "Residual iron removed; pedestal stonework lowered to Fort Wood roofline — star-shaped fort walls emerging."
+        ),
+        "fully_removed": (
+            "Liberty Island without statue or podium mass — low circular masonry of Fort Wood only; harbor vista clear."
+        ),
+    },
+    "hanging_gardens": {
+        "final_complete": (
+            "Reconstruction vision: four stacked garden terraces ~50 m; each deck green with trees, waterfalls, summit "
+            "pavilion; lead pans over brick vaults; active lift screws."
+        ),
+        "weathered_damage": (
+            "Vegetation and soil lifts off every deck — dull lead waterproofing sheets naked; hoists still idle but present."
+        ),
+        "major_partial_loss": (
+            "Third and fourth garden tiers removed — lower pair ~25 m tall; hydraulic feed broken so upper terraces dry."
+        ),
+        "core_structure_exposed": (
+            "Second tier cleared — single lower arcade ~12 m of brick groins on columns carrying nothing above."
+        ),
+        "fragmented_ruins": (
+            "Lower vaults demolished — massive brick footings, intake culverts, and broken chain pumps in excavation only."
+        ),
+        "near_disappearance": (
+            "Foundation pits filled and graded — faint clay piping and shallow channel scars hint at irrigation only."
+        ),
+        "fully_removed": (
+            "Euphrates / Nineveh floodplain — natural silty ground with barely perceptible ancient ditch lines, no standing "
+            "garden engineering."
+        ),
+    },
+}
+
+
+def _unique_stage_detail_for_prompt(structure_key: str, stage_key: str, num_stages: int) -> str:
+    """Prefer explicit 7- or 5-scene schedules; otherwise generic STRUCTURE_STAGE_DETAILS."""
+    if num_stages == 7:
+        seven = STRUCTURE_SEVEN_SCENE_DETAIL_EN.get(structure_key, {}).get(stage_key, "")
+        if seven:
+            return seven
+    if num_stages == 5:
+        five = STRUCTURE_FIVE_SCENE_DETAIL_EN.get(structure_key, {}).get(stage_key, "")
+        if five:
+            return five
+    return STRUCTURE_STAGE_DETAILS.get(structure_key, {}).get(stage_key, "")
+
+
 STRUCTURE_CAMERA_DIRECTIVES: dict[str, str] = {
     "giza_pyramids": (
         "High-angle elevated exterior from southwest plateau, mid-wide 28mm perspective, "
@@ -260,6 +667,104 @@ STRUCTURE_CAMERA_DIRECTIVES: dict[str, str] = {
         "medium-wide 28mm lens, stepped geometry upright and horizon level."
     ),
 }
+
+def linear_monument_remaining_pct(stage_index: int, num_stages: int) -> int:
+    """Share of iconic-complete mass/detail still visible: 100 = full monument, 0 = cleared site.
+
+    Linear in stage index so reference frames and clips distribute visual change evenly over runtime
+    (avoids huge early jumps then barely perceptible late edits).
+    """
+    if num_stages <= 1:
+        return 100
+    return max(0, min(100, round(100 * (1 - stage_index / (num_stages - 1)))))
+
+
+def monument_remaining_pct_rubric(pct: int) -> str:
+    """Plain-English still-image checklist for a target % of iconic mass remaining."""
+    if pct >= 100:
+        return (
+            "HOW THIS % MUST LOOK: Full iconic volume, height, and silhouette — the completed landmark unmistakable."
+        )
+    if pct >= 70:
+        return (
+            "HOW THIS % MUST LOOK: Monument still clearly dominates the frame; real damage, but most mass and outline "
+            "remain; never mistaken for a ruin field."
+        )
+    if pct >= 45:
+        return (
+            "HOW THIS % MUST LOOK: Large voids and missing chunks; roughly half the ‘complete’ read is gone; "
+            "silhouette fragmentary but some major masses still hint at the old shape."
+        )
+    if pct >= 20:
+        return (
+            "HOW THIS % MUST LOOK: MOSTLY GONE — low rubble rows, stumps, foundation islands, scattered spalls only; "
+            "NO intact dome/tower/statue body, NO ‘nearly finished build’ read. "
+            "If a casual viewer still sees the famous whole object, you FAILED the quota."
+        )
+    if pct > 0:
+        return (
+            "HOW THIS % MUST LOOK: Near-disappearance — faint footprint, a few stones, dust scuffs; "
+            "no vertical landmark presence."
+        )
+    return (
+        "HOW THIS % MUST LOOK: Cleared site only — same ground plane and distant context, zero standing monument mass."
+    )
+
+
+def _even_timelapse_quota_text(stage_index: int, num_stages: int) -> str:
+    if num_stages <= 1:
+        return ""
+    pct = linear_monument_remaining_pct(stage_index, num_stages)
+    step = max(1, round(100 / (num_stages - 1)))
+    prev_pct = linear_monument_remaining_pct(stage_index - 1, num_stages) if stage_index > 0 else None
+    next_pct = (
+        linear_monument_remaining_pct(stage_index + 1, num_stages) if stage_index < num_stages - 1 else None
+    )
+    rubric = monument_remaining_pct_rubric(pct)
+
+    if prev_pct is not None and next_pct is not None:
+        neighbor_line = (
+            f"THREE-FRAME LADDER (0–100 scale of how much of the COMPLETE monument still reads): "
+            f"previous still ~{prev_pct}%, THIS still ~{pct}%, next still ~{next_pct}% — only ~{step} points per hop; "
+            f"never compress multiple hops into one image.\n"
+        )
+    elif prev_pct is not None:
+        neighbor_line = (
+            f"STEP FROM PREVIOUS STILL: was ~{prev_pct}% — remove only ~{step} points of mass/detail to reach ~{pct}%.\n"
+        )
+    else:
+        neighbor_line = (
+            f"STEP FROM COMPLETE: first damaged still — drop ~{step} points from 100% to land ~{pct}%; "
+            f"next still will be ~{next_pct}%.\n"
+        )
+
+    last_i = num_stages - 1
+    anti_cliff = ""
+    if stage_index == last_i - 1:
+        anti_cliff = (
+            "ANTI-FAILURE — PENULTIMATE STILL: Do NOT output an almost-intact iconic monument here while the last "
+            "still is bare ground. At this quota the structure must already be *trace-level ruins* (see rubric). "
+            f"The final still removes only the last ~{step} points (leftover rubble/print), not the whole landmark.\n"
+        )
+    if stage_index == last_i:
+        anti_cliff = (
+            "FINAL STILL: The frame before was already ~"
+            f"{prev_pct if prev_pct is not None else step}% (near-vanish). Remove ONLY residual piles/scars — "
+            f"~{step} points — to reach cleared site; do not imply a intact monument existed one frame earlier.\n"
+        )
+
+    return (
+        f"PHOTO QUOTA (mandatory, numeric): THIS image = **~{pct}%** of iconic-complete visible mass, height, "
+        f"silhouette, and landmark detail still present (100 = full, 0 = gone). Every consecutive pair differs by "
+        f"**~{step}** points only.\n"
+        f"{neighbor_line}"
+        f"{anti_cliff}"
+        f"{rubric}\n"
+        "Map UNIQUE STAGE DETAIL onto this budget (what falls off this step), never skip the percentage.\n"
+        "FORBIDDEN: a still at quota ≤30% that still reads as a mostly whole famous building; "
+        "FORBIDDEN: idolizing the anchor (stage_000) — later frames must be far more destroyed AND hit the number."
+    )
+
 
 def _clamp_mode11_num_stages(n: int) -> int:
     """Product only supports 5 (milestone) or 7 (full arc); align with server normalization."""
@@ -823,11 +1328,21 @@ def build_transition_profiles(
 ) -> list[dict[str, Any]]:
     """Reconstruction clips in playback order (empty -> complete)."""
     labor_map = STRUCTURE_RECONSTRUCTION_LABOR.get(structure_key, {})
-    transition_keys = _build_reconstruction_transition_keys(stage_sequence or FULL_STAGE_SEQUENCE)
+    seq = list(stage_sequence or FULL_STAGE_SEQUENCE)
+    n_st = len(seq)
+    transition_keys = _build_reconstruction_transition_keys(seq)
     out: list[dict[str, Any]] = []
     for from_key, to_key in transition_keys:
         key = _tk(from_key, to_key)
         block = labor_map.get(key) or _default_reconstruction_labor(from_key, to_key)
+        try:
+            idx_from = seq.index(from_key)
+            idx_to = seq.index(to_key)
+        except ValueError:
+            idx_from, idx_to = n_st - 1, max(0, n_st - 2)
+        c_start = linear_monument_remaining_pct(idx_from, n_st) if n_st else 0
+        c_end = linear_monument_remaining_pct(idx_to, n_st) if n_st else 0
+        step = abs(c_end - c_start)
         out.append(
             {
                 "from_stage_key": from_key,
@@ -836,6 +1351,9 @@ def build_transition_profiles(
                 "machinery_en": block["machinery_en"],
                 "action_en": block["action_en"],
                 "micro_actions_en": list(block.get("micro_actions_en") or []),
+                "completeness_start_pct": c_start,
+                "completeness_end_pct": c_end,
+                "timelapse_step_pct": step,
             }
         )
     return out
@@ -900,6 +1418,7 @@ class MonumentStage(BaseModel):
     time_of_day: str = "midday"
     is_peak_moment: bool = False
     photo_director_note_en: str | None = None
+    monument_remaining_pct: int = 100
 
 
 def select_structure_type(preferred: str | None = None) -> str:
@@ -913,10 +1432,15 @@ def select_structure_type(preferred: str | None = None) -> str:
     return "colosseum"
 
 
-def _build_visual_prompt(structure: dict[str, Any], stage_key: str) -> str:
+def _build_visual_prompt(
+    structure: dict[str, Any],
+    stage_key: str,
+    stage_index: int = 0,
+    num_stages: int = 1,
+) -> str:
     stage = STAGE_TEMPLATES[stage_key]
     structure_key = structure.get("key", "")
-    unique_stage_detail = STRUCTURE_STAGE_DETAILS.get(structure_key, {}).get(stage_key, "")
+    unique_stage_detail = _unique_stage_detail_for_prompt(structure_key, stage_key, num_stages)
     deconstruction_mechanics = STRUCTURE_DECONSTRUCTION_MECHANICS.get(
         structure_key,
         "Physical deconstruction must follow gravity, structural dependencies, and material behavior.",
@@ -925,6 +1449,21 @@ def _build_visual_prompt(structure: dict[str, Any], stage_key: str) -> str:
         structure_key,
         "Three-quarter exterior view, medium-wide lens, level horizon, upright monument.",
     )
+    quota_block = _even_timelapse_quota_text(stage_index, num_stages)
+    quota_para = f"{quota_block}\n\n" if quota_block else ""
+    use_five_canon = num_stages == 5 and bool(
+        STRUCTURE_FIVE_SCENE_DETAIL_EN.get(structure_key, {}).get(stage_key)
+    )
+    use_seven_canon = num_stages == 7 and bool(
+        STRUCTURE_SEVEN_SCENE_DETAIL_EN.get(structure_key, {}).get(stage_key)
+    )
+    use_exact_schedule = use_five_canon or use_seven_canon
+    if use_seven_canon:
+        detail_heading = "UNIQUE STAGE DETAIL (7-scene exact landmark schedule — follow literally)"
+    elif use_five_canon:
+        detail_heading = "UNIQUE STAGE DETAIL (5-scene exact landmark schedule — follow literally)"
+    else:
+        detail_heading = "UNIQUE STAGE DETAIL"
     return (
         f"MONUMENT: {structure['name_en']}\n"
         f"LOCATION: {structure['location']}\n"
@@ -937,14 +1476,21 @@ def _build_visual_prompt(structure: dict[str, Any], stage_key: str) -> str:
         "- Keep the frame upright: do not rotate, flip, or tilt the image\n"
         "- Horizon must stay level (no dutch angle)\n"
         "- Photorealistic smartphone/drone hybrid look, no CGI/cartoon\n"
-        "- No logos or readable text\n\n"
+        "- No logos or readable text\n"
+        + (
+            "- If the 5- or 7-scene UNIQUE STAGE DETAIL conflicts with DECONSTRUCTION MECHANICS, follow the STAGE DETAIL\n"
+            if use_exact_schedule
+            else ""
+        )
+        + "\n"
+        f"{quota_para}"
         f"CAMERA POSITION: {camera_directive}\n\n"
         f"IDENTITY: {structure['identity']}\n"
         f"ENGINEERING DETAIL: {structure['engineering']}\n"
         f"MATERIALS: {structure['materials']}\n"
         f"SIGNATURE ELEMENTS: {structure['signature_elements']}\n\n"
         f"TRANSFORMATION: {stage['action_en']}\n"
-        f"UNIQUE STAGE DETAIL: {unique_stage_detail}\n"
+        f"{detail_heading}: {unique_stage_detail}\n"
         f"DECONSTRUCTION MECHANICS: {deconstruction_mechanics}\n"
         "REFERENCE-IMAGE CHAIN: frames are produced in order from the iconic complete state toward the cleared site; "
         "describe ONLY this stage's physical state. Background and camera stay locked; no logos or readable text."
@@ -970,6 +1516,7 @@ async def run_mode11_scenario_writer(
     stage_director: dict[str, str] = dict(creative.get("stage_photo_director") or {})
 
     stage_sequence = _select_stage_sequence(num_stages)
+    n_chain = len(stage_sequence)
     profile_note_en = (
         creative.get("profile_7_en") if len(stage_sequence) >= 7 else creative.get("profile_5_en")
     ) or ""
@@ -978,6 +1525,7 @@ async def run_mode11_scenario_writer(
         stage = STAGE_TEMPLATES[stage_key]
         next_key = stage_sequence[min(i + 1, len(stage_sequence) - 1)]
         next_stage = STAGE_TEMPLATES[next_key]
+        remaining_pct = linear_monument_remaining_pct(i, n_chain)
         scenes.append(
             MonumentStage(
                 index=i,
@@ -988,12 +1536,13 @@ async def run_mode11_scenario_writer(
                 start_state_en=stage["name_en"],
                 end_state=next_stage["name"],
                 end_state_en=next_stage["name_en"],
-                visual_prompt=_build_visual_prompt(structure, stage_key),
+                visual_prompt=_build_visual_prompt(structure, stage_key, stage_index=i, num_stages=n_chain),
                 action=stage["action"],
                 action_en=stage["action_en"],
                 build_intensity="high" if stage_key in ("major_partial_loss", "core_structure_exposed") else "medium",
                 is_peak_moment=stage_key == "core_structure_exposed",
                 photo_director_note_en=stage_director.get(stage_key),
+                monument_remaining_pct=remaining_pct,
             ).model_dump()
         )
 

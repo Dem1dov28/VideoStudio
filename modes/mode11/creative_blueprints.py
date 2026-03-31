@@ -20,6 +20,32 @@ _FULL_STAGE_ORDER = [
     "fully_removed",
 ]
 
+# Prepended to every landmark’s photo_plan_en so still generation enforces linear steps for ALL structures.
+PHOTO_LINEAR_PACING_HEADER_EN = (
+    "GLOBAL (every landmark): Obey the numeric PHOTO QUOTA / STILL-IMAGE CONTRACT in each prompt — equal steps on the "
+    "0–100% ‘remaining iconic mass’ scale between consecutive frames. Forbidden: penultimate still reads mostly intact "
+    "while the final still is bare ground; before the empty site, show trace-level ruins only."
+)
+
+VIDEO_LINEAR_PACING_HEADER_EN = (
+    "GLOBAL (every landmark): Each clip must advance only its EVEN CLIP PACING / completeness band (~start%→~end%) "
+    "steadily over the full duration — no burst-then-stall."
+)
+
+
+def _photo_plan_with_linear_header(photo_plan_en: list[str] | None) -> list[str]:
+    rows = [str(x).strip() for x in (photo_plan_en or []) if str(x).strip()]
+    if rows and rows[0] == PHOTO_LINEAR_PACING_HEADER_EN:
+        return rows
+    return [PHOTO_LINEAR_PACING_HEADER_EN, *rows]
+
+
+def _video_plan_with_linear_header(video_plan_en: list[str] | None) -> list[str]:
+    rows = [str(x).strip() for x in (video_plan_en or []) if str(x).strip()]
+    if rows and rows[0] == VIDEO_LINEAR_PACING_HEADER_EN:
+        return rows
+    return [VIDEO_LINEAR_PACING_HEADER_EN, *rows]
+
 STRUCTURE_CREATIVE_BLUEPRINTS: dict[str, dict[str, Any]] = {
     "giza_pyramids": {
         "narrative_en": (
@@ -46,11 +72,12 @@ STRUCTURE_CREATIVE_BLUEPRINTS: dict[str, dict[str, Any]] = {
             "Audio-agnostic visuals only; emphasize timelapse motion of ropes, chisels, and dragging sledges.",
         ],
         "profile_5_en": (
-            "Five-scene run hits iconic complete → major loss → exposed core → fragmented mass → cleared plateau; "
-            "make intermediate damage feel like large jumps but physically coherent."
+            "Five scenes: ~equal visual steps of remaining mass between frames (~25 percentage points each); "
+            "each still must match its quota so reconstruction playback never races at the start then crawls."
         ),
         "profile_7_en": (
-            "Seven-scene run adds weathering chips and near-vanish beats; keep each step a believable increment on limestone casing and core blocks."
+            "Seven scenes: finer but still linear steps (~16–17 points each); weathering and near-vanish beats split "
+            "the same total mass loss evenly, not bunched at one end."
         ),
         "stage_photo_director": {
             "final_complete": "Bright casing, sharp arrises, companion pyramids readable; plateau pristine.",
@@ -86,8 +113,11 @@ STRUCTURE_CREATIVE_BLUEPRINTS: dict[str, dict[str, Any]] = {
             "Keep wall width believable relative to towers; don’t balloon thickness between clips.",
             "Each clip ends closer to the iconic continuous battlements read.",
         ],
-        "profile_5_en": "Five scenes emphasize still-mighty wall → big breaches → core exposure → island stubs → ridge without wall.",
-        "profile_7_en": "Seven scenes add parapet chips and faint footing traces for smoother interpolation.",
+        "profile_5_en": (
+            "Five scenes: linear steps of how much wall+tower mass remains (~25 points per frame); "
+            "breach geometry must scale evenly so timelapse build rate stays steady."
+        ),
+        "profile_7_en": "Seven scenes: smaller equal steps; parapet chips and footing traces fill gaps without hoarding change in one clip.",
         "stage_photo_director": {
             "final_complete": "Long serpentine wall + towers; mist in valleys; crisp brick rhythm.",
             "weathered_damage": "Chipped merlons, surface spalls; wall still continuous.",
@@ -122,8 +152,11 @@ STRUCTURE_CREATIVE_BLUEPRINTS: dict[str, dict[str, Any]] = {
             "Radial walls close before outer ring reads finished; hypogeum grid reappears logically.",
             "Dust from stone cutting; travertine color warms as new faces appear.",
         ],
-        "profile_5_en": "Five scenes jump from full Colosseum to dramatic loss, skeleton, fragments, then empty bowl footprint.",
-        "profile_7_en": "Seven scenes add subtle weathering and near-vanish states for silkier morphs between keyframes.",
+        "profile_5_en": (
+            "Five scenes: distribute ellipse mass loss in ~equal steps (~25 points); avoid looking almost-finished early "
+            "then barely changing — each keyframe moves the ruin state by a full step."
+        ),
+        "profile_7_en": "Seven scenes: ~16–17 point steps; weathering and near-vanish are separate equal slices, not extra delay at the end.",
         "stage_photo_director": {
             "final_complete": "Full ellipse, three-tier arches; warm travertine; hypogeum hints consistent.",
             "weathered_damage": "Missing arch stones; façade cracks; bowl still mostly enclosed.",
@@ -158,8 +191,11 @@ STRUCTURE_CREATIVE_BLUEPRINTS: dict[str, dict[str, Any]] = {
             "Wind guy wires vibrate; no anachronistic LED floodlight rigs as hero props.",
             "Maintain champ-de-mars perspective scale: tower dominates until nearly done.",
         ],
-        "profile_5_en": "Five scenes emphasize iconic tower → deep truncation → skeletal legs → scattered iron → empty axis.",
-        "profile_7_en": "Seven scenes add early rust-patina loss and near-anchor dust for smoother FastGen blends.",
+        "profile_5_en": (
+            "Five scenes: each frame sheds ~equal share of lattice height/readable iron (~25 points); "
+            "top-down logic still applies, but the *amount* gone per stage stays even."
+        ),
+        "profile_7_en": "Seven scenes: rust and anchor dust split the journey into ~16–17 point steps for smoother but still even pacing.",
         "stage_photo_director": {
             "final_complete": "Four legs, two decks, needle; symmetric lattice shadows on lawns.",
             "weathered_damage": "Localized lattice holes; patina variation; spire intact.",
@@ -194,8 +230,11 @@ STRUCTURE_CREATIVE_BLUEPRINTS: dict[str, dict[str, Any]] = {
             "Calligraphy bands masked then revealed in believable craft order.",
             "Crowds absent; birds over water allowed for scale-free life.",
         ],
-        "profile_5_en": "Five scenes: perfect Taj → major silhouette break → core exposure → scattered domed ruins → bare platform.",
-        "profile_7_en": "Seven scenes insert weathering and near-vanish for gentler transitions between marble states.",
+        "profile_5_en": (
+            "Five scenes: symmetric mass loss in ~25-point steps (dome, minarets, drum degrade together per quota); "
+            "no ‘almost done’ look halfway through the run."
+        ),
+        "profile_7_en": "Seven scenes: weathering and near-vanish as extra equal slices; transitions stay perceptible every clip.",
         "stage_photo_director": {
             "final_complete": "White marble gleam; four minarets; central dome; pool symmetry.",
             "weathered_damage": "Surface wear; minor inlay loss; cracks localized.",
@@ -230,8 +269,10 @@ STRUCTURE_CREATIVE_BLUEPRINTS: dict[str, dict[str, Any]] = {
             "Safety nets billow; distant cargo ships static in bay.",
             "Finish with symbolic open-arm pose matching world-icon profile.",
         ],
-        "profile_5_en": "Five scenes stress intact redeemer → major silhouette break → core visible → fractured pedestal-top → absent statue.",
-        "profile_7_en": "Seven scenes add weathering chips and almost-vanish rubble for smoother limb-loss storytelling.",
+        "profile_5_en": (
+            "Five scenes: ~25-point steps along statue+pedestal read; limbs/torso loss paced evenly, not all motion in the first clip."
+        ),
+        "profile_7_en": "Seven scenes: weathering and rubble beats subdivide the same total into even steps.",
         "stage_photo_director": {
             "final_complete": "Full figure; arms wide; pedestal; bay and peaks behind.",
             "weathered_damage": "Tile chips at hands and robe edges; figure intact.",
@@ -266,8 +307,10 @@ STRUCTURE_CREATIVE_BLUEPRINTS: dict[str, dict[str, Any]] = {
             "Keep waterline and ferry wakes frozen except micro motion for timelapse life.",
             "End on classic three-quarter harbor read with torch high.",
         ],
-        "profile_5_en": "Five scenes: iconic Liberty → major upper loss → frame visible → scattered copper → harbor without statue.",
-        "profile_7_en": "Seven scenes include earlier patina fatigue and footprint rubble for steadier degradation gradients.",
+        "profile_5_en": (
+            "Five scenes: torch/crown/robe loss spread in ~25-point quota steps; copper and frame visibility advance evenly."
+        ),
+        "profile_7_en": "Seven scenes: patina and rubble as finer equal increments — steady perceived build rate.",
         "stage_photo_director": {
             "final_complete": "Torch high; crown spikes; robe drape; pedestal mass.",
             "weathered_damage": "Panel seams stressed; micro holes at folds; torch intact.",
@@ -302,8 +345,11 @@ STRUCTURE_CREATIVE_BLUEPRINTS: dict[str, dict[str, Any]] = {
             "Leaf flutter in timelapse compressed; dust in sun shafts.",
             "Finish with legendary lush cross-section read consistent with camera brief.",
         ],
-        "profile_5_en": "Five scenes: lush engineered stack → catastrophic terrace loss → bare masonry skeleton → mounds → empty plain.",
-        "profile_7_en": "Seven scenes weave vegetation stress and channel failure as separate beats before terrace stacks fall.",
+        "profile_5_en": (
+            "Five scenes: greenery + masonry + water each lose ~25 points worth of ‘full gardens’ read per step; "
+            "avoid collapsing almost everything in one frame."
+        ),
+        "profile_7_en": "Seven scenes: vegetation vs hydraulic vs terrace failure as three equal bands within the linear schedule.",
         "stage_photo_director": {
             "final_complete": "Terraced greenery; water sheets; baked brick faces; dense canopy.",
             "weathered_damage": "Thinning trees; cracked runnels; some terrace edge chips.",
@@ -332,14 +378,17 @@ def _default_blueprint(structure_key: str) -> dict[str, Any]:
             "Fixed high-angle; full monument in frame at end states.",
             "No magical morph; staged assembly and materials handling.",
         ],
-        "profile_5_en": "Five scenes use coarse milestones; make jumps physically plausible.",
-        "profile_7_en": "Seven scenes use fine steps; keep increments subtle.",
+        "profile_5_en": "Five scenes: coarse milestones but ~equal remaining-mass steps between frames; physically plausible loss.",
+        "profile_7_en": "Seven scenes: finer steps, still equal perceptual weight per stage — no front-loaded destruction.",
         "stage_photo_director": {k: f"Stage {k}: adjust mass loss consistent with global mechanics." for k in _FULL_STAGE_ORDER},
     }
 
 
 def get_creative_blueprint(structure_key: str) -> dict[str, Any]:
-    bp = STRUCTURE_CREATIVE_BLUEPRINTS.get(structure_key)
-    if bp:
-        return dict(bp)
-    return _default_blueprint(structure_key)
+    if structure_key in STRUCTURE_CREATIVE_BLUEPRINTS:
+        bp = dict(STRUCTURE_CREATIVE_BLUEPRINTS[structure_key])
+    else:
+        bp = _default_blueprint(structure_key)
+    bp["photo_plan_en"] = _photo_plan_with_linear_header(bp.get("photo_plan_en"))
+    bp["video_plan_en"] = _video_plan_with_linear_header(bp.get("video_plan_en"))
+    return bp
