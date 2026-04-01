@@ -24,10 +24,6 @@ from modes.mode11.scenario_writer import (
     monument_remaining_pct_rubric,
 )
 
-# Per-clip video LLM sees two image-prompt excerpts; cap each to limit tokens while keeping quotas + stage detail.
-_MODE11_KEYFRAME_IMG_PROMPT_MAX_CHARS = 3600
-
-
 async def _llm_text(system_text: str, human_text: str, timeout_s: float = 30.0, temperature: float = 0.5) -> str:
     llm = make_llm(temperature=temperature)
     resp = await asyncio.wait_for(
@@ -66,10 +62,12 @@ def _format_plan_lines(title: str, lines: list[str] | None) -> str:
 def _fallback_context_payload(structure: str, location: str, camera_position: str) -> dict[str, Any]:
     return {
         "camera_rules": [
-            f"Use one fixed camera position: {camera_position}",
+            f"Use one fixed camera position for every still: {camera_position}",
+            "Identical virtual camera for stage_000 through last stage: same XYZ, same lens focal length, same 9:16 crop — only subject geometry changes",
+            "Never zoom, widen, re-center, dolly, orbit, or swap focal length when the monument shrinks or disappears",
             "Keep exact framing and lens characteristics between all stages and transitions",
-            "Keep camera altitude above the monument highest point with a high-angle overview",
-            "Keep full monument body fully visible in frame at all times without cropping",
+            "Keep camera altitude above the monument from the complete shot; reuse that exact height for empty-site frames",
+            "Constant field of view vs stage_000 — do not reframe to 'fit' rubble or empty ground",
             "Never pan, rotate, reframe, mirror, or tilt the frame",
         ],
         "background_invariants": [
@@ -119,6 +117,71 @@ def _normalize_whitespace(text: str) -> str:
     cleaned = re.sub(r"[ \t]+", " ", (text or "")).strip()
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned
+
+
+def _extract_unique_stage_detail(visual_prompt: str) -> str:
+    """Pull compact per-stage detail without leaking full-chain instructions."""
+    if not visual_prompt:
+        return ""
+    for line in str(visual_prompt).splitlines():
+        s = line.strip()
+        if s.startswith("UNIQUE STAGE DETAIL"):
+            parts = s.split(":", 1)
+            if len(parts) == 2:
+                return parts[1].strip()
+    return ""
+
+
+def _profiles_match_scene_order(
+    profiles: list[dict[str, Any]],
+    scenes: list[dict[str, Any]],
+) -> bool:
+    if len(scenes) < 2:
+        return False
+    expected_pairs = [
+        (scenes[i].get("stage_key"), scenes[i - 1].get("stage_key"))
+        for i in range(len(scenes) - 1, 0, -1)
+    ]
+    if len(profiles) != len(expected_pairs):
+        return False
+    for idx, (from_key, to_key) in enumerate(expected_pairs):
+        p = profiles[idx] or {}
+        if p.get("from_stage_key") != from_key or p.get("to_stage_key") != to_key:
+            return False
+    return True
+
+
+def _video_safe_continuity_text(analysis_text: str) -> str:
+    """Remove deconstruction-only directives before reconstruction video prompting."""
+    if not analysis_text:
+        return (
+            "Camera Rules:\n"
+            "- Fixed camera, lens, crop, and horizon.\n"
+            "Physics Rules:\n"
+            "- Physical reconstruction only, no magical morphing.\n"
+            "- Human labor and equipment drive every visible structural change.\n"
+        )
+    banned_substrings = (
+        "complete→cleared site",
+        "strictly more damage",
+        "never repair",
+        "never rebuild toward completeness",
+        "each stage removes",
+    )
+    kept: list[str] = []
+    for line in str(analysis_text).splitlines():
+        low = line.lower()
+        if any(x in low for x in banned_substrings):
+            continue
+        kept.append(line)
+    kept_text = "\n".join(kept).strip()
+    mandatory = (
+        "Reconstruction Video Rules:\n"
+        "- Reconstruction direction only: less complete -> more complete.\n"
+        "- Physical labor only: workers, tools, scaffolding, hauling, lifting, assembly.\n"
+        "- Forbidden: magical self-building, teleporting parts, instant morphs, self-repair without workers.\n"
+    )
+    return f"{kept_text}\n\n{mandatory}".strip()
 
 
 def _ensure_required_constraints(text: str, is_video: bool = False) -> str:
@@ -217,11 +280,13 @@ async def _analyze_context(scenario: dict[str, Any]) -> dict[str, Any]:
     prompt = f"""Create continuity rules for a monument timelapse.
 Structure: {structure}
 Location: {location}
-Camera baseline: {camera_position}
+Camera baseline (authoritative — one rig only for every still; same as stage_000): {camera_position}
 Scenes (reverse timeline complete->empty):
 {scene_list}
 
 {creative_block if creative_block else "(No extra creative brief supplied.)"}
+
+Hard requirement: camera_rules MUST enforce identical tripod position, lens focal length, height, bearing, and crop for all stages — no reframing when the ruin shrinks or vanishes.
 
 Return strict JSON only with this schema:
 {{
@@ -332,6 +397,8 @@ Requirements:
 - Monotonic deconstruction: later stages must NEVER look repaired, restored, or more intact than earlier stages; forbid construction crews, repair, rebuilding, or adding mass
 - Match the linear pacing target and rubric: never output penultimate-almost-complete + last-empty; late frames must be mostly gone before the final clear
 - CONTENT PRESERVATION (critical): Your final prompt MUST retain every substantive fact from "Current stage source details" — PHOTO QUOTA percentages, neighbor ladder, 5-/7-scene UNIQUE STAGE DETAIL (heights, tiers, materials, what is removed). You may tighten wording but must NOT drop numbers, structural stages, or anti-cliff rules; do not replace with generic "ruins" language
+- CONTENT PRESERVATION (critical): Your final prompt MUST retain every substantive fact from "Current stage source details" — PHOTO QUOTA percentages, neighbor ladder, 5-/6-/7-scene UNIQUE STAGE DETAIL (heights, tiers, materials, what is removed). You may tighten wording but must NOT drop numbers, structural stages, or anti-cliff rules; do not replace with generic "ruins" language
+- SINGLE CAMERA: Final prompt must state that camera position, lens, height, bearing, and crop are identical to stage_000 for this stage — never introduce alternate angles, drone moves, or reframing
 - Avoid repeating exact wording from previous prompts
 - No brands/logos/text in frame
 Return only the final prompt text."""
@@ -340,7 +407,8 @@ Return only the final prompt text."""
                 system_text=(
                     "You write precise image prompts for photoreal generation. "
                     "When the user supplies a long 'Current stage source details' block, your output must embed those "
-                    "requirements (quotas, exact ruin states, dimensions) so the image model cannot miss them."
+                    "requirements (quotas, exact ruin states, dimensions) so the image model cannot miss them. "
+                    "Never change or genericize the camera: preserve locked tripod / identical rig vs stage_000."
                 ),
                 human_text=prompt,
                 timeout_s=30.0,
@@ -382,7 +450,13 @@ async def _generate_reconstruction_video_prompts(
         to_scene = scenes[start_idx - 1]
         from_img = image_prompts[start_idx]["prompt_text"] if start_idx < len(image_prompts) else ""
         to_img = image_prompts[start_idx - 1]["prompt_text"] if start_idx - 1 < len(image_prompts) else ""
+        del from_img, to_img
         prof = transition_profiles[out_idx] if out_idx < len(transition_profiles) else {}
+        continuity_video = _video_safe_continuity_text(analysis_text)
+        from_pct = from_scene.get("monument_remaining_pct")
+        to_pct = to_scene.get("monument_remaining_pct")
+        from_detail = _extract_unique_stage_detail(from_scene.get("visual_prompt", ""))
+        to_detail = _extract_unique_stage_detail(to_scene.get("visual_prompt", ""))
         labor_block = ""
         if prof:
             micro = prof.get("micro_actions_en") or []
@@ -412,29 +486,36 @@ Structure: {structure}
 Transition playback direction: from LESS complete (from stage) to MORE complete (to stage) — workers ADD mass, detail, and coherence.
 From stage: {from_scene.get('name_en', from_scene.get('name'))}
 To stage: {to_scene.get('name_en', to_scene.get('name'))}
+From stage target completeness: ~{from_pct}% of iconic mass
+To stage target completeness: ~{to_pct}% of iconic mass
+From stage concrete visual target:
+{from_detail or "Use only the named stage state and its realistic material condition."}
+To stage concrete visual target:
+{to_detail or "Reach only the named target stage; do not skip ahead to later stages."}
 {labor_block}{pacing_video}
 {narrative_block}{profile_block}{video_plan_block}
 
 Continuity rules:
-{analysis_text}
+{continuity_video}
 
 Camera position (must stay unchanged):
 {camera_position}
 
-From image prompt reference:
-{from_img[:_MODE11_KEYFRAME_IMG_PROMPT_MAX_CHARS]}
-
-To image prompt reference:
-{to_img[:_MODE11_KEYFRAME_IMG_PROMPT_MAX_CHARS]}
-
 Requirements:
+- PRIORITY ORDER (highest->lowest): (1) strict START->END stage boundary, (2) no speculative objects, (3) fixed camera lock, (4) even pacing, (5) cinematic detail
 - Fixed camera and identical background (tripod-locked); same high-angle overview; full monument in frame
 - Upright frame, level horizon, no orbital camera moves
 - Show ACTIVE workers and equipment: walking, lifting, riveting, mortaring, planting, rigging — timelapse motion blur
+- Every structural change must have visible human cause in-frame (workers and/or tools acting on materials)
 - The monument STRUCTURE must evolve from start keyframe toward end keyframe through believable staged work (no magical morph)
+- STRICT STAGE BOUNDARY: never show a state MORE complete than the target "To stage" at any moment of the clip
+- FORBIDDEN LEAKAGE: do not mention or depict stage_000/final_complete unless it is exactly the target "To stage"
+- FORBIDDEN: self-building structure, autonomous reconstruction, instant geometry pop-in without labor
+- KEYFRAME OBJECT LOCK: do not add speculative buildings/props/terrain objects absent in START and END keyframes
+- Allowed extras are ONLY temporary active workers/tools/scaffolding directly causing structural changes
 - Obey EVEN CLIP PACING if provided — uniform progress through the percentage band for the whole duration
 - Physical reconstruction only; materials behave by weight and order for THIS landmark
-- 120-180 words, concise and actionable
+- 120-260 words, concise and actionable
 - No logos/text
 Return only the final prompt text."""
         try:
@@ -473,7 +554,8 @@ async def generate_contextual_prompts(
     scenario_work = dict(scenario)
     st_key = scenario_work.get("structure_type")
     tprof = list(scenario_work.get("transition_profiles") or [])
-    stage_sequence = [s.get("stage_key") for s in scenario_work.get("scenes", []) if s.get("stage_key")]
+    scenes_work = list(scenario_work.get("scenes", []) or [])
+    stage_sequence = [s.get("stage_key") for s in scenes_work if s.get("stage_key")]
     if not tprof and st_key:
         scenario_work["transition_profiles"] = build_transition_profiles(
             str(st_key),
@@ -484,6 +566,12 @@ async def generate_contextual_prompts(
         and st_key
         and any((p or {}).get("completeness_start_pct") is None for p in tprof)
     ):
+        scenario_work["transition_profiles"] = build_transition_profiles(
+            str(st_key),
+            stage_sequence=stage_sequence or None,
+        )
+    elif st_key and not _profiles_match_scene_order(tprof, scenes_work):
+        logger.warning("[Mode11 Contextual] transition_profiles order mismatch, rebuilding canonical order")
         scenario_work["transition_profiles"] = build_transition_profiles(
             str(st_key),
             stage_sequence=stage_sequence or None,

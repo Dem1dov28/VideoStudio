@@ -47,7 +47,15 @@ class _SessionSink:
             "level": rec["level"].name,       # DEBUG INFO SUCCESS WARNING ERROR
             "text": rec["message"],
         }
-        asyncio.run_coroutine_threadsafe(self._q.put(entry), self._loop)
+        try:
+            if self._loop.is_closed():
+                return
+            asyncio.run_coroutine_threadsafe(self._q.put(entry), self._loop)
+        except (RuntimeError, asyncio.CancelledError):
+            pass
+        except Exception:
+            # Не роняем поток loguru при закрытии loop / пиковой нагрузке (FastGen в фоне)
+            pass
 
 
 # ── Pipeline runner ───────────────────────────────────────────────────────────
@@ -311,6 +319,8 @@ async def lifespan(app: FastAPI):
     worker_task.cancel()
     try:
         await worker_task
+    except asyncio.CancelledError:
+        pass
     except Exception:
         pass
     # Give running pipelines time to cleanup (FastGen browser etc.)
@@ -639,14 +649,18 @@ async def stream_logs(session_id: str):
     async def event_gen():
         q: asyncio.Queue = session["queue"]
         # Replay buffered messages if any
-        while True:
-            try:
-                entry = await asyncio.wait_for(q.get(), timeout=20)
-                yield f"data: {json.dumps(entry)}\n\n"
-                if entry.get("type") in ("done", "error"):
-                    return
-            except asyncio.TimeoutError:
-                yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+        try:
+            while True:
+                try:
+                    entry = await asyncio.wait_for(q.get(), timeout=20)
+                    yield f"data: {json.dumps(entry)}\n\n"
+                    if entry.get("type") in ("done", "error"):
+                        return
+                except asyncio.TimeoutError:
+                    yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+        except asyncio.CancelledError:
+            # Клиент закрыл вкладку / оборвал SSE — не превращать в 500 для всего ASGI
+            return
 
     return StreamingResponse(
         event_gen(),
@@ -662,7 +676,7 @@ async def get_status(session_id: str):
         raise HTTPException(404, "Session not found")
     return {
         "session_id": session_id,
-        "status": session["status"],
+        "status": session.get("status", "unknown"),
         "result": session.get("result"),
         "error": session.get("error"),
         "topic": session.get("topic", ""),
@@ -676,13 +690,13 @@ async def list_pipeline_sessions():
     active = [
         {
             "session_id": sid,
-            "status": s["status"],
+            "status": st,
             "topic": s.get("topic", "") or f"#{sid[-8:]}",
             "mode": s.get("mode", 1),
             "started_at": s.get("started_at"),
         }
         for sid, s in _sessions.items()
-        if s["status"] in ("running", "paused")
+        if (st := s.get("status")) in ("running", "paused")
     ]
     logger.info(f"[API /pipeline/sessions] returning {len(active)} active")
     return {"sessions": sorted(active, key=lambda x: x.get("started_at") or 0, reverse=True)}

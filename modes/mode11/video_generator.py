@@ -23,10 +23,31 @@ from utils.llm import make_llm
 from modes.clickbait_preview import generate_clickbait_preview
 from modes.mode11.contextual_prompt_generator import generate_contextual_prompts
 from modes.mode11.scenario_writer import (
+    MODE11_SINGLE_CAMERA_RIG_RULES_EN,
     build_transition_profiles,
     linear_monument_remaining_pct,
     monument_remaining_pct_rubric,
 )
+
+
+def _profiles_match_scene_order(
+    profiles: list[dict[str, Any]],
+    scenes: list[dict[str, Any]],
+) -> bool:
+    """Validate playback-order mapping: empty->complete transitions."""
+    if len(scenes) < 2:
+        return False
+    expected_pairs = [
+        (scenes[i].get("stage_key"), scenes[i - 1].get("stage_key"))
+        for i in range(len(scenes) - 1, 0, -1)
+    ]
+    if len(profiles) != len(expected_pairs):
+        return False
+    for idx, (from_key, to_key) in enumerate(expected_pairs):
+        prof = profiles[idx] or {}
+        if prof.get("from_stage_key") != from_key or prof.get("to_stage_key") != to_key:
+            return False
+    return True
 
 
 def _probe_video_duration(path: Path) -> float | None:
@@ -158,7 +179,11 @@ async def _normalize_video(path: Path, output_dir: Path) -> Path | None:
 
 
 def _build_image_prompt(scene: dict[str, Any], index: int, total: int, scenario: dict[str, Any] | None = None) -> str:
-    camera_position = scene.get("camera_position_en", "Fixed three-quarter view, level horizon, upright subject.")
+    camera_position = (
+        (scenario or {}).get("camera_position_en")
+        or scene.get("camera_position_en")
+        or "Fixed three-quarter exterior, high-angle, level horizon, upright subject (fallback; prefer scenario camera)."
+    )
     site_activity = ""
     if scene.get("stage_key") and scene.get("stage_key") != "final_complete":
         site_activity = (
@@ -221,12 +246,16 @@ def _build_image_prompt(scene: dict[str, Any], index: int, total: int, scenario:
 {site_activity}{director_block}{creative_extra}{photo_contract}
 Frame index: {index + 1}/{total}
 Vertical 9:16, realistic texture detail.
-Keep camera and background frozen across all frames.
-Camera position (must be exact and unchanged): {camera_position}
-Camera viewpoint is high-angle and above the monument highest point.
-Keep the entire monument fully visible in frame (no cropping of top/base/sides).
+
+━━ WRAPPER — CAMERA (must match stage_000 and every other frame) ━━
+Canonical camera for this landmark (copy exactly; do not paraphrase into a different angle):
+{camera_position}
+
+{MODE11_SINGLE_CAMERA_RIG_RULES_EN}
+
+Only the monument’s physical state changes — never camera, lens, crop, height, bearing, or distance.
 Keep image orientation upright: do not rotate, flip, or tilt.
-Keep horizon perfectly level.
+Keep horizon perfectly level (same line as stage_000).
 Only monument condition changes according to stage — always toward MORE damage, NEVER toward repair or restoration.
 """
 
@@ -241,7 +270,9 @@ async def _llm_enrich_image_prompt(base_prompt: str, structure_name: str) -> str
                     f"Improve this image generation prompt for a landmark deconstruction still-frame sequence of {structure_name} "
                     "(stages go from iconic complete toward cleared site; each frame must be more damaged than the anchor, never repaired). "
                     "Keep all numeric percentage quotas, neighbor ladder, rubric, and penultimate/last-frame anti-cliff rules verbatim in spirit; "
-                    "do not replace them with vague poetic damage. Keep camera-lock rules. Return plain prompt text only.\n\n"
+                    "do not replace them with vague poetic damage. "
+                    "Preserve SINGLE LOCKED CAMERA / MODE11 camera rig rules and the canonical CAMERA POSITION line — never change lens mm, "
+                    "height, bearing, distance, or framing. Return plain prompt text only.\n\n"
                     f"{base_prompt}"
                 )
             ),
@@ -303,6 +334,10 @@ def _build_keyframe_prompt(
                 "monument (100% = fully built). Use the entire clip duration — avoid finishing most growth in the "
                 "first third or crawling with imperceptible change for the last half.\n"
             )
+            pacing_clip += (
+                f"STRICT BOUNDARY: Never show >~{ce}% completeness at any moment of this clip. "
+                "Do not briefly jump to a near-final or fully completed monument and then come back.\n"
+            )
 
     return f"""⚠️ MONUMENT TIMELAPSE — SAME IDEA AS HOUSE CONSTRUCTION (MODE 8)
 Highly satisfying construction timelapse: START frame → END frame with visible WORK IN PROGRESS.
@@ -336,9 +371,13 @@ SPECIFIC MICRO-ACTIONS:
 ━━━ PHYSICS ━━━
 - Forward-only narrative: continuous build toward END frame
 - No instant pop-in; changes read as assembly, repair, and staged installation
+- Never overshoot END frame state at any timestamp (no temporary future-stage reveal)
+- Object scope lock: do not introduce extra scene objects/structures that are not part of START->END geometry
+- Forbidden behavior: create new buildings/objects "for realism" and later remove them
+- Any visible object must be either required by START/END states or a temporary active construction aid
 - No logos, no readable text, no brand names on equipment
 
-STYLE: Photorealistic, cinematic, vertical 9:16, natural daylight, busy authentic worksite.
+STYLE: Photorealistic, cinematic, vertical 9:16, natural daylight, focused authentic worksite (no decorative set dressing).
 AUDIO (if implied): construction ambience only — no music, no voice.
 """
 
@@ -352,6 +391,9 @@ async def _llm_enrich_video_prompt(base_prompt: str, structure_name: str) -> str
                 content=(
                     f"Enhance this keyframe transition prompt for {structure_name}. "
                     "Keep fixed camera and realistic construction/reassembly physics (workers, staging, materials). "
+                    "Every structural change must be explicitly caused by visible workers and tools; "
+                    "forbid magical self-building, instant geometry pop-in, or autonomous reconstruction. "
+                    "Do not add speculative scene objects or temporary extra structures not required by START/END keyframes. "
                     "Return only final prompt text.\n\n"
                     f"{base_prompt}"
                 )
@@ -364,6 +406,39 @@ async def _llm_enrich_video_prompt(base_prompt: str, structure_name: str) -> str
         return base_prompt
 
 
+def _builders_only_video_suffix() -> str:
+    """Hard guardrail: every Mode11 clip must be human-built (Mode8-like)."""
+    return """
+
+━━━ BUILDER-ONLY CONTRACT (HIGHEST PRIORITY) ━━━
+- PRIORITY ORDER (highest->lowest): strict START->END boundary, object-scope lock, fixed camera lock, worker-caused changes, visual polish.
+- This clip is a HUMAN CONSTRUCTION TIMELAPSE like Mode 8: workers physically build/restore the structure.
+- Show active builders in-frame through the clip: carrying materials, lifting, fastening, assembling, mortaring, rigging.
+- Structural changes must be caused by visible labor and tools/scaffolding/cranes in use.
+- FORBIDDEN: self-building geometry, autonomous reconstruction, magical morphing, instant pop-in, teleporting parts.
+- If labor is not visible, the output is invalid. Increase workers/equipment activity.
+"""
+
+
+def _strict_keyframe_path_suffix() -> str:
+    """Hard guardrail: transition must stay strictly between provided keyframes."""
+    return """
+
+━━━ STRICT KEYFRAME PATH CONTRACT (HIGHEST PRIORITY) ━━━
+- If any instruction conflicts, obey this block first.
+- The animation MUST follow ONLY the provided keyframe path: START FRAME -> END FRAME.
+- First moments must match START frame state (no extra progress already present).
+- Final moments must match END frame state (no missing required end-state details).
+- Do NOT invent intermediate states outside this range and do NOT jump ahead beyond END state.
+- Do NOT add new structures, floors, towers, wings, decorative elements, vehicles, or landscape objects absent in both keyframes.
+- Zero speculative content: do NOT introduce temporary extra architecture, side props, roads, terrain edits, or background objects that are not required by START/END.
+- Allowed temporary elements are ONLY active workers, tools, and scaffolding directly used for visible construction.
+- Keep terrain and site topology locked to keyframes: no new pits, mounds, retaining walls, or side buildings unless present in START or END.
+- Do NOT "improve" or beautify geometry beyond END frame; no overbuild, no extra reconstruction, no extra cleanup.
+- Keep composition locked to keyframes: same camera, crop, horizon, lighting baseline, and scale.
+"""
+
+
 def _anchor_reference_suffix(index: int) -> str:
     """FastGen uses stage_000 as img2img anchor; without strict wording the model often 'heals' ruins."""
     if index <= 0:
@@ -372,6 +447,7 @@ def _anchor_reference_suffix(index: int) -> str:
 
 ANCHOR REFERENCE (mandatory when a reference image is attached):
 - The reference is ONLY the fully complete monument (first frame, stage_000) for camera, lens, framing, lighting, scale, and background.
+- Your output must use the IDENTICAL camera position, focal length, and crop as that reference — only increase destruction; never simulate a new viewpoint.
 - Your output MUST show STRICTLY MORE destruction/decay/collapse than that reference — never equal or “cleaner”.
 - FORBIDDEN: repair, restoration, reconstruction, rebuilding, new masonry, repointing, cleaning weathering away,
   construction crews, cranes adding structure, or scaffolding that restores form.
@@ -439,6 +515,8 @@ async def _generate_keyframe_video(
     )
     if not prompt_override:
         prompt = await _llm_enrich_video_prompt(prompt, structure_name)
+    # Enforce builder-driven transitions even when contextual prompt_override is supplied.
+    prompt = f"{prompt}{_builders_only_video_suffix()}{_strict_keyframe_path_suffix()}"
     retries = 2
     for attempt in range(retries + 1):
         try:
@@ -539,6 +617,12 @@ async def generate_monument_videos(
         and st_key
         and any((p or {}).get("completeness_start_pct") is None for p in transition_profiles)
     ):
+        transition_profiles = build_transition_profiles(
+            str(st_key),
+            stage_sequence=stage_sequence or None,
+        )
+    if st_key and not _profiles_match_scene_order(transition_profiles, scenes):
+        logger.warning("[Mode11] transition_profiles order mismatch with scene chain, rebuilding canonical order")
         transition_profiles = build_transition_profiles(
             str(st_key),
             stage_sequence=stage_sequence or None,

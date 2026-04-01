@@ -90,8 +90,8 @@ async def run_mode11_pipeline(
             title=title,
             preview_image_path=preview_path if has_preview else None,
             preview_duration=0.3,
-            # Avoid 1.5s freeze + clickbait tail; clickbait is the only end card (0.3s).
-            final_hold_duration=0.0 if has_preview else 1.5,
+            # Keep end timing strict: no extra freeze, preview tail is exactly 0.3s when present.
+            final_hold_duration=0.0,
         ),
     )
 

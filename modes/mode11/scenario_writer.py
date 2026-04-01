@@ -1,7 +1,7 @@
 """
 Mode 11 Scenario Writer — Landmark timelapse (reference chain complete→site; video playback build-up).
 
-Default uses five stages; clips interpolate from emptier to more complete with landmark-specific labor.
+Default uses six stages; clips interpolate from emptier to more complete with landmark-specific labor.
 """
 
 from __future__ import annotations
@@ -98,7 +98,7 @@ FULL_STAGE_SEQUENCE = [
     "fully_removed",
 ]
 
-DEFAULT_NUM_STAGES = 5
+DEFAULT_NUM_STAGES = 6
 
 STAGE_TEMPLATES: dict[str, dict[str, str]] = {
     "final_complete": {
@@ -613,6 +613,52 @@ STRUCTURE_SEVEN_SCENE_DETAIL_EN: dict[str, dict[str, str]] = {
     },
 }
 
+# Per-landmark 6-scene pacing plans (playback direction: empty -> complete).
+# Sequence is aligned to _select_stage_sequence(6):
+# fully_removed -> near_disappearance -> fragmented_ruins -> core_structure_exposed -> major_partial_loss -> final_complete
+STRUCTURE_SIX_SCENE_PROFILE_EN: dict[str, str] = {
+    "giza_pyramids": (
+        "Six scenes (Giza): 0% empty plateau -> ~3% only base grid/foundation traces and first block staging -> "
+        "~10% low stepped stump starts reading -> ~25% clear lower pyramid mass with large missing upper volume -> "
+        "~50% half-height pyramid body with major upper losses -> 100% complete iconic pyramids."
+    ),
+    "great_wall": (
+        "Six scenes (Great Wall): 0% bare ridgeline -> ~3% only footing line and earth prep -> "
+        "~10% short low wall segments and tower bases -> ~25% discontinuous but recognizable wall sections -> "
+        "~50% long connected runs with large breaches -> 100% continuous wall and tower rhythm."
+    ),
+    "colosseum": (
+        "Six scenes (Colosseum): 0% empty Roman ground -> ~3% elliptical foundation ring and excavation prep -> "
+        "~10% low arcade stubs and partial ring start -> ~25% clear lower amphitheater bowl with major upper voids -> "
+        "~50% half-preserved ring with readable ellipse -> 100% full iconic Colosseum facade and bowl."
+    ),
+    "eiffel_tower": (
+        "Six scenes (Eiffel Tower): 0% open Champ de Mars skyline -> ~3% anchors/foundation pads and minimal steel prep -> "
+        "~10% short leg stubs and initial cross-bracing -> ~25% lower tower with first platform read -> "
+        "~50% mid-height tower with missing upper half -> 100% full lattice tower with platforms and spire."
+    ),
+    "taj_mahal": (
+        "Six scenes (Taj Mahal): 0% empty terrace -> ~3% plinth/foundation preparation only -> "
+        "~10% low structural start, drum/plinth mass emerging -> ~25% recognizable mausoleum base with major missing dome/minarets -> "
+        "~50% half-complete main mass, upper elements heavily reduced -> 100% full Taj complex silhouette."
+    ),
+    "christ_redeemer": (
+        "Six scenes (Christ the Redeemer): 0% empty Corcovado viewpoint -> ~3% pedestal/foundation prep only -> "
+        "~10% lower core and pedestal mass start -> ~25% recognizable statue base/torso with major missing limbs -> "
+        "~50% half-preserved figure silhouette with large losses -> 100% full iconic open-arm statue."
+    ),
+    "statue_of_liberty": (
+        "Six scenes (Statue of Liberty): 0% open island/harbor without colossus -> ~3% pedestal crown and base prep only -> "
+        "~10% lower structural core and partial robe base -> ~25% recognizable statue lower mass with major upper losses -> "
+        "~50% half-complete statue body, torch/crown still heavily incomplete -> 100% full Liberty silhouette."
+    ),
+    "hanging_gardens": (
+        "Six scenes (Hanging Gardens): 0% flat alluvial plain -> ~3% terrace footprint and irrigation base prep only -> "
+        "~10% low masonry terraces and channel starts -> ~25% recognizable lower garden stack with sparse greenery -> "
+        "~50% half-developed terraces and partial water flow -> 100% full multi-tier lush gardens with complete hydraulic read."
+    ),
+}
+
 
 def _unique_stage_detail_for_prompt(structure_key: str, stage_key: str, num_stages: int) -> str:
     """Prefer explicit 7- or 5-scene schedules; otherwise generic STRUCTURE_STAGE_DETAILS."""
@@ -625,6 +671,14 @@ def _unique_stage_detail_for_prompt(structure_key: str, stage_key: str, num_stag
         if five:
             return five
     return STRUCTURE_STAGE_DETAILS.get(structure_key, {}).get(stage_key, "")
+
+
+# Appended to every still visual_prompt; keep wording aligned with mode11 video_generator + contextual_prompt_generator.
+MODE11_SINGLE_CAMERA_RIG_RULES_EN = """SINGLE LOCKED CAMERA — entire reference chain (mandatory):
+- One virtual camera only for stage_000…stage_last: same world position, same height, same azimuth/bearing toward the subject, same lens focal length, same 9:16 crop. Every later frame must match stage_000 framing intent pixel-for-pixel (only the monument state changes).
+- When mass shrinks or disappears, do NOT zoom, do NOT widen, do NOT raise/lower the camera, do NOT re-center on rubble — keep the identical field of view; empty ground/sky fills what the monument used to occupy.
+- Forbidden: alternate angle, second unit, drone path/orbit, dolly, crane, pan, tilt, roll, Dutch angle, handheld reframing, focal-length change, lens swap, digital zoom, “hero” re-compose, reframing for composition.
+"""
 
 
 STRUCTURE_CAMERA_DIRECTIVES: dict[str, str] = {
@@ -676,6 +730,13 @@ def linear_monument_remaining_pct(stage_index: int, num_stages: int) -> int:
     """
     if num_stages <= 1:
         return 100
+    if num_stages == 6:
+        # Requested pacing profile (still chain complete->empty):
+        # 100 -> 50 -> 25 -> 10 -> 3 -> 0
+        # Playback (empty->complete): empty, foundation prep, early start, 25%, 50%, complete.
+        ladder_6 = [100, 50, 25, 10, 3, 0]
+        idx = max(0, min(stage_index, len(ladder_6) - 1))
+        return ladder_6[idx]
     return max(0, min(100, round(100 * (1 - stage_index / (num_stages - 1)))))
 
 
@@ -767,16 +828,31 @@ def _even_timelapse_quota_text(stage_index: int, num_stages: int) -> str:
 
 
 def _clamp_mode11_num_stages(n: int) -> int:
-    """Product only supports 5 (milestone) or 7 (full arc); align with server normalization."""
+    """Product supports 5 (milestone), 6 (smooth build), or 7 (full arc)."""
     try:
         v = int(n)
     except (TypeError, ValueError):
         return DEFAULT_NUM_STAGES
-    return 7 if v >= 7 else 5
+    if v >= 7:
+        return 7
+    if v >= 6:
+        return 6
+    return 5
 
 
 def _select_stage_sequence(num_stages: int) -> list[str]:
     total = max(2, min(num_stages, len(FULL_STAGE_SEQUENCE)))
+    if total == 6:
+        # Custom sequence to avoid front-loaded build speed in playback:
+        # complete -> 50% -> 25% -> early start -> foundation prep -> empty.
+        return [
+            "final_complete",
+            "major_partial_loss",
+            "core_structure_exposed",
+            "fragmented_ruins",
+            "near_disappearance",
+            "fully_removed",
+        ]
     if total == len(FULL_STAGE_SEQUENCE):
         return list(FULL_STAGE_SEQUENCE)
     # Pick evenly distributed milestones and keep order: complete -> removed.
@@ -1419,6 +1495,7 @@ class MonumentStage(BaseModel):
     is_peak_moment: bool = False
     photo_director_note_en: str | None = None
     monument_remaining_pct: int = 100
+    camera_position_en: str | None = None
 
 
 def select_structure_type(preferred: str | None = None) -> str:
@@ -1471,8 +1548,8 @@ def _build_visual_prompt(
         "TIMELAPSE RULES:\n"
         "- Fixed camera, same lens, same frame composition in all stages\n"
         "- Same weather/background; only monument state changes (each stage more damaged than the iconic complete state — never repaired or restored)\n"
-        "- Full monument must be fully visible in frame at all times (no cropping of top, base, or side mass)\n"
-        "- Camera must stay above the monument top line for a clear high-angle overview\n"
+        "- Constant field of view vs stage_000: while the monument exists, keep its full height and footprint in frame as in the complete shot; when it is gone, show the same patch of ground/sky — never change focal length or camera distance to “fit” rubble or empty space\n"
+        "- Camera must stay above the monument top line on the complete reference; later stages reuse that exact camera height and aim even when little or no monument remains\n"
         "- Keep the frame upright: do not rotate, flip, or tilt the image\n"
         "- Horizon must stay level (no dutch angle)\n"
         "- Photorealistic smartphone/drone hybrid look, no CGI/cartoon\n"
@@ -1483,6 +1560,7 @@ def _build_visual_prompt(
             else ""
         )
         + "\n"
+        f"{MODE11_SINGLE_CAMERA_RIG_RULES_EN}\n"
         f"{quota_para}"
         f"CAMERA POSITION: {camera_directive}\n\n"
         f"IDENTITY: {structure['identity']}\n"
@@ -1517,9 +1595,23 @@ async def run_mode11_scenario_writer(
 
     stage_sequence = _select_stage_sequence(num_stages)
     n_chain = len(stage_sequence)
-    profile_note_en = (
-        creative.get("profile_7_en") if len(stage_sequence) >= 7 else creative.get("profile_5_en")
-    ) or ""
+    if len(stage_sequence) >= 7:
+        profile_note_en = creative.get("profile_7_en") or ""
+    elif len(stage_sequence) == 6:
+        profile_note_en = STRUCTURE_SIX_SCENE_PROFILE_EN.get(
+            structure_key,
+            (
+                "Six scenes: enforce smooth construction pacing in playback order — "
+                "empty site (0%) -> foundation/prep (~3%) -> early build (~10%) -> quarter build (~25%) "
+                "-> half build (~50%) -> complete iconic state (100%)."
+            ),
+        )
+    else:
+        profile_note_en = creative.get("profile_5_en") or ""
+    camera_en = STRUCTURE_CAMERA_DIRECTIVES.get(
+        structure_key,
+        "Three-quarter exterior view, medium-wide lens, level horizon, upright monument.",
+    )
     scenes: list[dict[str, Any]] = []
     for i, stage_key in enumerate(stage_sequence):
         stage = STAGE_TEMPLATES[stage_key]
@@ -1543,6 +1635,7 @@ async def run_mode11_scenario_writer(
                 is_peak_moment=stage_key == "core_structure_exposed",
                 photo_director_note_en=stage_director.get(stage_key),
                 monument_remaining_pct=remaining_pct,
+                camera_position_en=camera_en,
             ).model_dump()
         )
 
@@ -1560,10 +1653,7 @@ async def run_mode11_scenario_writer(
         "structure_name": structure["name"],
         "structure_name_en": structure["name_en"],
         "location_name": structure["location"],
-        "camera_position_en": STRUCTURE_CAMERA_DIRECTIVES.get(
-            structure_key,
-            "Three-quarter exterior view, medium-wide lens, level horizon, upright monument.",
-        ),
+        "camera_position_en": camera_en,
         "transition_profiles": transition_profiles,
         "scenes": scenes,
         "total_duration": len(scenes) * 6,

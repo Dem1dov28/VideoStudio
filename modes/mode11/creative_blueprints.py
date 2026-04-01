@@ -189,7 +189,7 @@ STRUCTURE_CREATIVE_BLUEPRINTS: dict[str, dict[str, Any]] = {
             "Rivet gangs and period derricks; traveling climbers that hug existing iron.",
             "Each clip increases readable height toward the familiar Paris profile.",
             "Wind guy wires vibrate; no anachronistic LED floodlight rigs as hero props.",
-            "Maintain champ-de-mars perspective scale: tower dominates until nearly done.",
+            "Within the same locked frame as stage_000, keep tower-vs-park scale believable until the mass is gone.",
         ],
         "profile_5_en": (
             "Five scenes: each frame sheds ~equal share of lattice height/readable iron (~25 points); "
@@ -335,7 +335,7 @@ STRUCTURE_CREATIVE_BLUEPRINTS: dict[str, dict[str, Any]] = {
             "Hydraulic failure precedes total collapse: wilting → cracked channels → terrace slumps.",
             "Bitumen sheen and baked brick color stable; vegetation thins progressively.",
             "Avoid fantasy giant waterfalls; keep flows modest and engineered.",
-            "Cross-section camera must still show ‘hanging’ stack readability each stage.",
+            "Same locked cross-section camera as stage_000 must keep terrace stack readability each stage.",
             "Final: arid stepped mounds; no lush canopy.",
         ],
         "video_plan_en": [

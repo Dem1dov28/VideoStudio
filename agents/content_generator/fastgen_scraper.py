@@ -2393,8 +2393,8 @@ async def generate_single_video_multi_ref(
 
 async def _toggle_keyframes_mode(page: Page) -> bool:
     """
-    Toggle the keyframes switch on fast-gen.ai Video tab.
-    The switch has id="use-keyframes" and role="switch".
+    Enable keyframes mode on fast-gen.ai Video tab.
+    Supports both old switch UI and new segmented-button UI.
     Returns True if successfully toggled to keyframes mode.
     """
     try:
@@ -2440,8 +2440,93 @@ async def _toggle_keyframes_mode(page: Page) -> bool:
             except Exception as e:
                 logger.debug(f"[FastGen Keyframes] Toggle selector {sel} failed: {e}")
                 continue
-        
-        
+
+        # New FastGen UI: segmented control with "Ключ. кадры"/"Keyframes" button
+        try:
+            segmented_candidates = [
+                'div.flex.rounded-lg.bg-secondary\\/50.p-0\\.5 button',
+                'div[class*="rounded-lg"][class*="bg-secondary"] button',
+                # New observed FastGen buttons (segmented control items)
+                'button.flex-1.rounded-md.px-3.py-1\\.5.text-xs.font-medium.transition-colors[data-state]',
+                'button[class*="rounded-md"][class*="px-3"][class*="py-1.5"][class*="text-xs"][data-state]',
+            ]
+
+            for container_sel in segmented_candidates:
+                buttons = page.locator(container_sel)
+                count = await buttons.count()
+                if count == 0:
+                    continue
+
+                for i in range(count):
+                    btn = buttons.nth(i)
+                    try:
+                        btn_text = ((await btn.inner_text()) or "").strip().lower()
+                    except Exception:
+                        continue
+
+                    if (
+                        "ключ" in btn_text
+                        or "keyframe" in btn_text
+                        or ("key" in btn_text and "frame" in btn_text)
+                    ):
+                        data_state = await btn.get_attribute("data-state")
+                        aria_pressed = await btn.get_attribute("aria-pressed")
+                        aria_selected = await btn.get_attribute("aria-selected")
+
+                        is_active = (
+                            data_state in {"open", "active", "checked"}
+                            or aria_pressed == "true"
+                            or aria_selected == "true"
+                        )
+                        if is_active:
+                            logger.info("[FastGen Keyframes] Already in keyframes mode (segmented button)")
+                            return True
+
+                        await btn.click(force=True, timeout=2000)
+                        await asyncio.sleep(0.4)
+
+                        data_state = await btn.get_attribute("data-state")
+                        aria_pressed = await btn.get_attribute("aria-pressed")
+                        aria_selected = await btn.get_attribute("aria-selected")
+                        is_active = (
+                            data_state in {"open", "active", "checked"}
+                            or aria_pressed == "true"
+                            or aria_selected == "true"
+                            or data_state != "closed"
+                        )
+                        if is_active:
+                            logger.info("[FastGen Keyframes] Keyframes mode enabled (segmented button)")
+                            return True
+                        # FastGen sometimes keeps data-state="closed" even after successful click.
+                        logger.info("[FastGen Keyframes] Keyframes button clicked (state did not update, proceeding)")
+                        return True
+
+            # Fallback for encoding/localization edge cases:
+            # if we can detect segmented buttons with data-state, switch to a "closed" option.
+            generic_segmented = page.locator(
+                'button.flex-1.rounded-md.px-3.py-1\\.5.text-xs.font-medium.transition-colors[data-state]'
+            )
+            generic_count = await generic_segmented.count()
+            if generic_count >= 2:
+                for i in range(generic_count):
+                    btn = generic_segmented.nth(i)
+                    try:
+                        data_state = await btn.get_attribute("data-state")
+                        if data_state == "closed":
+                            await btn.click(force=True, timeout=2000)
+                            await asyncio.sleep(0.4)
+                            new_state = await btn.get_attribute("data-state")
+                            if new_state in {"open", "active", "checked"} or new_state != "closed":
+                                logger.info("[FastGen Keyframes] Keyframes mode enabled (generic segmented fallback)")
+                                return True
+                            logger.info("[FastGen Keyframes] Generic segmented keyframes button clicked (state unchanged)")
+                            return True
+                    except Exception:
+                        continue
+            logger.debug("[FastGen Keyframes] Segmented keyframes button not found/activated")
+        except Exception as e:
+            logger.debug(f"[FastGen Keyframes] Segmented button detection failed: {e}")
+
         # Last resort: try clicking any switch-like element in the video settings area
         logger.warning("[FastGen Keyframes] Trying fallback approach for keyframes toggle")
         try:

@@ -97,6 +97,9 @@ def assemble_mode11_video(
     fps = settings.video_fps
     T = max(0.0, min(crossfade_duration, 0.5))
     bottom_crop = max(0, min(0.2, getattr(settings, "video_bottom_crop", 0.05)))
+    # Keep preview as an exact frame-quantized tail (default: 0.3s at current FPS).
+    preview_frames = max(1, int(round(max(0.0, preview_duration) * fps)))
+    preview_seconds = preview_frames / float(fps)
 
     original_vcs: list[VideoFileClip] = []
     clips: list = []
@@ -180,10 +183,10 @@ def assemble_mode11_video(
             preview_img = Image.open(str(preview_image_path)).convert("RGB")
             arr = np.asarray(preview_img, dtype=np.uint8)
             preview_clip = (
-                ImageClip(arr, duration=preview_duration)
+                ImageClip(arr, duration=preview_seconds)
                 .with_fps(fps)
                 .resized((target_w, target_h))
-                .subclipped(0, preview_duration)
+                .subclipped(0, preview_seconds)
             )
             # chain: same resolution as final; avoids compose padding quirks
             merged = concatenate_videoclips([final, preview_clip], method="chain")
