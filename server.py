@@ -146,6 +146,7 @@ async def _run_pipeline_task(
             mode4_quote=getattr(req, "mode4_quote", None),
             mode4_person_name=getattr(req, "mode4_person_name", None),
             mode4_photo_path=getattr(req, "mode4_photo_path", None),
+            mode4_only_lang=getattr(req, "mode4_only_lang", None),
             mode6_num_characters=getattr(req, "mode6_num_characters", 3),
             mode7_keyboards=getattr(req, "mode7_keyboards", None),
             mode7_animal_type=getattr(req, "mode7_animal_type", None),
@@ -914,12 +915,52 @@ async def list_videos():
 
 
 @app.delete("/api/videos/{session_id}")
-async def delete_video(session_id: str):
-    """Удалить видео с диска и из истории."""
+async def delete_video(
+    session_id: str,
+    filename: str | None = Query(
+        None,
+        description="Удалить только этот файл в папке сессии (напр. video_en.mp4 для Mode 4).",
+    ),
+):
+    """
+    Удалить видео с диска и из истории.
+    Query `filename`: удалить только этот mp4 в legacy-папке сессии (RU/EN независимо).
+    Без filename — вся папка сессии или плоский video_{sid}.mp4.
+    """
     import shutil
+
+    fname = (filename or "").strip() or None
+    if fname:
+        fname = Path(fname).name
+        if not fname.endswith(".mp4") or not _is_public_session_mp4(fname):
+            raise HTTPException(400, "Некорректное имя файла")
 
     removed = False
     videos_dir = settings.videos_dir
+    session_dir = videos_dir / session_id
+
+    # Точечное удаление одного mp4 в legacy-папке (два ролика Mode 4 в одной сессии)
+    if fname and session_dir.is_dir():
+        target = (session_dir / fname).resolve()
+        try:
+            target.relative_to(session_dir.resolve())
+        except ValueError:
+            raise HTTPException(400, "Некорректный путь") from None
+        if not target.is_file():
+            raise HTTPException(404, "Video not found")
+        target.unlink()
+        removed = True
+        rest = [
+            p
+            for p in session_dir.glob("*.mp4")
+            if p.is_file() and _is_public_session_mp4(p.name)
+        ]
+        if not rest:
+            shutil.rmtree(session_dir)
+            from agents.topics_history import remove_topic
+
+            remove_topic(session_id)
+        return {"deleted": True, "partial": True}
 
     # Удалить плоский файл
     flat_path = videos_dir / f"video_{session_id}.mp4"
@@ -927,8 +968,7 @@ async def delete_video(session_id: str):
         flat_path.unlink()
         removed = True
 
-    # Удалить legacy папку session_id (видео + клипы)
-    session_dir = videos_dir / session_id
+    # Удалить legacy папку session_id целиком
     if session_dir.exists():
         shutil.rmtree(session_dir)
         removed = True
@@ -937,6 +977,7 @@ async def delete_video(session_id: str):
         raise HTTPException(404, "Video not found")
 
     from agents.topics_history import remove_topic
+
     remove_topic(session_id)
     return {"deleted": True}
 
@@ -986,17 +1027,32 @@ async def regenerate_video_from_library(
     _ensure_regenerate_assets_exist(req)
 
     videos_dir = settings.videos_dir
+    session_dir = videos_dir / session_id
+    new_sid = str(int(time.time() * 1000))
+    new_dir = videos_dir / new_sid
+
+    # Mode 4: перегенерация одного языка — сохранить второй mp4 в новой папке сессии
+    only_lang = (req.mode4_only_lang or "").strip().lower()
+    if req.mode == 4 and only_lang in ("en", "ru") and session_dir.is_dir():
+        if only_lang == "en":
+            other = session_dir / "video_ru.mp4"
+            if other.is_file():
+                new_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(other, new_dir / "video_ru.mp4")
+        elif only_lang == "ru":
+            other = session_dir / "video_en.mp4"
+            if other.is_file():
+                new_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(other, new_dir / "video_en.mp4")
+
     flat_path = videos_dir / f"video_{session_id}.mp4"
     if flat_path.exists():
         flat_path.unlink()
-    session_dir = videos_dir / session_id
     if session_dir.exists():
         shutil.rmtree(session_dir)
 
     remove_topic(session_id)
     _sessions.pop(session_id, None)
-
-    new_sid = str(int(time.time() * 1000))
     queue: asyncio.Queue = asyncio.Queue()
     pause_event = asyncio.Event()
     pause_event.set()

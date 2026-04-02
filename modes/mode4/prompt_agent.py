@@ -22,74 +22,107 @@ from utils.llm import make_llm
 
 VISION_MODEL = settings.openrouter_vision_model
 
+# Случайная «зерновая» подсказка типа локации на запрос: разнообразие между цитатами.
+# Модель ОБЯЗАНА перенести тип сцены в эпоху, регион и биографию конкретного персонажа (не копировать буквально, если несовместимо).
 _LOCATION_STEERING_HINTS: tuple[str, ...] = (
-    "covered market arcade with stalls, hanging fabrics, morning bustle",
-    "stone quay with moored boats, coiled rope, gulls, cold drizzle",
-    "cathedral or temple side aisle: stained glass or carved pillars, stone floor, few visitors",
-    "castle or fortress rampart walk: crenellations, distant hills, windy late afternoon",
-    "riverside willows and reed bank, small wooden jetty, golden hour",
-    "vineyard terrace on a slope, rough stone wall, rows of vines, harsh sun",
-    "winter palace or manor gallery: parquet or marble, portraits, tall windows, snow outside",
-    "university lecture hall or examination room: benches, slate or chalkboard, inkstands, gaslight or daylight",
-    "apothecary or alchemist workshop: shelves of jars, mortars, dried herbs, single strong light source",
-    "scriptorium or archive: lecterns, chained books, wax tablets, narrow lancet windows",
-    "blacksmith or armoury forge: anvil, glowing coals, tools on walls, heat haze",
-    "wooden barn or threshing floor: straw, beams, dust in sunbeams",
-    "orchard in bloom or fruit trees, beehives, wooden fence, spring light",
-    "mountain pass or high trail: wind, scree, distant peaks, thin cold air",
-    "desert caravanserai courtyard: arcades, well, pack animals resting, harsh shadows",
-    "steppe or open plain camp: felt tents, fire smoke, wide sky, sunset",
-    "rice paddies or irrigated fields: earthen paths, workers' hats, humid haze",
-    "bamboo grove path or tea-garden pavilion, paper lanterns at dusk",
-    "colonnaded forum or agora edge: merchants, bronze statuary, bright Mediterranean noon",
-    "Roman bath caldarium or tepidarium: marble, steam, oil lamps, echoing vaults",
-    "amphitheatre or circus lower tier: stone seats, sand, long shadows",
-    "trireme or longship deck: oars shipped, salt spray, coastline ahead",
-    "merchant counting-house above a warehouse: ledgers, scales, chests, harbor noise through shutters",
-    "coaching inn courtyard: arriving carriage, lanterns, mud or cobbles, evening rain",
-    "railway station platform era-appropriate: iron and glass canopy, steam, travelers",
-    "opera house or theatre backstage corridor: ropes, costumes on racks, gas footlights glow",
-    "concert salon or music room: fortepiano or harpsichord, gilt frames, candle chandelier",
-    "hospital or lazaretto ward of the period: iron beds, linen screens, weak daylight",
-    "law court or senate antechamber: benches, clerks' desks, solemn light",
-    "prison corridor or debtors' yard: iron grilles, worn stone, gray morning",
-    "ship's cabin or captain's great cabin: maps, compass, stern windows on moving water",
-    "observatory dome interior or terrace: brass instruments, star charts, clear night",
-    "library reading room: tall stacks, rolling ladder, green-shaded lamps",
-    "gentleman's club smoking room or coffeehouse: leather chairs, newspapers, foggy window",
-    "artist's studio: easel, plaster casts, north light window, paint-stained floor",
-    "greenhouse or orangery: humid glass, exotic plants, winter sun",
-    "stable aisle: straw, tack on walls, horses shifting, barn smell",
-    "mill interior: millstones, grain dust, shaft of light from hatch",
-    "bridge midpoint over a river: stone arches below, wind, city or country beyond",
-    "city gate or toll-bar: guards, cart traffic, dust in sun",
-    "monastery cloister: garth garden, fountain, arcades, quiet noon",
-    "synagogue or mosque courtyard appropriate to era: washing fountain, geometric tiles, peaceful hour",
-    "pilgrimage road shrine: votive candles, worn steps, forest or rock backdrop",
-    "fishing village nets and racks: drying fish, tar smell, low sun",
-    "salt pans or drying yard: white crusts, workers, glare",
-    "quarry or marble yard: raw blocks, chisels, dust, harsh light",
-    "fairground or feast-day square: booths, banners, crowd at distance",
-    "cemetery or family crypt entrance: iron gate, yew trees, overcast",
-    "roof or belvedere above the city: chimneys, pigeon flight, wind at sunset",
-    "basement wine cellar: vaulted brick, racks of bottles, single candle",
-    "council war tent or field headquarters: maps on camp table, pennants, twilight",
-    "siege camp edge: earthworks, distant walls, smoke, dawn",
-    "hunting lodge great hall: trophies, firepit, long shadows",
-    "rice-paper screen room or scholar's study: low desk, brush and ink, garden view",
-    "carriage interior moving through rain: blurred window, velvet seat, lamp sway",
-    "lighthouse keeper's gallery: lantern room, sea spray, storm light",
-    "factory floor early industrial: belts, shafts, high windows, soot (only if era allows)",
-    "dockside tavern back room: barrels, low beams, harbor light through door",
-    "formal garden parterre: clipped hedges, gravel path, fountain",
-    "wild moor or heath: wind-bent grass, stone outcrop, lowering sky",
-    "oasis palm fringe: pool, camels resting, heat shimmer",
-    "ice fair or frozen river scene (only if era/climate fits): booths on ice, fur wraps",
+    "covered market or exchange arcade, stalls, fabrics, morning bustle",
+    "stone quay, boats, rope, gulls, drizzle",
+    "cathedral or temple aisle: pillars, stone floor, dim light",
+    "rampart or fortress wall walk, crenellations, wind",
+    "riverside willows, reed bank, small jetty, golden hour",
+    "vineyard terrace, stone wall, vine rows",
+    "palace or manor gallery: parquet, portraits, tall windows",
+    "lecture hall or examination room: benches, chalkboard, inkstands",
+    "apothecary or workshop: jars, herbs, single lamp",
+    "scriptorium or archive: lecterns, books, narrow windows",
+    "forge or armoury: anvil, coals, tools",
+    "barn or threshing floor: straw, beams, dust in sunbeams",
+    "orchard or garden wall, bloom, wooden fence",
+    "mountain trail: wind, scree, distant peaks",
+    "caravanserai courtyard: arcades, well, pack animals",
+    "steppe camp: tents, fire smoke, wide sky",
+    "irrigated fields or terraces, paths, workers",
+    "tea pavilion or bamboo path, paper lanterns at dusk",
+    "forum or agora edge: colonnade, merchants, bright noon",
+    "Roman bath interior: marble, steam, oil lamps",
+    "amphitheatre stone seats, sand, long shadows",
+    "ship or boat deck: oars, spray, coastline",
+    "counting-house above warehouse: ledgers, harbor noise",
+    "coaching inn courtyard: carriage, lanterns, cobbles",
+    "railway platform: iron canopy, steam (only if era allows)",
+    "theatre backstage: ropes, costumes, footlights",
+    "music room: harpsichord or piano, candles",
+    "hospital or ward of the period: beds, screens",
+    "law court antechamber: benches, clerks",
+    "prison yard or corridor: grilles, worn stone",
+    "captain's cabin: maps, compass, sea window",
+    "observatory: brass instruments, charts, night sky",
+    "library reading room: stacks, ladder, green lamps",
+    "coffeehouse or club room: chairs, newspapers, foggy window",
+    "artist's studio: easel, casts, north light",
+    "greenhouse or orangery: glass, plants, winter sun",
+    "stable aisle: straw, tack, horses",
+    "mill interior: stones, grain dust, light shaft",
+    "bridge midpoint: arches below, wind",
+    "city gate or toll: carts, guards, dust",
+    "monastery cloister: garth, fountain, arcades",
+    "courtyard of worship: tiles, fountain, quiet hour",
+    "roadside shrine: candles, steps, trees",
+    "fishing village: nets, racks, low sun",
+    "salt works or drying yard: white glare, workers",
+    "quarry or stone yard: blocks, chisels, dust",
+    "fair or feast-day square: booths, banners",
+    "cemetery gate: iron, yew, overcast",
+    "roof or belvedere: chimneys, pigeons, sunset",
+    "wine cellar: brick vault, racks, candle",
+    "war tent or field HQ: maps, pennants, twilight",
+    "siege camp: earthworks, smoke, dawn",
+    "hunting lodge hall: fire, trophies, shadows",
+    "scholar's room: low desk, brush and ink, garden glimpse",
+    "carriage interior: rain on window, lamp sway",
+    "lighthouse gallery: lantern glass, sea spray",
+    "early factory floor: belts, high windows (only if era fits)",
+    "dockside tavern back room: barrels, harbor light",
+    "formal garden: hedges, gravel, fountain",
+    "moor or heath: bent grass, stone, lowering sky",
+    "oasis fringe: palms, pool, heat shimmer",
+    "frozen river or winter fair (only if era and climate fit)",
 )
 
 
 def _pick_location_steering_hint() -> str:
     return random.choice(_LOCATION_STEERING_HINTS)
+
+
+def _speech_language_user_hint(
+    quote: str,
+    *,
+    bilingual: bool,
+    source_russian_only: bool,
+    auto_detect_lang: bool,
+    subtitle_lang: str,
+) -> str:
+    """Одна строка в user-message: жёстко задаёт speaking in X под язык цитаты."""
+    if bilingual and source_russian_only:
+        return (
+            "ЯЗЫК РЕЧИ (bilingual): в video_prompt_ru — speaking in Russian и только русская цитата; "
+            "в video_prompt_en — speaking in English и только английский перевод; без Latin, без двух цитат в одном промпте.\n\n"
+        )
+    if auto_detect_lang:
+        return (
+            "ЯЗЫК РЕЧИ: определи detected_lang; в video_prompt speaking in [Language] совпадает с языком цитаты "
+            "(ru→Russian, en→English, de→German, fr→French, …); цитата в кавычках на том же языке.\n\n"
+        )
+    if re.search(r"[\u0400-\u04FF]", quote):
+        lang = "Russian"
+    elif subtitle_lang.lower() == "en":
+        lang = "English"
+    else:
+        lang = "Russian"
+    return (
+        f"ЯЗЫК РЕЧИ: в video_prompt — speaking in {lang}; цитата в кавычках строго на этом языке; "
+        f"не Latin/Greek, если цитата не на латыни/греческом дословно.\n\n"
+    )
 
 
 _SYSTEM = """Ты — эксперт по кинематографичной AI-генерации и исторической достоверности.
@@ -102,42 +135,65 @@ _SYSTEM = """Ты — эксперт по кинематографичной AI-
 - Освещение и быт: только то, что **реально могло быть** (свеча, лучина, масляный светильник, газовый фонарь улицы, дневной свет через конкретный тип окон — в зависимости от периода).
 - Если личность **малоизвестна** — не придумывай экзотику: возьми **характерный, хорошо документированный** архетип среды для данного статуса и региона (ткани, крой мебели, тип здания того времени).
 - В english video_prompt избегай размытых формулировок вроде «period costume», «old room»: всегда **конкретные** термины (названия предметов одежды, детали архитектуры, материалы).
+- **Реквизит и техника в кадре** — только то, что могло существовать в выбранном веке и регионе. Примеры ошибок: магнитный компас-коробка и «современная» навигация в раннем Риме; электрический свет до эпохи; панорамное остекление там, где его не было. Навигация античности — ориентиры по берегу, звёзды, гардемарины, восковые таблички, свитки-маршруты; не выдумывай приборы из более поздних веков.
 
-## ОДЕЖДА — обязательная детализация (в блоке ПЕРСОНАЖ, на английском):
-- **Ткани и фактура**: шерсть, лён, сукно, шёлк, кожа, мех, бархат — что уместно статусу и климату; плотность/вес ткани (heavy wool coat, fine linen shirt).
-- **Крой и силуэт** эпохи: длина подола, ширина рукава, высота воротника/головного убора, характерная линия плеч/талии для данного века (не XXI век).
-- **Застёжки и узлы**: пуговицы, крючки, шнуровка, пояс, фибула — **только** свойственные периоду.
-- **Обувь, чулки/поножи, перчатки**, головной убор или причёска — по нормам эпохи и пола персонажа по фото.
-- **Знаки статуса**: регалии, ордена, перстни, оружие эпохи (клинок, шпага), письменные принадлежности, инструмент ремесла — только если логично роли.
+## ЯЗЫК РЕЧИ В video_prompt (обязательно)
+- Фраза **speaking in [Language]** должна **совпадать с языком цитаты в кавычках** в том же промпте: русская цитата → `speaking in Russian`; английская → `speaking in English`; и т.д. по `detected_lang` при auto_detect.
+- **Запрещено**: писать Latin, Ancient Greek и т.п. для озвучки, если в кавычках **не** дословный текст на этом языке (цитата для пользователя на русском/английском — персонаж «говорит» на языке этой цитаты в промпте, это художественный приём для зрителя).
+- **Один** пункт РЕЧЬ — **одна** цитата **одним** языком; не дублировать в одном video_prompt две реплики на разных языках (не «saying: RU…» и отдельно «He speaks EN…»).
+- Режим **bilingual**: в `video_prompt_ru` — только `speaking in Russian` и русская цитата; в `video_prompt_en` — только `speaking in English` и английский перевод; поле `video_prompt` = как согласовано в инструкции ниже.
 
-## ЛОКАЦИЯ — обязательная детализация (в блоке ОКРУЖЕНИЕ, на английском):
-- **Тип места** + **архитектурный стиль** периода (романский/готический зал, классицизм, сруб/терем, каменный подвал, античный перистиль — по смыслу, без путаницы веков).
-- **Материалы**: камень (гранит, известняк, кирпич), дерево (тёмный дуб, сосна), штукатурка, мрамор; **пол** — плитка, доски, земля, мозаика.
-- **Окна, двери, потолок** (свод, балки, роспись, голые балки), **мебель и реквизит** с названиями предметов эпохи (кафедра, кируас, секретер, кивот, канделябр — уместные для даты).
-- **География и атмосфера**: город/сельская местность, **растительность** и погода, соответствующие региону (не пальмы у полярного круга; не «европейский» дуб в сцене Древнего Рима без контекста).
+## ОДЕЖДА — точное соответствие эпохе и личности (блок ПЕРСОНАЖ, на английском; критично):
+- Сначала мысленно зафиксируй: **век/десятилетие**, **регион**, **пол и возраст по фото**, **род занятий и статус** по имени и общеизвестным фактам. Вся одежда должна быть **проверяема** для этой комбинации (не «костюм эпохи» вообще, а одежда **этого** человека или **такого** статуса в **этом** месте и времени).
+- Для широко известных личностей — опирайся на **характерные** для них типы одежды того периода (военная форма века, сана, придворный/гражданский костюм, монашеское облачение, мундир, халат учёного и т.д.), не выдумывай фантастические варианты.
+- **Минимум 6–8 конкретных пунктов** в video_prompt про одежду и убор: ткани с названием фактуры, цветовые акценты, крой, длина, ворот, рукава, головной убор или причёска эпохи, обувь, перчатки/без, украшения или регалии **только** если уместны.
+- **Ткани и фактура**: шерсть, лён, сукно, шёлк, кожа, мех, бархат, камлот — по статусу, климату региона и веку; плотность (heavy wool greatcoat, fine cambric shirt).
+- **Крой и силуэт** строго века: не подмешивай силуэт XX–XXI века.
+- **Застёжки и узлы**: пуговицы, крючки, шнуровка, пояс, фибула — только периода.
+- Если на фото видна одежда — **не противоречь** ей по типу одежды (верх/длина/головной убор), но **детализируй и эпохализируй** под выведенный исторический контекст (как та же роль выглядела бы в документальной реконструкции).
+- Запрещено: анахронизмы, обобщения «period costume», «vintage suit» без конкретики, смешение национальных форм без оснований.
 
-## РАЗНООБРАЗИЕ ЛОКАЦИЙ (обязательно):
-- Не циклись на одних и тех же местах (кабинет с книгами, набережная, «римский сад», писательский стол у окна).
-- В **каждом** запросе пользователь даёт строку **LOCATION_STEERING_FOR_THIS_REQUEST** — это **обязательная основа** блока ОКРУЖЕНИЕ: перенеси тип места и атмосферу в эпоху и регион персонажа (замени анахронизмы эквивалентами того же **типа** сцены). **Нельзя** игнорировать подсказку и снова ставить «любимый» кабинет/набережную.
-- Каждый раз получается **одна** свежая, конкретная локация, которая **прямо подходит** персонажу и эпохе, но не обязана быть «классической» для цитат.
-- Черпай из широкого круга (всё — в границах эпохи): улочка / рынок / храм или церковь / аркада / вокзал или пристань / каюта или купе / поле или виноградник / терраса / лестница дворца / скрипторий или архив / трактир / баня или термы / сад-огород / мастерская / крыша или башня / зимний двор / подземная сводчатая зала / мост / сенат или зала заседаний / укрепление или лагерь / больничная палата эпохи / концертный зал XIX в. — и т.п.
-- Если образ на фото нейтральный — локацию всё равно зафиксируй однозначно и колоритно; не оставляй «просто комната».
+## КИНЕМАТОГРАФИЧНЫЙ ФОН, ПРИВЯЗАННЫЙ К ЭПОХЕ (обязательно для всего video_prompt)
+- Сначала **зафиксируй эпоху одной фразой** (на английском в блоке ОКРУЖЕНИЕ): примерный век, регион, тип места — например: *late 19th-century Russian provincial study*, *High Roman Empire interior*, *English Regency drawing room*. Это якорь: всё окружение должно **однозначно** относиться к этой эпохе и месту.
+- Фон — не «иллюстрация», а **кадр из исторической драмы**: глубина (передний план / середина / даль), мотивированный свет (от окна, свечей, очага, уличных фонарей — что уместно веку), объём воздуха, пыль/туман/пар при необходимости, **цветовая гамма эпохи** (теплые масляные тона, холодный дневной свет, ламповый янтарь — по смыслу).
+- Архитектура, мебель, бытовые предметы, окна, уличная застройка за окном — **только** из выбранного века; без смешения стилей и без «универсальной старины».
+- В english video_prompt используй **киноязык**: wide shot / medium shot, layered composition, chiaroscuro where fitting, atmospheric haze, practical light sources visible in frame — но без названий фильмов и режиссёров.
+
+## ОКРУЖЕНИЕ — **видимый** фон с глубиной (никогда void, пустая студия, однотонный экран).
+
+Пометь тип: *documented setting* (B) или *portrait-with-environment* (A).
+
+### B) Осмысленное место (**по умолчанию** — главный способ дать кинематографичный эпохальный фон)
+- В **каждом** запросе пользователь даёт строку **LOCATION_STEERING_FOR_THIS_REQUEST** — это **случайный тип локации для разнообразия** между разными цитатами. Твоя задача: воплотить **тот же тип сцены** (рынок / набережная / библиотека / поле / казарма / мастерская и т.п.) в **конкретном месте и архитектуре эпохи и региона персонажа**.
+- Если буквальная подсказка **географически или хронологически невозможна** (например, римский форум у северного мореплавателя XVII в.) — **не игнорируй** подсказку: замени на **эквивалент того же типа** в правильном веке и регионе (например, торговая площадь / пристань своего времени).
+- Интерьер или натура **той же эпохи**, что персонаж; дополнительно согласуй с биографией, статусом и образами цитаты, если они требуют другого, **но всё равно сохрани «тип» из подсказки**, когда это совместимо.
+- **Минимум 5–7 видимых деталей** + **2–3 кинематографических** (ключ, тени, планы, перспектива).
+- Запрещено: игнорировать LOCATION_STEERING без причины; ставить «любимый» один и тот же кабинет вопреки подсказке; случайные декорации вне эпохи и личности.
+
+### A) Портрет с глубиной (**редко**, очень абстрактная цитата)
+- Фон **всё равно эпохальный**: размытый, но узнаваемый интерьер или вид из окна **того же века** — силуэты мебели эпохи, рама окна, колонна, шторы, полки, штукатурка.
+- **Запрещено**: flat backdrop, пустая студия, градиент без предметов.
+- **5–7 деталей** фона + указание, как свет из эпохи (свеча, окно) создаёт объём.
+
+### Общее
+- Не смешивай A и B. **Если сомневаешься — B** с типичной для личности обстановкой **конкретного века**.
+- Shallow DOF допустим: фон мягкий, но **эпоха и пространство читаются** по силуэтам и свету.
 
 ## ДЕТАЛЬНОСТЬ video_prompt (200–320 слов, плотно по фактам):
 Пиши развёрнуто, на английском. Структура:
 
-1. ПЕРСОНАЖ (подробно): внешность по фото, возраст, волосы/борода; **одежда — минимум 4–6 конкретных деталей** из раздела «ОДЕЖДА» (ткани, крой, застёжки, головной убор/обувь, аксессуар эпохи); поза, осанка; выражение лица.
-2. ОКРУЖЕНИЕ (подробно): **конкретная** локация; **минимум 5–7 деталей** из раздела «ЛОКАЦИЯ» (стиль здания, материалы пола/стен, окна, мебель и предметы с историческими именами, природа/город, время суток и погода).
-3. ОСВЕЩЕНИЕ И АТМОСФЕРА: время дня, тип света (закат, газовые фонари, свечи), тени, воздух, настроение.
+1. ПЕРСОНАЖ (подробно): внешность по фото, возраст, волосы/борода; **одежда — минимум 6–8 конкретных деталей**, каждая согласована с **этой** личностью и **этой** эпохой (см. раздел «ОДЕЖДА»); поза, осанка; выражение лица.
+2. ОКРУЖЕНИЕ (подробно): якорь — век + регион + тип места на английском; **обязательно** опирайся на **LOCATION_STEERING_FOR_THIS_REQUEST** (тип сцены), перенесённый в исторически достоверную локацию для персонажа. Затем **B** или **A**; **минимум 5–7 видимых деталей фона** + кинопостановка.
+3. ОСВЕЩЕНИЕ И АТМОСФЕРА: кинематографично и **мотивированно эпохой** — источники света того времени, настроение кадра, тени, воздух (пыль, туман при уместности).
 4. ДВИЖЕНИЕ: walks slowly, stops, turns, faces the camera.
-5. РЕЧЬ: He begins speaking in [Russian/English], his voice [детальное описание тембра], saying: "[точная цитата]". Expression: [глубокое описание].
-6. Технические: wide-to-medium shot, Cinematic quality, photorealistic, 8K, vertical 9:16 portrait, shallow depth of field.
+5. РЕЧЬ: He/She begins speaking in **[exactly the language of the quoted text]**, his/her voice [тембр], saying: "[одна цитата — тот же язык]". Expression: [описание]. Без Latin/другого языка при цитате на RU/EN.
+6. Технические: period-accurate **cinematic** framing, photorealistic, 8K, vertical 9:16 portrait; shallow DOF только если эпохальный фон **читается** по свету и силуэтам.
 
 Имя в промпте НЕ писать. Описывать по роли и внешности, с **конкретной** эпохальной одеждой и местом (без штампов и без имени).
 
 Верни ТОЛЬКО JSON:
 {
-  "video_prompt": "подробный промпт 200–320 слов (одежда + локация максимально конкретны и проверяемы по эпохе)",
+  "video_prompt": "200–320 слов: одежда точно под эпоху и личность; окружение по случайной подсказке типа локации, перенесённой в исторические реалии персонажа",
   "video_prompt_ru": "промпт с 'speaking in Russian' (только если bilingual)",
   "video_prompt_en": "промпт с 'speaking in English' (только если bilingual)",
   "voice_description": "...",
@@ -244,20 +300,32 @@ async def run_quote_prompt_agent(
     ) if source_russian_only and bilingual else ""
 
     location_steering = _pick_location_steering_hint()
+    speech_hint = _speech_language_user_hint(
+        quote,
+        bilingual=bilingual,
+        source_russian_only=source_russian_only,
+        auto_detect_lang=auto_detect_lang,
+        subtitle_lang=subtitle_lang,
+    )
 
     msg = HumanMessage(content=[
         {"type": "text", "text": (
-            f"LOCATION_STEERING_FOR_THIS_REQUEST (обязательная основа окружения; адаптируй под эпоху и регион персонажа, сохрани тип места и настроение; не подменяй на шаблон «кабинет/набережная»):\n"
+            speech_hint
+            + "ОДЕЖДА: подбери **в точности** под эпоху, регион, статус и пол персонажа (имя + фото). "
+            "Минимум **6–8** конкретных элементов в блоке ПЕРСОНАЖ на английском; без анахронизмов и без обобщений «period dress».\n\n"
+            "LOCATION_STEERING_FOR_THIS_REQUEST (случайный тип локации для разнообразия между цитатами; **не копируй буквально**, если не сочетается с веком/регионом):\n"
             f"{location_steering}\n\n"
-            f"Имя личности (НЕ писать в промпте! Используй для эпохи и исторической точности): {person_name}\n\n"
+            "Обязательно: воплоти **этот тип места** в **исторически достоверной** локации для данной личности (архитектура, быт, география). "
+            "При несовместимости — тот же **тип** сцены в правильной эпохе и месте. Фон кинематографичный, с глубиной; без void. "
+            "**B** по умолчанию; **A** — редко при очень абстрактной цитате (эпохальный размытый интерьер).\n\n"
+            f"Имя личности (НЕ писать в промпте! Для эпохи, региона, одежды и локации): {person_name}\n\n"
             f"Цитата (вставить в video_prompt в кавычках): {quote}\n\n"
             f"bilingual: {bilingual}\n"
             f"subtitle_lang: {subtitle_lang}\n"
             f"auto_detect_lang: {auto_detect_lang}\n"
             f"source_russian_only: {source_russian_only}\n"
-            "video_prompt: 200–320 слов на английском. Одежда и локация — **максимально детально** и **в рамках исторических фактов** (см. системные разделы про одежду, локацию, хронологию; конкретные материалы, крой, архитектура, мебель, освещение эпохи). "
-            "Окружение: **разнообразная** подходящая локация (не штамп кабинет/набережная по умолчанию). "
-            "Перед ответом мысленно проверь: нет ли анахронизмов в одежде, здании и быту. "
+            "video_prompt: 200–320 слов на английском. В явном виде свяжи окружение с подсказкой типа локации выше (перенос в эпоху персонажа). "
+            "Проверь: одежда ↔ личность ↔ эпоха; фон ↔ история; нет пустого фона. "
             "Цитату в кавычках."
             + auto_hint
             + ru_bilingual_hint
