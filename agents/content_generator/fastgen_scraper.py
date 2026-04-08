@@ -1888,7 +1888,8 @@ def _run_single_image_with_refs_sync(
         scraper = FastGenScraper()
         await scraper.start()
         try:
-            for attempt in range(3):
+            ref_img_attempts = max(1, settings.fastgen_max_attempts)
+            for attempt in range(ref_img_attempts):
                 try:
                     paths = await scraper.generate_with_multiple_references(
                         prompt=prompt,
@@ -1898,7 +1899,10 @@ def _run_single_image_with_refs_sync(
                     )
                     return paths[0] if paths else None
                 except VideoGenerationError as e:
-                    logger.warning(f"[FastGen] Error caught during image generation (attempt {attempt+1}/3), restarting browser: {e}")
+                    logger.warning(
+                        f"[FastGen] Error caught during image generation "
+                        f"(attempt {attempt + 1}/{ref_img_attempts}), restarting browser: {e}"
+                    )
                     await scraper.restart_browser()
                     continue
             return None
@@ -3066,8 +3070,9 @@ def _run_fastgen_with_refs_sync(
         await scraper.start()
         try:
             all_paths: list[Path] = []
+            ref_img_attempts = max(1, settings.fastgen_max_attempts)
             for i, (prompt, ref_paths) in enumerate(prompts_with_refs):
-                for attempt in range(3):
+                for attempt in range(ref_img_attempts):
                     try:
                         paths = await scraper.generate_with_multiple_references(
                             prompt=prompt,
@@ -3079,7 +3084,10 @@ def _run_fastgen_with_refs_sync(
                         await _asyncio.sleep(1)
                         break
                     except VideoGenerationError as e:
-                        logger.warning(f"[FastGen] Error caught during image generation (attempt {attempt+1}/3), restarting browser: {e}")
+                        logger.warning(
+                            f"[FastGen] Error caught during image generation "
+                            f"(attempt {attempt + 1}/{ref_img_attempts}), restarting browser: {e}"
+                        )
                         await scraper.restart_browser()
                         continue
             return all_paths

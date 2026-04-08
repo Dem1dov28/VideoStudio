@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { RiPlayCircleLine, RiDownloadLine, RiTimeLine, RiDeleteBinLine } from 'react-icons/ri';
 import { motion } from 'framer-motion';
 import { api } from '../services/api';
@@ -12,15 +13,86 @@ function formatDate(ts) {
   });
 }
 
-export default function VideoCard({ video, onClick, onDelete }) {
+export default function VideoCard({ video, onClick, onDelete, youtubeStatus = null, youtubeLoading = false }) {
   const [hovered, setHovered] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [showPublishing, setShowPublishing] = useState(false);
+  const [ytPrivacy, setYtPrivacy] = useState('public');
+  const [ytLang, setYtLang] = useState(() =>
+    video?.video_lang === 'ru' ? 'ru' : 'en',
+  );
+  const [ytBusy, setYtBusy] = useState(false);
+  const [ytChannelModal, setYtChannelModal] = useState(false);
+
+  const primaryAuth = Boolean(youtubeStatus?.profiles?.primary?.authorized);
+  const secondaryAuth = Boolean(
+    youtubeStatus?.has_secondary && youtubeStatus?.profiles?.secondary?.authorized,
+  );
+  const showYoutubePanel = Boolean(
+    youtubeLoading || youtubeStatus?.client_configured,
+  );
+  const youtubeAnyReady = Boolean(
+    !youtubeLoading &&
+      youtubeStatus?.client_configured &&
+      (primaryAuth || secondaryAuth),
+  );
+  // Совместимость со старыми чанками / HMR
+  const youtubeReady = youtubeAnyReady;
 
   const base = import.meta.env.VITE_API_URL || '';
   const thumbUrl = video?.thumbnail_url ? base + video.thumbnail_url : null;
 
   if (!video?.session_id) return null;
+
+  async function runYoutubeUpload(channelProfile) {
+    const hasRu = Boolean(video.publishing?.ru);
+    const hasEn = Boolean(video.publishing?.en);
+    const bilingual = hasRu && hasEn;
+    let lang = 'en';
+    if (bilingual) lang = ytLang;
+    else if (hasEn && !hasRu) lang = 'en';
+    else if (hasRu && !hasEn) lang = 'ru';
+    else if (video.video_lang === 'ru') lang = 'ru';
+    const fn = video.filename || `video_${video.session_id}.mp4`;
+    setYtBusy(true);
+    try {
+      const r = await api.youtubeUpload({
+        session_id: video.session_id,
+        filename: fn,
+        lang,
+        privacy_status: ytPrivacy,
+        channel_profile: channelProfile,
+      });
+      const msg = r?.url ? `Залито: ${r.url}` : `video_id: ${r?.video_id || '?'}`;
+      alert(msg);
+    } catch (err) {
+      alert(err.message || String(err));
+    } finally {
+      setYtBusy(false);
+    }
+  }
+
+  function handleYoutubeButtonClick(e) {
+    e.stopPropagation();
+    if (ytBusy || youtubeLoading || !youtubeReady) return;
+    if (!youtubeStatus?.has_secondary) {
+      runYoutubeUpload('primary');
+      return;
+    }
+    const nAuth = (primaryAuth ? 1 : 0) + (secondaryAuth ? 1 : 0);
+    if (nAuth === 1) {
+      runYoutubeUpload(primaryAuth ? 'primary' : 'secondary');
+      return;
+    }
+    setYtChannelModal(true);
+  }
+
+  async function pickChannelAndUpload(profile) {
+    setYtChannelModal(false);
+    if (profile === 'primary' && !primaryAuth) return;
+    if (profile === 'secondary' && !secondaryAuth) return;
+    await runYoutubeUpload(profile);
+  }
 
   async function handleDelete(e) {
     e.stopPropagation();
@@ -54,7 +126,71 @@ export default function VideoCard({ video, onClick, onDelete }) {
     }
   }
 
+  const channelPickerModal =
+    typeof document !== 'undefined' &&
+    ytChannelModal &&
+    youtubeStatus?.has_secondary &&
+    createPortal(
+      <div
+        className="fixed inset-0 z-[200] flex items-center justify-center bg-black/70 p-4"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Выбор канала YouTube"
+        onClick={() => setYtChannelModal(false)}
+      >
+        <div
+          className="card max-w-sm w-full p-4 space-y-3 border border-[#27272f] shadow-xl bg-[#0d0d14]"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <p className="text-sm font-medium text-white text-center">Куда залить видео?</p>
+          <div className="flex flex-col gap-2">
+            <button
+              type="button"
+              disabled={!primaryAuth || ytBusy}
+              onClick={() => pickChannelAndUpload('primary')}
+              className="w-full py-2.5 rounded-lg text-sm font-medium bg-[#27272f] hover:bg-[#3f3f46] text-white disabled:opacity-40 disabled:cursor-not-allowed text-left px-3"
+            >
+              <span className="block">
+                {youtubeStatus?.profiles?.primary?.label || 'Канал 1'}
+                {!primaryAuth ? ' (не подключён)' : ''}
+              </span>
+              {primaryAuth && youtubeStatus?.profiles?.primary?.channel_hint ? (
+                <span className="block text-[11px] font-normal text-[#a1a1aa] mt-0.5 truncate" title={youtubeStatus.profiles.primary.channel_hint}>
+                  {youtubeStatus.profiles.primary.channel_hint}
+                </span>
+              ) : null}
+            </button>
+            <button
+              type="button"
+              disabled={!secondaryAuth || ytBusy}
+              onClick={() => pickChannelAndUpload('secondary')}
+              className="w-full py-2.5 rounded-lg text-sm font-medium bg-[#27272f] hover:bg-[#3f3f46] text-white disabled:opacity-40 disabled:cursor-not-allowed text-left px-3"
+            >
+              <span className="block">
+                {youtubeStatus?.profiles?.secondary?.label || 'Канал 2'}
+                {!secondaryAuth ? ' (не подключён)' : ''}
+              </span>
+              {secondaryAuth && youtubeStatus?.profiles?.secondary?.channel_hint ? (
+                <span className="block text-[11px] font-normal text-[#a1a1aa] mt-0.5 truncate" title={youtubeStatus.profiles.secondary.channel_hint}>
+                  {youtubeStatus.profiles.secondary.channel_hint}
+                </span>
+              ) : null}
+            </button>
+          </div>
+          <button
+            type="button"
+            onClick={() => setYtChannelModal(false)}
+            className="w-full py-2 text-xs text-[#71717a] hover:text-white"
+          >
+            Отмена
+          </button>
+        </div>
+      </div>,
+      document.body,
+    );
+
   return (
+    <>
     <motion.div
       whileHover={{ y: -2 }}
       transition={{ duration: 0.15 }}
@@ -275,7 +411,63 @@ export default function VideoCard({ video, onClick, onDelete }) {
             )}
           </div>
         )}
-        
+
+        {showYoutubePanel && (
+          <div
+            className="space-y-2 pt-2 border-t border-[#27272f]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[10px] font-semibold text-[#71717a] uppercase tracking-wider">
+                YouTube Shorts
+              </label>
+              {youtubeLoading && (
+                <p className="text-[10px] text-[#71717a]">
+                  Загрузка статуса аккаунтов…
+                </p>
+              )}
+              {!youtubeLoading && !youtubeReady && (
+                <p className="text-[10px] text-amber-400/90">
+                  Войди в Google (кнопки «Канал 1/2» вверху страницы).
+                </p>
+              )}
+              <div className="flex flex-wrap gap-1.5">
+                <select
+                  value={ytPrivacy}
+                  onChange={(e) => setYtPrivacy(e.target.value)}
+                  className="flex-1 min-w-[7rem] bg-[#0d0d14] border border-[#27272f] rounded px-2 py-1 text-[11px] text-white"
+                >
+                  <option value="public">Публично</option>
+                  <option value="unlisted">По ссылке</option>
+                  <option value="private">Приватно</option>
+                </select>
+                {video.publishing?.ru && video.publishing?.en ? (
+                  <select
+                    value={ytLang}
+                    onChange={(e) => setYtLang(e.target.value)}
+                    className="flex-1 min-w-[5rem] bg-[#0d0d14] border border-[#27272f] rounded px-2 py-1 text-[11px] text-white"
+                  >
+                    <option value="en">EN мета</option>
+                    <option value="ru">RU мета</option>
+                  </select>
+                ) : null}
+              </div>
+              <button
+                type="button"
+                onClick={handleYoutubeButtonClick}
+                disabled={ytBusy || youtubeLoading || !youtubeReady}
+                className="w-full flex items-center justify-center gap-1.5 text-red-400 hover:text-red-300 text-xs font-medium transition-colors py-1.5 px-2 rounded border border-red-400/40 hover:border-red-300 bg-red-500/10 disabled:opacity-50"
+              >
+                {youtubeLoading
+                  ? 'Проверка YouTube…'
+                  : ytBusy
+                    ? 'Загрузка…'
+                    : '▶ Залить на YouTube'}
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="flex items-center gap-2">
           <a
             href={video?.url ? base + video.url : '#'}
@@ -298,5 +490,7 @@ export default function VideoCard({ video, onClick, onDelete }) {
         </div>
       </div>
     </motion.div>
+    {channelPickerModal}
+    </>
   );
 }

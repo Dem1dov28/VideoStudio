@@ -109,7 +109,7 @@ HOUSE_STYLE_VISUALS = {
         "features": "marble, granite, bronze, glass, luxury estate",
     },
     "estate": {
-        "visual": "family estate, multiple buildings, park, pond",
+        "visual": "family estate, main house and outbuildings, park, pond",
         "features": "brick, stone, metal, heritage property",
     },
 }
@@ -121,8 +121,8 @@ LOCATION_VISUALS = {
         "features": "suburban setting, neighbors, street, manicured lawns",
     },
     "urban_edge": {
-        "visual": "city outskirts, modern buildings in distance, highway, infrastructure",
-        "features": "city skyline, roads, street lights",
+        "visual": "city outskirts, distant low residential roofs and trees, highway, roadside infrastructure — no high-rises or malls as focus",
+        "features": "distant low-rise suburb silhouette, roads, street lights",
     },
     "planned_community": {
         "visual": "new residential area, similar houses, manicured lawns, playgrounds",
@@ -249,7 +249,7 @@ def _build_image_prompt(
 The BACKGROUND (sky, trees, neighboring houses, street, landscape) MUST REMAIN EXACTLY THE SAME across all stages!
 - Same sky, same clouds position
 - Same trees, same grass, same ground
-- Same neighboring buildings, same street
+- Same neighboring homes, same street
 - ONLY THE HOUSE CHANGES — background is FROZEN!
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -273,7 +273,7 @@ Generate ONLY original, generic content.
 - NO visible text or logos in the scene
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-STYLE: Photorealistic, shot on smartphone camera, natural lighting, authentic construction site look. NOT 3D render, NOT CGI, NOT animated, NOT cartoon. Must look like REAL smartphone footage.
+STYLE: Photorealistic, shot on smartphone camera, natural lighting, authentic private house construction lot look. NOT 3D render, NOT CGI, NOT animated, NOT cartoon. Must look like REAL smartphone footage.
 
 {title_line}
 
@@ -286,7 +286,7 @@ STYLE: Photorealistic, shot on smartphone camera, natural lighting, authentic co
 
 COMPOSITION:
 - ⚠️ CRITICAL: Use EXACT camera calibration parameters from above - NO variations allowed
-- Wide shot showing the ENTIRE house and building site (house occupies 40-50% of frame)
+- Wide shot showing the ENTIRE house and the residential lot (house occupies 40-50% of frame)
 - Vertical 9:16 aspect ratio (TikTok/Reels/Shorts format)
 - ⚠️ Camera angle is LOCKED - same perspective for ALL stages (see calibration data)
 - Natural daylight, sun position consistent (sun at ~45° elevation from horizon)
@@ -297,9 +297,9 @@ COMPOSITION:
 - CONSTRUCTION EQUIPMENT visible if appropriate
 
 CRITICAL REQUIREMENTS:
-- This MUST look like a REAL PHOTO from a construction site
+- This MUST look like a REAL PHOTO from a house-building lot
 - Imperfect lighting, realistic proportions
-- Authentic construction site details
+- Authentic residential lot details (forms, tools, soil, materials)
 - No artificial or rendered look
 - Natural colors, not oversaturated
 - If previous stage image is provided as reference, match the EXACT camera angle and perspective
@@ -323,7 +323,7 @@ CRITICAL REQUIREMENTS:
 The BACKGROUND (sky, trees, neighboring houses, street, landscape) MUST REMAIN EXACTLY THE SAME across all stages!
 - Same sky, same clouds position
 - Same trees, same grass, same ground
-- Same neighboring buildings, same street
+- Same neighboring homes, same street
 - ONLY THE HOUSE CHANGES — background is FROZEN!
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -348,7 +348,7 @@ Generate ONLY original, generic content.
 - Use only neutral descriptions (materials, shapes, function)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-STYLE: Photorealistic, shot on smartphone camera, natural lighting, authentic construction site look. NOT 3D render, NOT CGI, NOT animated, NOT cartoon. Must look like REAL smartphone footage.
+STYLE: Photorealistic, shot on smartphone camera, natural lighting, authentic private house construction lot look. NOT 3D render, NOT CGI, NOT animated, NOT cartoon. Must look like REAL smartphone footage.
 
 {title_line}
 
@@ -367,7 +367,7 @@ SCENE DESCRIPTION:
 
 COMPOSITION:
 - ⚠️ CRITICAL: Use EXACT camera calibration parameters from above - NO variations allowed
-- Wide shot showing the ENTIRE house and building site (house occupies 40-50% of frame)
+- Wide shot showing the ENTIRE house and the residential lot (house occupies 40-50% of frame)
 - Vertical 9:16 aspect ratio (TikTok/Reels/Shorts format)
 - ⚠️ Camera angle is LOCKED - same perspective for ALL stages (see calibration data)
 - Natural daylight, sun position consistent (sun at ~45° elevation from horizon)
@@ -378,9 +378,9 @@ COMPOSITION:
 - CONSTRUCTION EQUIPMENT visible if appropriate (cranes, trucks, excavators)
 
 CRITICAL REQUIREMENTS:
-- This MUST look like a REAL PHOTO from a construction site
+- This MUST look like a REAL PHOTO from a house-building lot
 - Imperfect lighting, realistic proportions
-- Authentic construction site details
+- Authentic residential lot details (forms, tools, soil, materials)
 - No artificial or rendered look
 - Natural colors, not oversaturated
 - If previous stage image is provided as reference, match the EXACT camera angle and perspective
@@ -601,7 +601,7 @@ MAIN ACTIVITY: {action}
 - Uneven surfaces, dirt patches, construction mess
 - Workers' footprints in dirt
 - Temporary structures, tarps, protective coverings
-- Real construction site feels lived-in and working
+- Real house-building lot feels lived-in and working
 - NOT a perfect clean CGI scene
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -624,7 +624,7 @@ FRAMING: Vertical 9:16. ⚠️ Wide shot composition is FIXED - same framing for
 - Horizon Line: 40% from bottom
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-AUDIO: Construction site ambience — machinery sounds, tools, footsteps, activity. NO MUSIC. NO VOICE.
+AUDIO: Residential house-build lot ambience — machinery sounds, tools, footsteps, activity. NO MUSIC. NO VOICE.
 
 STYLE: Photorealistic, cinematic, ultra detailed, smooth motion.
 
@@ -655,10 +655,10 @@ def _build_keyframe_video_prompt(
     [Shot Type] + [Subject Action] + [Camera Motion] + [Environment] + [Temporal] + [Technical]
     
     For construction timelapse:
-    - Shot: wide_shot (full construction site visible)
+    - Shot: wide_shot (full house lot and build area visible)
     - Camera: static/locked-off (CRITICAL for timelapse consistency)
     - Temporal: time_lapse (compressed time)
-    - Environment: outdoor construction site
+    - Environment: outdoor residential building lot (single-family home)
     
     CRITICAL: ALL keyframe videos use STATIC CAMERA - NO movement except final drone showcase.
     """

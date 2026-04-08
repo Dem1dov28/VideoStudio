@@ -17,7 +17,7 @@ from urllib.parse import quote
 
 from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response, StreamingResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pydantic import BaseModel, field_validator
@@ -26,6 +26,9 @@ from config import settings
 
 # ── Session store ─────────────────────────────────────────────────────────────
 _sessions: dict[str, dict] = {}
+
+# ── YouTube OAuth (state → unix time) ─────────────────────────────────────────
+_youtube_oauth_states: dict[str, float] = {}
 
 # Statuses: running | paused | done | error | cancelled
 
@@ -75,6 +78,12 @@ def _session_topic_from_request(req: "StartRequest") -> str:
         if st:
             return f"Памятник: {st}"[:100]
         return "Памятники (деконструкция)"
+    if m == 12:
+        rt = (getattr(req, "mode12_room_type", None) or "").strip()
+        rl = (getattr(req, "mode12_room_lighting", None) or "").strip()
+        if rt or rl:
+            return f"Комната: {rt or '?'} / {rl or '?'}"[:100]
+        return "Уборка и реставрация комнаты"
     if m == 8:
         hs = (getattr(req, "mode8_house_style", None) or "").strip()
         loc = (getattr(req, "mode8_location", None) or "").strip()
@@ -161,6 +170,8 @@ async def _run_pipeline_task(
             mode10_num_stages=getattr(req, "mode10_num_stages", 5),
             mode11_structure_type=getattr(req, "mode11_structure_type", None),
             mode11_num_stages=getattr(req, "mode11_num_stages", 5),
+            mode12_room_type=getattr(req, "mode12_room_type", None),
+            mode12_room_lighting=getattr(req, "mode12_room_lighting", None),
             control=control,
         )
 
@@ -392,6 +403,42 @@ class LibraryRegenerateBody(BaseModel):
     filename: str | None = None
 
 
+class YouTubeUploadBody(BaseModel):
+    """Публикация готового файла из библиотеки на YouTube Shorts (videos.insert)."""
+    session_id: str
+    filename: str | None = None
+    lang: str | None = None
+    privacy_status: str = "public"
+    # primary = YOUTUBE_OAUTH_TOKEN, secondary = YOUTUBE_OAUTH_TOKEN_B (другой канал / тот же Gmail)
+    channel_profile: str = "primary"
+
+    @field_validator("privacy_status")
+    @classmethod
+    def _privacy(cls, v: str) -> str:
+        allowed = frozenset({"private", "unlisted", "public"})
+        if v not in allowed:
+            raise ValueError("privacy_status: private | unlisted | public")
+        return v
+
+    @field_validator("channel_profile")
+    @classmethod
+    def _chprof(cls, v: str) -> str:
+        x = (v or "primary").strip().lower()
+        if x not in ("primary", "secondary"):
+            raise ValueError("channel_profile: primary | secondary")
+        return x
+
+    @field_validator("lang")
+    @classmethod
+    def _lang(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        x = v.strip().lower()
+        if x not in ("ru", "en"):
+            raise ValueError("lang: ru | en")
+        return x
+
+
 class StartRequest(BaseModel):
     topic: str | None = None
     auto_topic: bool = False
@@ -438,6 +485,9 @@ class StartRequest(BaseModel):
     mode11_structure_type: str | None = None
     # None = взять num_scenes (очередь / старые клиенты); иначе явно 5 или 7 после нормализации
     mode11_num_stages: int | None = None
+    # Mode 12: уборка и реставрация комнаты (5 стадий фиксированно в пайплайне)
+    mode12_room_type: str | None = None
+    mode12_room_lighting: str | None = None
 
     @field_validator("mode4_only_lang", mode="before")
     @classmethod
@@ -470,7 +520,7 @@ def _validate_start_request(req: StartRequest) -> None:
     elif req.mode == 5:
         if not req.topic or not req.topic.strip():
             raise HTTPException(400, "Mode 5: введите тему для длинного видео")
-    elif req.mode in (6, 7, 8, 9, 10, 11):
+    elif req.mode in (6, 7, 8, 9, 10, 11, 12):
         pass
     elif not req.topic and not req.auto_topic:
         raise HTTPException(400, "Provide 'topic' or set 'auto_topic: true'")
@@ -488,6 +538,9 @@ def _normalize_mode_specific_request(req: StartRequest) -> None:
             n = 5
         req.mode11_num_stages = 7 if n >= 7 else 5
         req.num_scenes = req.mode11_num_stages
+        req.show_subtitles = False
+    if req.mode == 12:
+        req.num_scenes = 5
         req.show_subtitles = False
 
 
@@ -911,6 +964,308 @@ async def list_videos():
     data = _get_video_metadata()
     logger.info(f"[API /videos] returning {len(data)} videos")
     return {"videos": data}
+
+
+def _read_google_credential_token_for_revoke(path: Path) -> str | None:
+    """refresh_token (лучше) или access token из JSON от google.auth."""
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return raw.get("refresh_token") or raw.get("token")
+
+
+def _revoke_google_token_blocking(token: str) -> None:
+    try:
+        import httpx
+
+        r = httpx.post(
+            "https://oauth2.googleapis.com/revoke",
+            data={"token": token},
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=15.0,
+        )
+        if r.status_code not in (200, 400):
+            logger.warning(f"[YouTube] revoke → {r.status_code}: {r.text[:200]}")
+    except Exception as ex:
+        logger.warning(f"[YouTube] revoke request failed: {ex}")
+
+
+def _youtube_oauth_cleanup_states() -> None:
+    now = time.time()
+    for s in list(_youtube_oauth_states.keys()):
+        raw = _youtube_oauth_states.get(s)
+        t = raw["t"] if isinstance(raw, dict) else raw
+        if now - t > 600:
+            _youtube_oauth_states.pop(s, None)
+
+
+def _session_topic_fallback(session_id: str) -> str:
+    try:
+        from agents.topics_history import get_used_topics
+
+        for t in get_used_topics():
+            if t.get("session_id") == session_id:
+                return (t.get("topic") or t.get("video_angle") or session_id[-8:])[:200]
+    except Exception:
+        pass
+    return f"Short {session_id[-8:]}"
+
+
+def _youtube_channel_hint(channels: list[dict]) -> str:
+    if not channels:
+        return ""
+    if len(channels) == 1:
+        t = channels[0].get("title") or ""
+        cu = (channels[0].get("custom_url") or "").strip().lstrip("@")
+        if t and cu:
+            return f"{t} (@{cu})"
+        return t or (f"@{cu}" if cu else "")
+    return f"{len(channels)} каналов (куда уйдёт ролик — тот канал, который был выбран при OAuth для этого файла токена)"
+
+
+@app.get("/api/youtube/status")
+async def youtube_api_status(quick: bool = Query(False)):
+    """
+    quick=true — только файлы токенов на диске, без Google API (не падает на channels.list/build).
+    """
+    cs = settings.youtube_client_secrets_file
+    configured = bool(cs and cs.is_file())
+    from agents.publisher import youtube_direct
+    from agents.publisher.youtube_multi import iter_youtube_token_slots
+
+    def _auth_ok(path: Path) -> bool:
+        if not path.is_file():
+            return False
+        try:
+            creds = youtube_direct.load_credentials(path)
+            return bool(creds and (creds.valid or creds.refresh_token))
+        except Exception:
+            return False
+
+    lab1 = (settings.youtube_channel_primary_label or "").strip() or "Канал 1"
+    lab2 = (settings.youtube_channel_secondary_label or "").strip() or "Канал 2"
+    slots = iter_youtube_token_slots(settings)
+    has_secondary = len(slots) > 1
+    profiles: dict[str, dict] = {}
+    for prof_id, path in slots:
+        label = lab1 if prof_id == "primary" else lab2
+        ok = _auth_ok(path)
+        entry: dict = {
+            "token_file": str(path),
+            "authorized": ok,
+            "label": label,
+            "channels": [],
+            "channel_hint": "",
+        }
+        if ok and configured and cs and not quick:
+            try:
+                creds = await asyncio.to_thread(youtube_direct.get_valid_credentials, cs, path)
+                if creds:
+                    chans = await asyncio.to_thread(
+                        youtube_direct.list_managed_channels_preview, creds
+                    )
+                    entry["channels"] = chans
+                    entry["channel_hint"] = _youtube_channel_hint(chans)
+            except Exception as ex:
+                logger.warning(f"[YouTube] status enrich {prof_id}: {ex}")
+        profiles[prof_id] = entry
+
+    return {
+        "client_configured": configured,
+        "authorized": profiles["primary"]["authorized"],
+        "has_secondary": has_secondary,
+        "profiles": profiles,
+    }
+
+
+@app.post("/api/youtube/reset")
+async def youtube_reset_all_tokens():
+    """
+    Удаляет локальные youtube_token*.json (основной + второй, если настроен),
+    пытается отозвать у Google (best-effort), сбрасывает pending OAuth state.
+    """
+    cs = settings.youtube_client_secrets_file
+    if not cs or not cs.is_file():
+        raise HTTPException(400, "YOUTUBE_OAUTH_CLIENT_SECRETS не настроен")
+
+    from agents.publisher.youtube_multi import iter_youtube_token_slots
+
+    paths = [p for _, p in iter_youtube_token_slots(settings)]
+
+    removed: list[str] = []
+    for p in paths:
+        tok = _read_google_credential_token_for_revoke(p)
+        if tok:
+            await asyncio.to_thread(_revoke_google_token_blocking, tok)
+        if p.is_file():
+            try:
+                p.unlink()
+                removed.append(str(p))
+            except OSError as ex:
+                logger.warning(f"[YouTube] не удалось удалить {p}: {ex}")
+
+    _youtube_oauth_states.clear()
+    logger.info(f"[RESET] YouTube OAuth: удалены файлы {removed}")
+    return {"ok": True, "removed": removed}
+
+
+@app.get("/api/youtube/oauth/authorize")
+async def youtube_oauth_authorize(profile: str = Query("primary")):
+    cs = settings.youtube_client_secrets_file
+    if not cs or not cs.is_file():
+        raise HTTPException(
+            400,
+            "Укажи YOUTUBE_OAUTH_CLIENT_SECRETS — путь к JSON OAuth client из Google Cloud.",
+        )
+    key = (profile or "primary").strip().lower()
+    if key not in ("primary", "secondary"):
+        raise HTTPException(400, "profile: primary | secondary")
+    if key == "secondary" and settings.youtube_token_file_secondary is None:
+        raise HTTPException(400, "Для второго канала задай YOUTUBE_OAUTH_TOKEN_B в .env")
+    try:
+        settings.youtube_token_path_for_profile(key)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+    _youtube_oauth_cleanup_states()
+    try:
+        from agents.publisher import youtube_direct
+
+        flow = youtube_direct.create_flow(cs, settings.youtube_oauth_redirect_uri)
+        auth_url, state = flow.authorization_url(
+            access_type="offline",
+            prompt="consent",
+            include_granted_scopes="true",
+        )
+    except Exception as e:
+        logger.exception(f"[YouTube] authorization_url failed: {e}")
+        raise HTTPException(500, f"OAuth URL: {e}") from e
+    _youtube_oauth_states[state] = {"t": time.time(), "profile": key}
+    return {"authorization_url": auth_url, "state": state, "profile": key}
+
+
+@app.get("/api/youtube/oauth/callback")
+async def youtube_oauth_callback(
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+):
+    base_ui = settings.frontend_public_url.rstrip("/")
+    redir = f"{base_ui}/history"
+    if error:
+        return RedirectResponse(f"{redir}?youtube_error={quote(error)}")
+    if not code or not state:
+        return RedirectResponse(f"{redir}?youtube_error={quote('missing_code_or_state')}")
+    raw_meta = _youtube_oauth_states.pop(state, None)
+    if raw_meta is None:
+        return RedirectResponse(f"{redir}?youtube_error={quote('invalid_state')}")
+    if isinstance(raw_meta, dict):
+        prof = str(raw_meta.get("profile", "primary")).lower()
+        t0 = float(raw_meta.get("t", 0))
+    else:
+        prof, t0 = "primary", float(raw_meta)
+    if time.time() - t0 > 600:
+        return RedirectResponse(f"{redir}?youtube_error={quote('oauth_state_expired')}")
+    try:
+        token_path = settings.youtube_token_path_for_profile(prof)
+    except ValueError as e:
+        return RedirectResponse(f"{redir}?youtube_error={quote(str(e)[:120])}")
+    cs = settings.youtube_client_secrets_file
+    if not cs or not cs.is_file():
+        return RedirectResponse(f"{redir}?youtube_error={quote('client_secrets_missing')}")
+    try:
+        from agents.publisher import youtube_direct
+
+        youtube_direct.save_token_from_code(
+            cs,
+            token_path,
+            settings.youtube_oauth_redirect_uri,
+            code,
+            state,
+        )
+    except Exception as e:
+        logger.exception(f"[YouTube] OAuth callback failed: {e}")
+        return RedirectResponse(f"{redir}?youtube_error={quote(str(e)[:200])}")
+    return RedirectResponse(f"{redir}?youtube_oauth=ok")
+
+
+@app.post("/api/youtube/upload")
+async def youtube_upload_short(body: YouTubeUploadBody):
+    cs = settings.youtube_client_secrets_file
+    if not cs or not cs.is_file():
+        raise HTTPException(400, "YOUTUBE_OAUTH_CLIENT_SECRETS не настроен")
+    from agents.publisher import youtube_direct
+    from googleapiclient.errors import HttpError
+
+    try:
+        token_path = settings.youtube_token_path_for_profile(body.channel_profile)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+    creds = youtube_direct.get_valid_credentials(cs, token_path)
+    if not creds:
+        raise HTTPException(
+            401,
+            f"Нет токена для профиля «{body.channel_profile}»: открой /history и подключи этот канал (OAuth).",
+        )
+
+    fn = (body.filename or "").strip() or f"video_{body.session_id}.mp4"
+    path = _resolve_video_path(body.session_id, fn)
+    if not path or not path.is_file():
+        raise HTTPException(404, f"Видео не найдено: {fn}")
+
+    pub_meta = None
+    video_lang = None
+    try:
+        for v in _get_video_metadata():
+            if v.get("session_id") == body.session_id and v.get("filename") == fn:
+                pub_meta = v.get("publishing")
+                video_lang = v.get("video_lang")
+                break
+        else:
+            from agents.topics_history import get_publishing_by_session
+
+            pub_meta = get_publishing_by_session().get(body.session_id)
+    except Exception:
+        pub_meta = None
+
+    title, description, tags = youtube_direct.publishing_to_snippet(
+        pub_meta,
+        video_title_fallback=_session_topic_fallback(body.session_id),
+        lang=body.lang,
+        video_lang=video_lang,
+    )
+
+    try:
+        result = await asyncio.to_thread(
+            youtube_direct.upload_video_file,
+            creds,
+            path,
+            title=title,
+            description=description,
+            tags=tags,
+            privacy_status=body.privacy_status,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except HttpError as e:
+        msg = youtube_direct.format_http_error(e)
+        logger.error(f"[YouTube] upload HttpError: {msg}")
+        raise HTTPException(502, f"YouTube API: {msg}") from e
+    except Exception as e:
+        logger.exception(f"[YouTube] upload failed: {e}")
+        raise HTTPException(500, str(e)) from e
+
+    vid = result.get("id") or ""
+    return {
+        "ok": True,
+        "video_id": vid,
+        "url": f"https://www.youtube.com/shorts/{vid}" if vid else None,
+        "title": title,
+    }
 
 
 @app.delete("/api/videos/{session_id}")

@@ -169,7 +169,7 @@ Write a detailed, cinematic image prompt that:
 4. Uses specific, vivid details (NOT generic descriptions)
 5. Includes lighting and composition details (camera angle is FIXED - see calibration data below)
 6. **CRITICAL: ENTIRE HOUSE MUST BE FULLY VISIBLE** - compose the shot so the complete house structure fits within the frame with surrounding landscape context
-7. **FRAMING REQUIREMENT**: House should occupy 40-50% of frame - far enough to show full building, not cropped or partial view
+7. **FRAMING REQUIREMENT**: House should occupy 40-50% of frame — far enough to show the full house, not cropped or partial view
 8. **HOUSE STABILITY**: The house structure itself does NOT change during image capture - camera is completely static
 9. **HOUSE STYLE EXPLICITNESS**: Clearly describe the specific architectural style - e.g., if Victorian, mention towers/bay windows/ornate details; if Modern, mention flat roof/geometric shapes/large glass panels
 10. **LOCATION IMMERSION**: Make the location dynamic - if lakeside, show expansive water; if forest, show dense trees surrounding; if hillside, show dramatic elevation
@@ -205,7 +205,7 @@ CAMERA PARAMETERS - MUST BE IDENTICAL FOR EVERY SINGLE IMAGE:
 - These parameters are LOCKED - ZERO tolerance for variation
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-STYLE: Photorealistic, shot on smartphone camera, natural lighting, authentic construction site look. NOT 3D render, NOT CGI, NOT animated, NOT cartoon. Must look like REAL smartphone footage.
+STYLE: Photorealistic, shot on smartphone camera, natural lighting, authentic private house construction lot look. NOT 3D render, NOT CGI, NOT animated, NOT cartoon. Must look like REAL smartphone footage.
 
 Write the prompt in English for AI image generation."""
 
@@ -482,7 +482,7 @@ def _create_fallback_context(scenario: dict[str, Any]) -> ScenarioContext:
         visual_progression=visual_progression,
         overall_narrative="Standard construction progression",
         style_consistency_notes="Maintain consistent architectural style",
-        location_atmosphere="typical construction site",
+        location_atmosphere="typical single-family house building lot",
         num_floors=num_floors,  # NEW: Pass floors to fallback context
     )
 

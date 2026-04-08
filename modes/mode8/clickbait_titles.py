@@ -1,7 +1,7 @@
 """
-Clickbait Title Generator for Mode8 and Mode9.
+Clickbait Title Generator for Mode8, Mode9, and Mode12 (room restoration).
 
-Generates viral, attention-grabbing titles in Russian with real video duration.
+Generates viral, attention-grabbing titles with real video duration.
 
 Examples from user requirements:
 - Я ПОСТРОИЛ ДОМ С НУЛЯ ЗА 20 СЕКУНД 🏗️
@@ -57,10 +57,27 @@ VEHICLE_TEMPLATES_EN = [
     "FROM PARTS TO {vehicle_type} IN {duration} SECONDS {emoji}",
 ]
 
+# Room restoration / makeover (Mode 12) — style_or_type = room_type key, location = lighting key
+ROOM_TEMPLATES = [
+    "Я ПРИВЁЛ В ПОРЯДОК {house_type} {location_variant} ЗА {duration} СЕКУНД {emoji}",
+    "РЕСТАВРАЦИЯ КОМНАТЫ: {house_type} ЗА {duration} СЕК {emoji}",
+    "ИЗ БЕСПОРЯДКА В УЮТ — {house_type} ЗА {duration} СЕК {emoji}",
+    "{house_type} ДО И ПОСЛЕ ЗА {duration} СЕК {emoji}",
+    "УБОРКА И РЕМОНТ {house_type}… СМОТРИ 👀",
+]
+
+ROOM_TEMPLATES_EN = [
+    "I TRANSFORMED MY {house_type} {location_variant} IN {duration} SECONDS {emoji}",
+    "ROOM MAKEOVER: {house_type} IN {duration} SEC {emoji}",
+    "FROM MESS TO COZY — {house_type} IN {duration} SEC {emoji}",
+    "{house_type} BEFORE AND AFTER IN {duration} SEC {emoji}",
+    "ROOM RESTORATION {house_type}... WATCH 👀",
+]
+
 # House type mappings
 HOUSE_TYPES = {
     "modern": ("СОВРЕМЕННЫЙ ДОМ", "MODERN HOUSE", "🏠"),
-    "contemporary": ("УЛЬТРА-СОВРЕМЕННЫЙ ДОМ", "ULTRA-MODERN HOUSE", "🏢"),
+    "contemporary": ("УЛЬТРА-СОВРЕМЕННЫЙ ДОМ", "ULTRA-MODERN HOUSE", "🏠"),
     "minimalist": ("МИНИМАЛИСТИЧНЫЙ ДОМ", "MINIMALIST HOUSE", "🏚️"),
     "scandinavian": ("СКАНДИНАВСКИЙ ДОМ", "SCANDINAVIAN HOUSE", "🏡"),
     "cottage": ("УЮТНЫЙ КОТТЕДЖ", "COZY COTTAGE", "🏘️"),
@@ -157,6 +174,25 @@ VEHICLE_LOCATIONS = {
     "port": ("В ПОРТУ", "⚓"),
 }
 
+# Room type (accusative RU for templates like «привёл в порядок СПАЛЬНЮ»)
+ROOM_CLICKBAIT_TYPES = {
+    "studio": ("СТУДИЮ", "STUDIO APARTMENT", "🏠"),
+    "bedroom": ("СПАЛЬНЮ", "BEDROOM", "🛏️"),
+    "living": ("ГОСТИНУЮ", "LIVING ROOM", "🛋️"),
+    "kitchen": ("КУХНЮ", "KITCHEN", "🍳"),
+    "kids": ("ДЕТСКУЮ", "KIDS ROOM", "🧸"),
+    "loft": ("ЛОФТ", "LOFT SPACE", "🏭"),
+}
+
+# Lighting / mood phrase for room titles
+ROOM_LIGHTING_CLICKBAIT = {
+    "morning_soft": ("С УТРЕННИМ СВЕТОМ", "IN SOFT MORNING LIGHT", "☀️"),
+    "daylight_neutral": ("В ДНЕВНОМ СВЕТЕ", "IN DAYLIGHT", "🌤️"),
+    "golden_hour": ("В ЗОЛОТОМ СВЕТЕ", "AT GOLDEN HOUR", "🌅"),
+    "warm_lamps": ("ПРИ ТЁПЛОМ СВЕТЕ ЛАМП", "WITH WARM LAMPS", "💡"),
+    "overcast_soft": ("В РАССЕЯННОМ СВЕТЕ", "IN SOFT OVERCAST", "☁️"),
+}
+
 
 def _round_duration(seconds: float) -> int:
     """
@@ -177,7 +213,7 @@ def _round_duration(seconds: float) -> int:
 
 
 def generate_clickbait_title(
-    content_type: Literal["house", "vehicle"],
+    content_type: Literal["house", "vehicle", "room"],
     style_or_type: str,
     location: str,
     duration_seconds: float,
@@ -187,9 +223,9 @@ def generate_clickbait_title(
     Generate a clickbait title with real video duration.
     
     Args:
-        content_type: "house" for Mode8, "vehicle" for Mode9
-        style_or_type: House style or vehicle type
-        location: Location name
+        content_type: "house" for Mode8, "vehicle" for Mode9, "room" for Mode12
+        style_or_type: House style, vehicle type, or room type key (e.g. bedroom)
+        location: Location (house/vehicle) or room lighting key (Mode12)
         duration_seconds: Real final video duration in seconds
         language: Title language ("ru" or "en")
         
@@ -204,6 +240,11 @@ def generate_clickbait_title(
         templates = HOUSE_TEMPLATES if language == "ru" else HOUSE_TEMPLATES_EN
         type_mapping = HOUSE_TYPES
         location_mapping = HOUSE_LOCATIONS
+        default_emoji = "🏠"
+    elif content_type == "room":
+        templates = ROOM_TEMPLATES if language == "ru" else ROOM_TEMPLATES_EN
+        type_mapping = ROOM_CLICKBAIT_TYPES
+        location_mapping = ROOM_LIGHTING_CLICKBAIT
         default_emoji = "🏠"
     else:  # vehicle
         # Select templates based on language
@@ -220,34 +261,48 @@ def generate_clickbait_title(
         type_name = type_info[1]  # English name
     type_emoji = type_info[2]
     
-    # Get location variant
-    loc_info = location_mapping.get(location.lower(), (f"В {location.upper()}", "📍"))
-    location_text = loc_info[0]
-    location_emoji = loc_info[1]
+    # Get location variant (room lighting uses triples: RU, EN, emoji)
+    loc_info = location_mapping.get(location.lower())
+    if loc_info is None:
+        if content_type == "room":
+            loc_info = (
+                f"СВЕТОМ {location.upper().replace('_', ' ')}",
+                f"IN {location.upper().replace('_', ' ')} LIGHT",
+                "📍",
+            )
+        else:
+            loc_info = (f"В {location.upper()}", "📍")
+    if content_type == "room" and len(loc_info) >= 3:
+        if language == "ru":
+            location_text = loc_info[0]
+            location_emoji = loc_info[2]
+        else:
+            location_text = loc_info[1]
+            location_emoji = loc_info[2]
+    else:
+        location_text = loc_info[0]
+        location_emoji = loc_info[1] if len(loc_info) > 1 else "📍"
     
     # Choose template randomly
     template = random.choice(templates)
     
-    # Build style variant (for "Я ПОСТРОИЛ ДОМ {style_variant} С НУЛЯ")
+    # Build style variant (house templates only)
     style_variant = ""
-    if language == "ru":
-        if style_or_type.lower() in ["modern", "contemporary", "minimalist"]:
-            style_variant = f"({type_name})"
-        elif style_or_type.lower() in ["villa", "mansion", "estate"]:
-            style_variant = "РОСКОШНЫЙ"
-        elif style_or_type.lower() in ["cottage", "cabin", "chalet"]:
-            style_variant = "УЮТНЫЙ"
+    if content_type == "house":
+        if language == "ru":
+            if style_or_type.lower() in ["modern", "contemporary", "minimalist"]:
+                style_variant = f"({type_name})"
+            elif style_or_type.lower() in ["villa", "mansion", "estate"]:
+                style_variant = "РОСКОШНЫЙ"
+            elif style_or_type.lower() in ["cottage", "cabin", "chalet"]:
+                style_variant = "УЮТНЫЙ"
         else:
-            style_variant = ""
-    else:  # English
-        if style_or_type.lower() in ["modern", "contemporary", "minimalist"]:
-            style_variant = f"({type_name})"
-        elif style_or_type.lower() in ["villa", "mansion", "estate"]:
-            style_variant = "LUXURY"
-        elif style_or_type.lower() in ["cottage", "cabin", "chalet"]:
-            style_variant = "COZY"
-        else:
-            style_variant = ""
+            if style_or_type.lower() in ["modern", "contemporary", "minimalist"]:
+                style_variant = f"({type_name})"
+            elif style_or_type.lower() in ["villa", "mansion", "estate"]:
+                style_variant = "LUXURY"
+            elif style_or_type.lower() in ["cottage", "cabin", "chalet"]:
+                style_variant = "COZY"
     
     # Fill template
     title = template.format(
@@ -285,5 +340,15 @@ if __name__ == "__main__":
             style_or_type="car_sport",
             location="factory",
             duration_seconds=28.3,
+        )
+        print(f"{i+1}. {title}")
+
+    print("\n=== MODE 12 (ROOM) EXAMPLES ===")
+    for i in range(5):
+        title = generate_clickbait_title(
+            content_type="room",
+            style_or_type="bedroom",
+            location="golden_hour",
+            duration_seconds=32.0,
         )
         print(f"{i+1}. {title}")

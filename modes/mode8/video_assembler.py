@@ -3,9 +3,9 @@ Mode 8 Video Assembler — Assemble house building timelapse videos.
 
 Features:
 - Quick crossfades (0.5-1s) between stages
-- Construction site ambient audio
+- Ambient audio from the residential house-build clips
 - No TTS, no subtitles (pure visual satisfaction)
-- Preserves FastGen-generated construction sounds
+- Preserves FastGen-generated on-site sounds (tools, machinery)
 """
 
 from __future__ import annotations

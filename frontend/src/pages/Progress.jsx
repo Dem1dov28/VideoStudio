@@ -20,6 +20,15 @@ import StepIndicator from '../components/StepIndicator';
 
 const MODE_LABELS = { 1: '5 фактов', 2: 'Почему X?', 3: 'Реставрация', 4: 'Цитата', 5: 'Длинные', 6: 'Релакс', 7: '2 клипа', 8: 'Было→стало' };
 
+/** RU/EN вложенно или плоский объект (title/description/tags) */
+function resolvePublishingMeta(p) {
+  if (!p || typeof p !== 'object') return null;
+  if (p.title != null && p.description != null && !p.ru && !p.en) return p;
+  if (p.ru && typeof p.ru === 'object') return p.ru;
+  if (p.en && typeof p.en === 'object') return p.en;
+  return null;
+}
+
 function downloadTextFile(filename, text) {
   if (text == null || text === '') return;
   const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
@@ -137,6 +146,8 @@ export default function Progress() {
       };
     });
   }, [done, sid]);
+
+  const publishMeta = useMemo(() => resolvePublishingMeta(done?.publishing), [done?.publishing]);
 
   // Copy to clipboard helper
   const copyToClipboard = async (text, field) => {
@@ -392,7 +403,7 @@ export default function Progress() {
 
       {/* Publishing Metadata */}
       <AnimatePresence>
-        {done?.publishing && (
+        {publishMeta && (
           <motion.div
             initial={{ opacity: 0, scale: 0.95, y: 10 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -408,13 +419,13 @@ export default function Progress() {
                 <div className="flex items-center justify-between mb-1">
                   <span className="text-xs font-medium text-[#71717a] uppercase tracking-wider">Название</span>
                   <button
-                    onClick={() => copyToClipboard(done.publishing.title, 'title')}
+                    onClick={() => copyToClipboard(publishMeta.title, 'title')}
                     className="text-[#71717a] hover:text-white transition-colors"
                   >
                     {copied === 'title' ? <RiCheckLine className="text-emerald-400" /> : <RiFileCopyLine />}
                   </button>
                 </div>
-                <p className="text-white text-sm font-medium">{done.publishing.title}</p>
+                <p className="text-white text-sm font-medium">{publishMeta.title}</p>
               </div>
 
               {/* Description */}
@@ -422,13 +433,13 @@ export default function Progress() {
                 <div className="flex items-center justify-between mb-1">
                   <span className="text-xs font-medium text-[#71717a] uppercase tracking-wider">Описание</span>
                   <button
-                    onClick={() => copyToClipboard(done.publishing.description, 'description')}
+                    onClick={() => copyToClipboard(publishMeta.description, 'description')}
                     className="text-[#71717a] hover:text-white transition-colors"
                   >
                     {copied === 'description' ? <RiCheckLine className="text-emerald-400" /> : <RiFileCopyLine />}
                   </button>
                 </div>
-                <p className="text-[#a1a1aa] text-sm">{done.publishing.description}</p>
+                <p className="text-[#a1a1aa] text-sm">{publishMeta.description}</p>
               </div>
 
               {/* Hashtags */}
@@ -436,14 +447,14 @@ export default function Progress() {
                 <div className="flex items-center justify-between mb-1">
                   <span className="text-xs font-medium text-[#71717a] uppercase tracking-wider">Хештеги</span>
                   <button
-                    onClick={() => copyToClipboard(done.publishing.hashtags?.join(' '), 'hashtags')}
+                    onClick={() => copyToClipboard(publishMeta.hashtags?.join(' '), 'hashtags')}
                     className="text-[#71717a] hover:text-white transition-colors"
                   >
                     {copied === 'hashtags' ? <RiCheckLine className="text-emerald-400" /> : <RiFileCopyLine />}
                   </button>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  {done.publishing.hashtags?.map((tag, i) => (
+                  {publishMeta.hashtags?.map((tag, i) => (
                     <span key={i} className="px-2 py-1 bg-[#27272f] rounded text-xs text-[#a1a1aa]">{tag}</span>
                   ))}
                 </div>
@@ -454,13 +465,13 @@ export default function Progress() {
                 <div className="flex items-center justify-between mb-1">
                   <span className="text-xs font-medium text-[#71717a] uppercase tracking-wider">Теги (YouTube Studio)</span>
                   <button
-                    onClick={() => copyToClipboard(done.publishing.tags?.join(', '), 'tags')}
+                    onClick={() => copyToClipboard(publishMeta.tags?.join(', '), 'tags')}
                     className="text-[#71717a] hover:text-white transition-colors"
                   >
                     {copied === 'tags' ? <RiCheckLine className="text-emerald-400" /> : <RiFileCopyLine />}
                   </button>
                 </div>
-                <p className="text-[#71717a] text-xs font-mono">{done.publishing.tags?.join(', ')}</p>
+                <p className="text-[#71717a] text-xs font-mono">{publishMeta.tags?.join(', ')}</p>
               </div>
             </div>
           </motion.div>

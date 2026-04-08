@@ -12,6 +12,7 @@ Mode 8: House Building Timelapse
 Mode 9: Vehicle Assembly Timelapse
 Mode 10: Beach cleanup timelapse (логика как mode 8)
 Mode 11: Monument deconstruction timelapse
+Mode 12: Room cleanup and restoration timelapse (5 stages fixed)
 """
 
 from __future__ import annotations
@@ -64,10 +65,25 @@ async def _run_pipeline_wrapped(
     mode10_num_stages: int = 5,
     mode11_structure_type: str | None = None,
     mode11_num_stages: int = 5,
+    mode12_room_type: str | None = None,
+    mode12_room_lighting: str | None = None,
     control: dict | None = None,
 ) -> dict[str, Any]:
     """Internal pipeline runner with session context."""
     from pipeline_control import checkpoint
+
+    # Mode 12: Room cleanup / restoration timelapse (always 5 stages)
+    if mode == 12:
+        await checkpoint(control)
+        from modes.mode12.pipeline import run_mode12_pipeline
+
+        return await run_mode12_pipeline(
+            session_id=session_id,
+            local_only=local_only,
+            room_type=mode12_room_type,
+            room_lighting=mode12_room_lighting,
+            control=control,
+        )
 
     # Mode 10: Beach cleanup timelapse
     if mode == 10:
@@ -299,6 +315,8 @@ async def run_pipeline(
     mode10_num_stages: int = 5,
     mode11_structure_type: str | None = None,
     mode11_num_stages: int = 5,
+    mode12_room_type: str | None = None,
+    mode12_room_lighting: str | None = None,
     control: dict | None = None,
 ) -> dict[str, Any]:
     """Route to the appropriate pipeline by mode with session context."""
@@ -351,6 +369,8 @@ async def run_pipeline(
             mode10_num_stages=mode10_num_stages,
             mode11_structure_type=mode11_structure_type,
             mode11_num_stages=mode11_num_stages,
+            mode12_room_type=mode12_room_type,
+            mode12_room_lighting=mode12_room_lighting,
             control=control,
         )
     finally:

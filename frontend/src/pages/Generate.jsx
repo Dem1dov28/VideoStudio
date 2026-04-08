@@ -68,6 +68,7 @@ const MODES = [
   { id: 9, label: 'Vehicle Assembly', desc: 'Сборка транспорта: рама → двигатель → кузов → готовый автомобиль', icon: '🚗' },
   { id: 10, label: 'Уборка пляжа', desc: 'Timelapse: грязный пляж → уборка → чистый берег', icon: '🏖️' },
   { id: 11, label: 'Выбор постройки', desc: 'Выбор постройки -> генерировать', icon: '🏛️' },
+  { id: 12, label: 'Комната: уборка', desc: 'Таймлапс: хаос → уборка → реставрация (5 стадий)', icon: '🧹' },
 ];
 
 const KEYBOARD_LABELS = {
@@ -143,6 +144,9 @@ export default function Generate() {
   // Mode 11: monument reverse deconstruction
   const [mode11StructureType, setMode11StructureType] = useState('colosseum');
   const [mode11NumStages, setMode11NumStages] = useState(5);
+  // Mode 12: комната — уборка и реставрация (всегда 5 стадий)
+  const [mode12RoomType, setMode12RoomType] = useState('random');
+  const [mode12RoomLighting, setMode12RoomLighting] = useState('random');
 
   /* scenario editing state */
   const [step, setStep]             = useState('select_mode');   // 'select_mode' | 'form' | 'generating_scenario' | 'editing' | 'launching'
@@ -374,6 +378,40 @@ export default function Generate() {
         mode10_beach_type: mode10BeachType === 'random' ? null : mode10BeachType,
         mode10_coast_setting: mode10CoastSetting === 'random' ? null : mode10CoastSetting,
         mode10_num_stages: mode10NumStages,
+      };
+
+      const result = await checkAndStartVideo(payload);
+
+      setStep('form');
+      if (result.status === 'started') {
+        setStartedSession(result.session_id);
+      } else if (result.status === 'queued') {
+        setError('Лимит исчерпан. Видео добавлено в очередь и запустится в следующем часе.');
+      }
+    } catch (e) {
+      setError(e.message);
+      setStep('form');
+    }
+  }
+
+  /* Mode 12: уборка и реставрация комнаты (5 стадий) */
+  async function handleMode12Launch() {
+    setError('');
+    setStep('launching');
+    try {
+      const payload = {
+        topic: null,
+        auto_topic: false,
+        num_scenes: 5,
+        use_scenario: false,
+        local_only: localOnly,
+        show_subtitles: false,
+        show_watermark: false,
+        scenario: null,
+        mode: 12,
+        language: lang,
+        mode12_room_type: mode12RoomType === 'random' ? null : mode12RoomType,
+        mode12_room_lighting: mode12RoomLighting === 'random' ? null : mode12RoomLighting,
       };
 
       const result = await checkAndStartVideo(payload);
@@ -657,7 +695,7 @@ export default function Generate() {
             {/* Header */}
             <div className="mb-6">
               <h1 className="text-2xl font-bold text-white mb-1">
-                {mode === 3 ? 'Реставрация дома' : mode === 4 ? 'Цитата + фото' : mode === 5 ? 'Длинные видео' : mode === 6 ? 'Cartoon Drama' : mode === 7 ? 'ASMR Keyboard' : mode === 8 ? 'House Timelapse' : mode === 9 ? 'Vehicle Assembly' : mode === 10 ? 'Уборка пляжа' : mode === 11 ? 'Выбор постройки' : 'Создать видео'}
+                {mode === 3 ? 'Реставрация дома' : mode === 4 ? 'Цитата + фото' : mode === 5 ? 'Длинные видео' : mode === 6 ? 'Cartoon Drama' : mode === 7 ? 'ASMR Keyboard' : mode === 8 ? 'House Timelapse' : mode === 9 ? 'Vehicle Assembly' : mode === 10 ? 'Уборка пляжа' : mode === 11 ? 'Выбор постройки' : mode === 12 ? 'Комната: уборка и реставрация' : 'Создать видео'}
               </h1>
               <p className="text-[#71717a] text-sm">
                 {mode === 3
@@ -678,6 +716,8 @@ export default function Generate() {
                                 ? 'Timelapse уборки: загрязнённый пляж → сбор мусора, грабли, техника → чистый берег. Тот же пайплайн, что у стройки дома, но сюжет — экология.'
                                 : mode === 11
                                   ? 'Выберите постройку и нажмите «Генерировать». Сцены фиксируются в одной локации и одном ракурсе.'
+                                  : mode === 12
+                                    ? 'Ровно 5 стадий по сценарию: запущенная комната → освобождение под ремонт → черновая отделка → финиш и мебель → уют и декор. Один фиксированный ракурс, таймлапс.'
                                 : 'AI-агенты напишут сценарий, сгенерируют изображения и смонтируют видео.'}
               </p>
             </div>
@@ -1620,6 +1660,112 @@ export default function Generate() {
                   </p>
                 </div>
               </div>
+            ) : mode === 12 ? (
+              <div className="space-y-4">
+                <div className="card p-5">
+                  <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
+                    Тип комнаты
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setMode12RoomType('random')}
+                    className={`w-full py-2.5 rounded-lg text-xs font-medium transition-all mb-3 ${
+                      mode12RoomType === 'random'
+                        ? 'bg-purple-600/20 text-purple-400 border border-purple-600/40'
+                        : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                    }`}
+                  >
+                    🎲 Случайная комната
+                  </button>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { key: 'studio', label: '🏠 Студия' },
+                      { key: 'bedroom', label: '🛏️ Спальня' },
+                      { key: 'living', label: '🛋️ Гостиная' },
+                      { key: 'kitchen', label: '🍳 Кухня' },
+                      { key: 'kids', label: '🧸 Детская' },
+                      { key: 'loft', label: '🏭 Лофт' },
+                    ].map(opt => (
+                      <button
+                        key={opt.key}
+                        type="button"
+                        onClick={() => setMode12RoomType(opt.key)}
+                        className={`py-2.5 rounded-lg text-xs font-medium transition-all ${
+                          mode12RoomType === opt.key
+                            ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                            : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="card p-5">
+                  <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
+                    Освещение и атмосфера
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setMode12RoomLighting('random')}
+                    className={`w-full py-2.5 rounded-lg text-xs font-medium transition-all mb-3 ${
+                      mode12RoomLighting === 'random'
+                        ? 'bg-purple-600/20 text-purple-400 border border-purple-600/40'
+                        : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                    }`}
+                  >
+                    🎲 Случайный свет
+                  </button>
+                  <div className="grid grid-cols-1 gap-2">
+                    {[
+                      { key: 'morning_soft', label: '🌅 Утро, мягкий свет из окна' },
+                      { key: 'daylight_neutral', label: '☀️ Дневной нейтральный' },
+                      { key: 'golden_hour', label: '🌇 Золотой час' },
+                      { key: 'warm_lamps', label: '💡 Тёплые лампы вечером' },
+                      { key: 'overcast_soft', label: '☁️ Пасмурно, рассеянный свет' },
+                    ].map(opt => (
+                      <button
+                        key={opt.key}
+                        type="button"
+                        onClick={() => setMode12RoomLighting(opt.key)}
+                        className={`py-2.5 rounded-lg text-xs font-medium text-left px-3 transition-all ${
+                          mode12RoomLighting === opt.key
+                            ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
+                            : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="card p-5">
+                  <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-2">
+                    Стадии
+                  </label>
+                  <p className="text-sm text-[#a1a1aa]">
+                    Всегда <span className="text-brand-400 font-medium">5 стадий</span> по порядку. Клип между стадиями — ориентир{' '}
+                    <span className="text-brand-400 font-medium">~8 с</span>, кадр{' '}
+                    <span className="text-brand-400 font-medium">16:9</span>, камера статична (24–35 мм, ~1,5 м от пола). На этапах 1–4 — бригада в белых СИЗ.
+                  </p>
+                  <ol className="mt-3 text-xs text-[#71717a] space-y-1 list-decimal list-inside">
+                    <li>Запущенная комната</li>
+                    <li>Освобождение и подготовка</li>
+                    <li>Черновая отделка</li>
+                    <li>Финиш и основная мебель</li>
+                    <li>Полная реставрация: уют и стиль</li>
+                  </ol>
+                </div>
+
+                <div className="card p-4 bg-gradient-to-br from-emerald-900/20 to-teal-900/10 border-emerald-700/30">
+                  <div className="text-sm font-semibold text-emerald-300 mb-2">🧹 Уборка и реставрация</div>
+                  <p className="text-xs text-[#a1a1aa]">
+                    Keyframe-цепочка: фото до 8K, видео до 4K, без движения камеры; свет из одного окна; на финале без рабочих в комбинезонах.
+                  </p>
+                </div>
+              </div>
             ) : mode === 4 ? (
               <div className="space-y-4">
                 <div className="card p-5">
@@ -1887,7 +2033,7 @@ export default function Generate() {
                     className="overflow-hidden"
                   >
                     <div className="px-5 pb-5 border-t border-[#27272f] pt-4 space-y-4">
-                      {mode !== 3 && mode !== 4 && mode !== 6 && mode !== 7 && mode !== 8 && mode !== 9 && mode !== 10 && mode !== 11 && (
+                      {mode !== 3 && mode !== 4 && mode !== 6 && mode !== 7 && mode !== 8 && mode !== 9 && mode !== 10 && mode !== 11 && mode !== 12 && (
                       <div>
                         <div className="flex justify-between mb-2">
                           <label className="text-xs font-medium text-[#a1a1aa]">Количество сцен</label>
@@ -1912,7 +2058,7 @@ export default function Generate() {
                         <Toggle value={localOnly} onChange={setLocalOnly} />
                       </div>
 
-                      {((mode !== 3 && mode !== 5 && mode !== 7 && mode !== 8 && mode !== 9 && mode !== 10 && mode !== 11) || mode === 4) ? (
+                      {((mode !== 3 && mode !== 5 && mode !== 7 && mode !== 8 && mode !== 9 && mode !== 10 && mode !== 11 && mode !== 12) || mode === 4) ? (
                       <div className="flex items-center justify-between">
                         <div>
                           <div className="text-sm font-medium text-[#e4e4f0]">Субтитры</div>
@@ -1924,7 +2070,7 @@ export default function Generate() {
                       </div>
                       ) : null}
 
-                      {mode !== 3 && mode !== 4 && mode !== 7 && mode !== 8 && mode !== 9 && mode !== 10 && mode !== 11 && (
+                      {mode !== 3 && mode !== 4 && mode !== 7 && mode !== 8 && mode !== 9 && mode !== 10 && mode !== 11 && mode !== 12 && (
                       <div>
                         <div className="text-sm font-medium text-[#e4e4f0] mb-2">Язык субтитров</div>
                         <div className="text-xs text-[#71717a] mb-2">Язык озвучки и текста на видео</div>
@@ -2038,6 +2184,15 @@ export default function Generate() {
               ) : mode === 10 ? (
                 <button
                   onClick={handleMode10Launch}
+                  disabled={isLoading}
+                  className="btn-primary flex-1 flex items-center justify-center gap-2 text-base py-4"
+                >
+                  <RiSparklingLine className="text-lg" />
+                  Сгенерировать timelapse
+                </button>
+              ) : mode === 12 ? (
+                <button
+                  onClick={handleMode12Launch}
                   disabled={isLoading}
                   className="btn-primary flex-1 flex items-center justify-center gap-2 text-base py-4"
                 >

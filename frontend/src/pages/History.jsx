@@ -1,8 +1,8 @@
-import { useEffect, useState, useReducer } from 'react';
+import { useEffect, useState, useReducer, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { RiVideoLine, RiLoader4Line, RiCloseLine, RiRestartLine } from 'react-icons/ri';
 import { api } from '../services/api';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import VideoCard from '../components/VideoCard';
 
 const initialState = { videos: [], loading: true, error: false };
@@ -22,9 +22,14 @@ function historyReducer(state, action) {
 
 export default function History() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [state, dispatch] = useReducer(historyReducer, initialState);
   const [selected, setSelected] = useState(null);
   const [regenBusy, setRegenBusy] = useState(false);
+  const [ytStatus, setYtStatus] = useState(null);
+  /** Пока true — не полагаемся на ytStatus (быстрый первый paint без «пропавшей» кнопки). */
+  const [ytLoading, setYtLoading] = useState(true);
+  const ytReqId = useRef(0);
   const { videos, loading, networkError } = {
     videos: state.videos,
     loading: state.loading,
@@ -46,6 +51,79 @@ export default function History() {
         dispatch({ type: 'error', isNetwork: /failed to fetch|connection/i.test(e?.message || '') });
       });
   };
+
+  const refreshYoutubeStatus = useCallback(() => {
+    const id = ++ytReqId.current;
+    setYtLoading(true);
+    const fallback = {
+      client_configured: true,
+      authorized: false,
+      has_secondary: false,
+      status_fetch_failed: true,
+      profiles: {
+        primary: {
+          authorized: false,
+          label: 'Канал 1',
+          token_file: '',
+          channels: [],
+          channel_hint: '',
+        },
+      },
+    };
+
+    (async () => {
+      let alreadyFull = false;
+      try {
+        // Сначала быстрый ответ с диска — кнопки/слоты видны без ожидания Google API.
+        const q = await api.youtubeStatus(true);
+        if (id !== ytReqId.current) return;
+        setYtStatus(q);
+      } catch (e1) {
+        console.warn('[YouTube] quick status failed, try full:', e1);
+        try {
+          const f = await api.youtubeStatus(false);
+          if (id !== ytReqId.current) return;
+          setYtStatus(f);
+          alreadyFull = true;
+        } catch (e2) {
+          console.warn('[YouTube] status недоступен:', e2);
+          if (id !== ytReqId.current) return;
+          setYtStatus(fallback);
+        }
+      } finally {
+        if (id === ytReqId.current) setYtLoading(false);
+      }
+
+      if (alreadyFull || id !== ytReqId.current) return;
+      // Подтянуть подсказки каналов (channels.list) без блокировки UI.
+      api
+        .youtubeStatus(false)
+        .then((full) => {
+          if (id !== ytReqId.current) return;
+          setYtStatus(full);
+        })
+        .catch(() => {});
+    })();
+  }, []);
+
+  useEffect(() => {
+    refreshYoutubeStatus();
+  }, [refreshYoutubeStatus]);
+
+  useEffect(() => {
+    const ok = searchParams.get('youtube_oauth');
+    const err = searchParams.get('youtube_error');
+    if (ok === 'ok') {
+      alert('YouTube подключён — можно заливать Shorts.');
+      setSearchParams({}, { replace: true });
+      refreshYoutubeStatus();
+      return;
+    }
+    if (err) {
+      alert(`YouTube OAuth: ${decodeURIComponent(err)}`);
+      setSearchParams({}, { replace: true });
+    }
+  }, [searchParams, setSearchParams, refreshYoutubeStatus]);
 
   useEffect(() => {
     let cancelled = false;
@@ -77,6 +155,108 @@ export default function History() {
         <p className="text-[#71717a] text-sm">
           {videos.length} видео сгенерировано
         </p>
+        {ytLoading && (
+          <p className="mt-3 text-[11px] text-[#a1a1aa] flex items-center gap-2">
+            <RiLoader4Line className="animate-spin text-base shrink-0" />
+            <span>YouTube: получаем статус аккаунтов…</span>
+          </p>
+        )}
+        {ytStatus?.status_fetch_failed && !ytLoading && (
+          <p className="mt-3 text-[11px] text-amber-400/90">
+            Статус YouTube не удалось загрузить с сервера (сеть или ошибка API). Кнопка «Залить» видна;
+            если заливка падает — смотри лог <code className="text-[#a1a1aa]">python server.py</code>.
+          </p>
+        )}
+        {!ytLoading && ytStatus?.client_configured && (() => {
+          const p = ytStatus.profiles;
+          const needP = !p?.primary?.authorized;
+          const needS = ytStatus.has_secondary && !p?.secondary?.authorized;
+          if (!needP && !needS) return null;
+          return (
+            <div className="mt-4 flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2">
+              <span className="text-xs text-amber-200/90">YouTube: войти в Google</span>
+              {needP && (
+                <button
+                  type="button"
+                  className="text-xs font-medium px-2 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-100"
+                  onClick={async () => {
+                    try {
+                      const r = await api.youtubeOAuthStart('primary');
+                      if (r?.authorization_url) window.open(r.authorization_url, '_blank', 'noopener,noreferrer');
+                    } catch (e) {
+                      alert(e.message || String(e));
+                    }
+                  }}
+                >
+                  {ytStatus?.profiles?.primary?.label || 'Канал 1'}
+                </button>
+              )}
+              {needS && (
+                <button
+                  type="button"
+                  className="text-xs font-medium px-2 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-100"
+                  onClick={async () => {
+                    try {
+                      const r = await api.youtubeOAuthStart('secondary');
+                      if (r?.authorization_url) window.open(r.authorization_url, '_blank', 'noopener,noreferrer');
+                    } catch (e) {
+                      alert(e.message || String(e));
+                    }
+                  }}
+                >
+                  {ytStatus?.profiles?.secondary?.label || 'Канал 2'}
+                </button>
+              )}
+            </div>
+          );
+        })()}
+        {!ytLoading && ytStatus?.client_configured && ytStatus?.profiles?.primary?.authorized &&
+          (!ytStatus.has_secondary || ytStatus?.profiles?.secondary?.authorized) && (
+          <p className="mt-3 text-xs text-emerald-400/90">
+            YouTube API: {ytStatus.has_secondary ? 'оба канала подключены' : 'канал подключён'}
+          </p>
+        )}
+        {!ytLoading && ytStatus?.client_configured && ytStatus?.profiles?.primary?.authorized &&
+          ytStatus.has_secondary && !ytStatus?.profiles?.secondary?.authorized && (
+          <p className="mt-3 text-[11px] text-[#a1a1aa]">
+            Канал 1 готов. Для второго канала нажми «Канал 2» и при входе в Google выбери нужный канал / brand account.
+          </p>
+        )}
+        {!ytLoading && ytStatus && !ytStatus.client_configured && (
+          <p className="mt-3 text-[11px] text-[#52525b]">
+            Прямой YouTube: укажи в .env <code className="text-[#71717a]">YOUTUBE_OAUTH_CLIENT_SECRETS</code> (см. .env.example)
+          </p>
+        )}
+        {(ytLoading || ytStatus?.client_configured) && (
+          <div className="mt-3">
+            <button
+              type="button"
+              disabled={ytLoading}
+              className="text-[11px] text-[#71717a] hover:text-red-400 underline underline-offset-2 disabled:opacity-40 disabled:cursor-not-allowed disabled:no-underline"
+              onClick={async () => {
+                if (
+                  !confirm(
+                    'Сбросить все сохранённые входы YouTube на этом компьютере? Файлы токенов удалятся, нужно снова нажать «Канал 1» / «Канал 2».',
+                  )
+                )
+                  return;
+                try {
+                  const r = await api.youtubeResetTokens();
+                  alert(
+                    Array.isArray(r?.removed) && r.removed.length
+                      ? `Удалено: ${r.removed.join(', ')}`
+                      : 'Токенов на диске не было.',
+                  );
+                  refreshYoutubeStatus();
+                } catch (e) {
+                  alert(e.message || String(e));
+                }
+              }}
+            >
+              Сбросить все аккаунты YouTube
+            </button>
+          </div>
+        )}
       </motion.div>
 
       {loading && !networkError ? (
@@ -104,7 +284,13 @@ export default function History() {
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
           {videos.filter(v => v?.session_id).map((v, i) => (
             <div key={`${v.session_id}-${v.filename || i}`}>
-              <VideoCard video={v} onClick={setSelected} onDelete={(sid) => dispatch({ type: 'success', videos: videos.filter(x => x.session_id !== sid) })} />
+              <VideoCard
+                video={v}
+                onClick={setSelected}
+                onDelete={(sid) => dispatch({ type: 'success', videos: videos.filter(x => x.session_id !== sid) })}
+                youtubeStatus={ytStatus}
+                youtubeLoading={ytLoading}
+              />
             </div>
           ))}
         </div>

@@ -100,12 +100,14 @@ def assemble_mode10_video(
     speed_multiplier: float = 1.5,   # 1.5x speed for viral dynamics
     use_speed_ramping: bool = True,  # Cinematic speed variation
     final_hold_duration: float = 1.5,  # Hold last frame for retention
+    music_dir_only: bool = False,
+    background_music_volume: float = 0.1,
 ) -> Path:
     """
     Assemble final beach cleanup timelapse video.
 
     FastGen clips may contain ocean/beach ambient audio.
-    We preserve that audio at 100% and add quiet background music at 10%.
+    We preserve that audio at 100% and mix in background music (default 10%, see background_music_volume).
     No TTS, no subtitles.
 
     Args:
@@ -116,6 +118,8 @@ def assemble_mode10_video(
         speed_multiplier: Base speed multiplier (default 1.5x for dynamics)
         use_speed_ramping: Apply cinematic speed variation (slow start/end, fast middle)
         final_hold_duration: Hold last frame for better retention (default 1.5s)
+        music_dir_only: If True, pick random track from settings.music_dir only (no MusicGen).
+        background_music_volume: Music gain 0.0–1.0 (e.g. 0.6 = 60% of file level).
     """
     target_w, target_h = settings.video_resolution
     fps = settings.video_fps
@@ -223,13 +227,17 @@ def assemble_mode10_video(
             logger.warning(f"[Mode10 Assembler] Could not combine video audios: {e}")
             combined_video_audio = None
 
-    # Background music at 10% volume
+    music_vol = max(0.0, min(1.0, float(background_music_volume)))
+    music_pct = int(round(music_vol * 100))
+
+    # Background music (volume = background_music_volume)
     bg_audio = None
     try:
         from agents.video_editor.moviepy_editor import _pick_background_music
         music_path = _pick_background_music(
             topic="calm ocean waves beach ambient",
             duration=final.duration,
+            music_dir_only=music_dir_only,
         )
         if music_path:
             bg = AudioFileClip(str(music_path))
@@ -239,20 +247,20 @@ def assemble_mode10_video(
             fade_dur = min(2.0, final.duration * 0.1)
             bg = bg.subclipped(0, min(final.duration, bg.duration) - 0.05)
             bg = bg.with_effects([
-                afx.MultiplyVolume(0.1),
+                afx.MultiplyVolume(music_vol),
                 afx.AudioFadeIn(fade_dur),
                 afx.AudioFadeOut(fade_dur),
             ])
             bg_audio = bg
-            logger.info(f"[Mode10 Assembler] Added background music at 10%: {music_path.name}")
+            logger.info(f"[Mode10 Assembler] Added background music at {music_pct}%: {music_path.name}")
     except Exception as e:
         logger.warning(f"[Mode10 Assembler] Background music failed: {e}")
 
-    # Mix: FastGen beach/ocean audio (100%) + background music (10%)
+    # Mix: FastGen beach/ocean audio (100%) + background music
     if combined_video_audio and bg_audio:
         final_audio = CompositeAudioClip([combined_video_audio, bg_audio])
         final = final.with_audio(final_audio)
-        logger.info("[Mode10 Assembler] Audio: FastGen clips 100% + music 10%")
+        logger.info(f"[Mode10 Assembler] Audio: FastGen clips 100% + music {music_pct}%")
     elif combined_video_audio:
         final = final.with_audio(combined_video_audio)
         logger.info("[Mode10 Assembler] Audio: FastGen clips only (no music)")

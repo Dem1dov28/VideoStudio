@@ -391,8 +391,8 @@ BASE_STYLES: dict[str, dict[str, Any]] = {
     "estate": {
         "name": "поместье",
         "name_en": "estate",
-        "description": "Большое родовое имение с парком и несколькими постройками. Историческая значимость, простор, благоустроенная территория.",
-        "description_en": "Large ancestral estate with park and multiple buildings. Historical significance, spaciousness, landscaped grounds.",
+        "description": "Большое родовое имение с парком: главный дом и усадебные постройки (гостевой дом, гараж, хозблок), без городской высотной застройки.",
+        "description_en": "Large ancestral estate with park: main residence and outbuildings (guest house, garage, utility barn) — not urban high-rises.",
         "typical_roofs": ["четырехскатная", "вальмовая", "мансардная", "сложная многоскатная"],
         "typical_materials": ["кирпич", "камень", "металл", "черепица", "штукатурка"],
         "typical_features": ["парк", "пруд", "несколько строений", "главный дом", "гостевой дом", "хозпостройки", "исторические детали"],
@@ -414,12 +414,12 @@ BASE_LOCATIONS: dict[str, dict[str, Any]] = {
     "urban_edge": {
         "name": "городская окраина",
         "name_en": "urban edge",
-        "description": "Зона перехода от города к природе. Виднеются многоэтажки, слышен городской шум, но уже чувствуется простор. Новостройки соседствуют с зелёными зонами.",
-        "description_en": "Transition zone from city to nature. High-rise buildings visible, city noise audible, but space already felt. New buildings coexist with green zones.",
-        "typical_features": ["городской силуэт", "шоссе", "новостройки", "стройки", "магистрали", "супермаркеты"],
-        "atmosphere": "динамичная, развивающаяся, современная",
+        "description": "Переход от трассы и пригорода к участку под частный дом. Вдали низкие крыши и зелень, шум дороги, без акцента на многоэтажки и офисные кварталы.",
+        "description_en": "Edge of suburb near highway: distant low residential roofs and trees, road noise — no high-rises or office towers as focus.",
+        "typical_features": ["низкий горизонт", "шоссе", "частные дома вдали", "зелёные зоны", "магистрали", "придорожная инфраструктура"],
+        "atmosphere": "динамичная пригородная, развивающаяся, современная",
         "best_for": ["современные дома", "виллы", "модерн"],
-        "characteristics": ["город вдали", "инфраструктура", "развитие", "переходная зона", "новостройки"],
+        "characteristics": ["пригород вдали", "инфраструктура у трассы", "частная застройка", "переходная зона", "без высоток в кадре"],
     },
     "planned_community": {
         "name": "запланированный район",
@@ -498,7 +498,7 @@ BASE_LOCATIONS: dict[str, dict[str, Any]] = {
         "description_en": "Working rural area with cultivated fields. Crop rows, agricultural machinery, barns. Atmosphere of work and fertility.",
         "typical_features": ["пашня", "посевы", "тракторы", "амбары", "силосные башни", "орошение", "сельхоздороги"],
         "atmosphere": "рабочая, плодородная, производственная",
-        "best_for": ["фермерские дома", "ранчо", "традиционные постройки"],
+        "best_for": ["фермерские дома", "ранчо", "традиционные дома"],
         "characteristics": ["поля", "урожай", "техника", "работа", "сельское хозяйство", "плодородие"],
     },
     "vineyard": {

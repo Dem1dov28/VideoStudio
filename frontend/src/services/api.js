@@ -120,6 +120,15 @@ export const api = {
   queueDelete: (itemId) => request(`/api/queue/${itemId}`, { method: 'DELETE' }),
   queueMove: (itemId, direction) =>
     request(`/api/queue/${itemId}/move`, { method: 'POST', body: JSON.stringify({ direction }) }),
+  /** YouTube Data API: статус OAuth и загрузка Shorts */
+  /** @param {boolean} [quick] только диск, без channels.list */
+  youtubeStatus: (quick = false) =>
+    request(quick ? '/api/youtube/status?quick=true' : '/api/youtube/status'),
+  youtubeOAuthStart: (profile = 'primary') =>
+    request(`/api/youtube/oauth/authorize?profile=${encodeURIComponent(profile)}`),
+  youtubeUpload: (body) =>
+    request('/api/youtube/upload', { method: 'POST', body: JSON.stringify(body) }),
+  youtubeResetTokens: () => request('/api/youtube/reset', { method: 'POST' }),
 };
 
 /** Subscribe to SSE log stream. Returns cleanup function. */

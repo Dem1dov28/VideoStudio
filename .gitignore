@@ -2,6 +2,9 @@
 .env
 .env.local
 .env.*.local
+youtube_token.json
+youtube_token_*.json
+client_secret*.json
 
 # ─── Python ────────────────────────────────────────────────────────────────────
 __pycache__/

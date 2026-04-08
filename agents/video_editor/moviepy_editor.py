@@ -1057,6 +1057,8 @@ def _make_scene_clip(
 def _pick_background_music(
     topic: str | None = None,
     duration: float | None = None,
+    *,
+    music_dir_only: bool = False,
 ) -> Path | None:
     """
     Return a background music path.
@@ -1064,8 +1066,10 @@ def _pick_background_music(
     If USE_AI_MUSIC is enabled, generate a topic-specific track with MusicGen.
     duration: video length in seconds — pass to generate long enough music (no looping).
     Otherwise fall back to a random file from the music_dir.
+
+    If music_dir_only is True, skip AI and use only files under music_dir (mp3/wav).
     """
-    if settings.use_ai_music and topic:
+    if not music_dir_only and settings.use_ai_music and topic:
         dur = int(duration) + 1 if duration is not None else settings.ai_music_duration
         path = generate_background_music(
             topic=topic,

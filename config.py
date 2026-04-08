@@ -27,8 +27,8 @@ class Settings(BaseSettings):
     fastgen_headless: bool = Field(False, alias="FASTGEN_HEADLESS")
     # Сколько секунд ждать появления нового превью на fast-gen.ai (иногда >2 мин)
     fastgen_image_timeout: int = Field(300, alias="FASTGEN_IMAGE_TIMEOUT")
-    # Сколько раз повторить при таймауте/ошибке (изображения и видео)
-    fastgen_max_attempts: int = Field(5, alias="FASTGEN_MAX_ATTEMPTS")
+    # Сколько раз повторить при таймауте/ошибке (изображения и видео; img+ref в т.ч. mode12)
+    fastgen_max_attempts: int = Field(8, alias="FASTGEN_MAX_ATTEMPTS")
     # Email и пароль для fast-gen.ai (для Playwright авторизации)
     fastgen_email: str = Field("", alias="FASTGEN_EMAIL")
     fastgen_password: str = Field("", alias="FASTGEN_PASSWORD")
@@ -132,6 +132,22 @@ class Settings(BaseSettings):
     postiz_youtube_integration_id: str = Field("", alias="POSTIZ_YOUTUBE_INTEGRATION_ID")
     postiz_telegram_integration_id: str = Field("", alias="POSTIZ_TELEGRAM_INTEGRATION_ID")
 
+    # ── YouTube Data API (прямая загрузка Shorts, без Postiz) ─────────────────
+    youtube_oauth_client_secrets_path: str = Field("", alias="YOUTUBE_OAUTH_CLIENT_SECRETS")
+    youtube_oauth_token_path: str = Field("youtube_token.json", alias="YOUTUBE_OAUTH_TOKEN")
+    # Второй канал: отдельный файл + второй OAuth. По умолчанию выключено (один канал).
+    # Включить: YOUTUBE_OAUTH_TOKEN_B=youtube_token_channel2.json
+    youtube_oauth_token_path_b: str = Field("", alias="YOUTUBE_OAUTH_TOKEN_B")
+    # Подписи в UI (например @Seconds-Construction). Пусто = «Канал 1» / «Канал 2».
+    youtube_channel_primary_label: str = Field("", alias="YOUTUBE_CHANNEL_PRIMARY_LABEL")
+    youtube_channel_secondary_label: str = Field("", alias="YOUTUBE_CHANNEL_SECONDARY_LABEL")
+    youtube_oauth_redirect_uri: str = Field(
+        "http://localhost:8000/api/youtube/oauth/callback",
+        alias="YOUTUBE_OAUTH_REDIRECT_URI",
+    )
+    # Куда редирект после OAuth (браузер пользователя; не путать с redirect URI в Google — тот на :8000)
+    frontend_public_url: str = Field("http://localhost:5173", alias="FRONTEND_PUBLIC_URL")
+
     # ── Scheduler ─────────────────────────────────────────────────────────────
     # Peak hours for Russian/CIS audience: Tue-Thu+Sat 19:00 MSK
     scheduler_cron: str = Field("0 19 * * 2-4,6", alias="SCHEDULER_CRON")
@@ -213,6 +229,42 @@ class Settings(BaseSettings):
     def videos_dir(self) -> Path:
         """Папка для готовых видео в корне проекта."""
         return self.project_root / "MyVideo"
+
+    @property
+    def youtube_client_secrets_file(self) -> Path | None:
+        p = (self.youtube_oauth_client_secrets_path or "").strip()
+        if not p:
+            return None
+        path = Path(p)
+        return path.resolve() if path.is_absolute() else (self.project_root / path).resolve()
+
+    @property
+    def youtube_token_file(self) -> Path:
+        p = Path(self.youtube_oauth_token_path or "youtube_token.json")
+        return p.resolve() if p.is_absolute() else (self.project_root / p).resolve()
+
+    @property
+    def youtube_token_file_secondary(self) -> Path | None:
+        p = (self.youtube_oauth_token_path_b or "").strip()
+        if p in ("", "none", "-", "false", "0"):
+            return None
+        path = Path(p)
+        resolved = path.resolve() if path.is_absolute() else (self.project_root / path).resolve()
+        if resolved == self.youtube_token_file.resolve():
+            return None
+        return resolved
+
+    def youtube_token_path_for_profile(self, profile: str) -> Path:
+        """primary = YOUTUBE_OAUTH_TOKEN, secondary = YOUTUBE_OAUTH_TOKEN_B (обязано быть задано)."""
+        key = (profile or "primary").strip().lower()
+        if key in ("secondary", "second", "b", "2"):
+            sec = self.youtube_token_file_secondary
+            if sec is None:
+                raise ValueError("YOUTUBE_OAUTH_TOKEN_B не задан в .env")
+            return sec
+        if key in ("primary", "main", "a", "1", ""):
+            return self.youtube_token_file
+        raise ValueError("channel_profile: primary | secondary")
 
     @property
     def uploads_dir(self) -> Path:

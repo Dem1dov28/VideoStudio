@@ -18,7 +18,7 @@ from loguru import logger
 from utils.llm import make_llm
 
 
-PUBLISHING_PROMPT = """Generate final YouTube Shorts publishing content for a video about construction and transformation (building houses, objects, restoration).
+PUBLISHING_PROMPT = """Generate final YouTube Shorts publishing content for a timelapse of a PRIVATE HOUSE / SINGLE-FAMILY HOME being built on a plot (empty land → finished home). Not office towers, not apartment blocks, not monuments — only residential house construction.
 
 VIDEO CONTEXT:
 - House Style: {house_style}
@@ -77,7 +77,7 @@ FALLBACK_TEMPLATES = {
             "Смотрите как из пустого участка рождается красивый дом. Полный процесс строительства в таймлапсе! #housebuilding #дома #buildingprocess #timelapse #beforeafter",
             "От котлована до крыши — весь процесс постройки дома за минуту. Удовольствие для глаз! #housebuilding #дома #buildingprocess #timelapse #beforeafter",
         ],
-        "tags": ["строительство дома", "таймлапс", "строительство", "дом", "стройка", "satisfying", "timelapse", "постройка", "renovation", "building"],
+        "tags": ["строительство дома", "таймлапс", "частный дом", "дом", "стройка", "satisfying", "timelapse", "загородный дом", "home build", "timelapse дома"],
     },
     "en": {
         "titles": [
@@ -90,7 +90,7 @@ FALLBACK_TEMPLATES = {
             "Watch a beautiful house rise from an empty plot. Full construction process in timelapse! #housebuilding #home #buildingprocess #timelapse #beforeafter",
             "From foundation to roof - the entire house building process in one minute. Satisfying to watch! #housebuilding #home #buildingprocess #timelapse #beforeafter",
         ],
-        "tags": ["house construction timelapse", "building process", "construction", "house build", "before after", "satisfying", "transformation", "timelapse", "home building", "construction site"],
+        "tags": ["house construction timelapse", "home build", "single family home", "house build", "before after", "satisfying", "transformation", "timelapse", "residential build", "private house"],
     },
 }
 
