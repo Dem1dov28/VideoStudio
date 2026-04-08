@@ -151,8 +151,9 @@ export default function Progress() {
 
   // Copy to clipboard helper
   const copyToClipboard = async (text, field) => {
+    if (text == null || String(text).trim() === '') return;
     try {
-      await navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(String(text));
       setCopied(field);
       setTimeout(() => setCopied(''), 2000);
     } catch (err) {
@@ -198,9 +199,23 @@ export default function Progress() {
                   : '⚙️ Генерация...'}
         </h1>
         {!done?.quote_caption_ru && !done?.quote_caption_en && (done?.quote_caption || done?.topic) && (
-          <p className="text-[#d4d4d8] text-sm mt-1 leading-relaxed whitespace-pre-wrap">
-            {done.quote_caption || done.topic}
-          </p>
+          <div className="flex gap-2 items-start mt-1">
+            <p className="text-[#d4d4d8] text-sm leading-relaxed whitespace-pre-wrap flex-1 min-w-0">
+              {done.quote_caption || done.topic}
+            </p>
+            <button
+              type="button"
+              onClick={() => copyToClipboard(done.quote_caption || done.topic, 'quote_single')}
+              className="shrink-0 p-2 rounded-lg border border-[#27272f] text-[#71717a] hover:text-white hover:border-[#3f3f46] transition-colors"
+              title="Копировать цитату"
+            >
+              {copied === 'quote_single' ? (
+                <RiCheckLine className="text-emerald-400 text-lg" />
+              ) : (
+                <RiFileCopyLine className="text-lg" />
+              )}
+            </button>
+          </div>
         )}
       </div>
 
@@ -332,10 +347,23 @@ export default function Progress() {
                           ? done?.quote_caption_en
                           : done?.quote_caption || done?.quote_caption_ru || done?.topic;
                     if (!cap) return null;
+                    const copyKey = label === 'RU' ? 'quote_ru' : label === 'EN' ? 'quote_en' : `quote_${idx}`;
                     return (
-                      <p className="text-[#d4d4d8] text-sm leading-relaxed text-center px-1">
-                        {cap}
-                      </p>
+                      <div className="flex flex-col items-center gap-2 w-full px-1">
+                        <p className="text-[#d4d4d8] text-sm leading-relaxed text-center">{cap}</p>
+                        <button
+                          type="button"
+                          onClick={() => copyToClipboard(cap, copyKey)}
+                          className="btn-secondary flex items-center gap-2 text-sm"
+                        >
+                          {copied === copyKey ? (
+                            <RiCheckLine className="text-emerald-400" />
+                          ) : (
+                            <RiFileCopyLine />
+                          )}
+                          Копировать цитату
+                        </button>
+                      </div>
                     );
                   })()}
                   <a

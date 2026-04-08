@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { createPortal } from 'react-dom';
-import { RiPlayCircleLine, RiDownloadLine, RiTimeLine, RiDeleteBinLine } from 'react-icons/ri';
+import { RiPlayCircleLine, RiDownloadLine, RiDeleteBinLine, RiFileCopyLine } from 'react-icons/ri';
 import { motion } from 'framer-motion';
 import { api } from '../services/api';
 
@@ -11,6 +11,15 @@ function formatDate(ts) {
   return d.toLocaleDateString('ru-RU', {
     day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
   });
+}
+
+function quoteCaptionForVideo(v) {
+  if (!v) return '';
+  const ru = typeof v.quote_caption_ru === 'string' ? v.quote_caption_ru.trim() : '';
+  const en = typeof v.quote_caption_en === 'string' ? v.quote_caption_en.trim() : '';
+  if (v.video_lang === 'en') return en || ru;
+  if (v.video_lang === 'ru') return ru || en;
+  return ru || en;
 }
 
 export default function VideoCard({ video, onClick, onDelete, youtubeStatus = null, youtubeLoading = false }) {
@@ -100,8 +109,8 @@ export default function VideoCard({ video, onClick, onDelete, youtubeStatus = nu
     if (!confirm('Удалить видео с компьютера?')) return;
     setDeleting(true);
     try {
-      await api.deleteVideo(video.session_id);
-      onDelete?.(video.session_id);
+      await api.deleteVideo(video.session_id, video.filename);
+      onDelete?.(video.session_id, video.filename);
     } catch (err) {
       alert(err.message);
     } finally {
@@ -194,13 +203,13 @@ export default function VideoCard({ video, onClick, onDelete, youtubeStatus = nu
     <motion.div
       whileHover={{ y: -2 }}
       transition={{ duration: 0.15 }}
-      className="card overflow-hidden cursor-pointer group"
+      className="card overflow-hidden cursor-pointer group h-fit max-w-full min-w-0 flex flex-col"
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       onClick={() => onClick(video)}
     >
       {/* Thumbnail / avatar */}
-      <div className="relative aspect-[9/16] max-h-52 bg-[#0d0d14] overflow-hidden">
+      <div className="relative h-[7rem] min-[400px]:h-28 sm:h-32 md:h-36 w-full shrink-0 bg-[#0d0d14] overflow-hidden">
         {thumbUrl ? (
           <img
             src={thumbUrl}
@@ -222,7 +231,7 @@ export default function VideoCard({ video, onClick, onDelete, youtubeStatus = nu
       </div>
 
       {/* Info */}
-      <div className="p-3 space-y-2">
+      <div className="p-2.5 sm:p-3 space-y-1.5 sm:space-y-2">
         <div className="flex items-start gap-2 min-w-0">
           {(video.video_lang === 'ru' || video.video_lang === 'en') && (
             <span
@@ -257,7 +266,7 @@ export default function VideoCard({ video, onClick, onDelete, youtubeStatus = nu
         
         {/* Publishing metadata panel */}
         {showPublishing && video.publishing && (
-          <div className="space-y-4 pt-2 border-t border-[#27272f]">
+          <div className="space-y-3 pt-2 border-t border-[#27272f] max-h-[40vh] sm:max-h-44 md:max-h-48 overflow-y-auto overscroll-contain pr-0.5 -mr-0.5">
             {/* Russian Version */}
             {video.publishing.ru && (
               <div className="space-y-3">
@@ -297,7 +306,7 @@ export default function VideoCard({ video, onClick, onDelete, youtubeStatus = nu
                     <textarea
                       value={video.publishing.ru.description || ''}
                       readOnly
-                      rows={3}
+                      rows={2}
                       className="flex-1 bg-[#0d0d14] border border-[#27272f] rounded px-2 py-1 text-xs text-white resize-none"
                     />
                     <button
@@ -373,7 +382,7 @@ export default function VideoCard({ video, onClick, onDelete, youtubeStatus = nu
                     <textarea
                       value={video.publishing.en.description || ''}
                       readOnly
-                      rows={3}
+                      rows={2}
                       className="flex-1 bg-[#0d0d14] border border-[#27272f] rounded px-2 py-1 text-xs text-white resize-none"
                     />
                     <button
@@ -468,7 +477,7 @@ export default function VideoCard({ video, onClick, onDelete, youtubeStatus = nu
           </div>
         )}
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <a
             href={video?.url ? base + video.url : '#'}
             download
@@ -478,6 +487,29 @@ export default function VideoCard({ video, onClick, onDelete, youtubeStatus = nu
             <RiDownloadLine className="text-sm" />
             Скачать
           </a>
+          {quoteCaptionForVideo(video) ? (
+            <button
+              type="button"
+              onClick={async (e) => {
+                e.stopPropagation();
+                const text = quoteCaptionForVideo(video);
+                try {
+                  await navigator.clipboard.writeText(text);
+                } catch {
+                  const textarea = document.createElement('textarea');
+                  textarea.value = text;
+                  document.body.appendChild(textarea);
+                  textarea.select();
+                  document.execCommand('copy');
+                  document.body.removeChild(textarea);
+                }
+              }}
+              className="flex items-center gap-1.5 text-[#71717a] hover:text-brand-300 text-xs transition-colors"
+            >
+              <RiFileCopyLine className="text-sm" />
+              Копировать цитату
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={handleDelete}
