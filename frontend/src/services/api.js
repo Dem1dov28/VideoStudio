@@ -45,8 +45,14 @@ async function request(path, opts = {}) {
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: res.statusText }));
       if (DEBUG_API) console.error(`[API] ${path} ERROR:`, err);
-      reportClientError(`${res.status}: ${err.detail || res.statusText}`, path);
-      throw Object.assign(new Error(err.detail || 'Request failed'), { status: res.status });
+      let msg = err.detail ?? err.message ?? res.statusText;
+      if (Array.isArray(msg)) {
+        msg = msg.map((x) => (typeof x === 'object' && x.msg ? x.msg : String(x))).join('; ');
+      } else if (msg && typeof msg === 'object') {
+        msg = JSON.stringify(msg);
+      }
+      reportClientError(`${res.status}: ${msg}`, path);
+      throw Object.assign(new Error(msg || 'Request failed'), { status: res.status });
     }
 
     if (res.status === 204) return null;
@@ -135,7 +141,30 @@ export const api = {
   youtubeUpload: (body) =>
     request('/api/youtube/upload', { method: 'POST', body: JSON.stringify(body) }),
   youtubeResetTokens: () => request('/api/youtube/reset', { method: 'POST' }),
+  /** Казино: TikTok-каналы + health для сайдбара YouTube */
+  fetchCasinoHealth: () => request('/api/casino/health'),
+  fetchYoutubeChannelsList: (profile = 'primary') =>
+    request(`/api/youtube/channels?profile=${encodeURIComponent(profile)}`),
+  fetchSocialChannels: () => request('/api/social/channels'),
+  fetchSocialChannel: (id) => request(`/api/social/channels/${encodeURIComponent(id)}`),
+  createSocialChannel: (body) =>
+    request('/api/social/channels', { method: 'POST', body: JSON.stringify(body) }),
+  cancelSocialChannel: (id) =>
+    request(`/api/social/channels/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+  startSocialChannel: (id) =>
+    request(`/api/social/channels/${encodeURIComponent(id)}/start`, { method: 'POST' }),
+  deleteSocialChannel: (id, wipe) =>
+    request(
+      `/api/social/channels/${encodeURIComponent(id)}${wipe ? '?wipe=true' : ''}`,
+      { method: 'DELETE' },
+    ),
 };
+
+/** URL для <video src> — скачанный ролик канала (Range). */
+export function socialVideoFileUrl(channelId, videoKey) {
+  const path = `/api/social/channels/${encodeURIComponent(channelId)}/videos/${encodeURIComponent(videoKey)}/file`;
+  return `${BASE}${path}`;
+}
 
 /** Subscribe to SSE log stream. Returns cleanup function. */
 export function subscribeToStream(sessionId, onMessage, onDone, onError) {

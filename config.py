@@ -133,6 +133,9 @@ class Settings(BaseSettings):
     postiz_telegram_integration_id: str = Field("", alias="POSTIZ_TELEGRAM_INTEGRATION_ID")
 
     # ── YouTube Data API (прямая загрузка Shorts, без Postiz) ─────────────────
+    # Реестр нескольких каналов / нескольких GCP-проектов: JSON с парами client_secrets+token на слот.
+    # Пусто = режим только из .env (YOUTUBE_OAUTH_CLIENT_SECRETS + токены).
+    youtube_profiles_config_path: str = Field("", alias="YOUTUBE_PROFILES_CONFIG")
     youtube_oauth_client_secrets_path: str = Field("", alias="YOUTUBE_OAUTH_CLIENT_SECRETS")
     youtube_oauth_token_path: str = Field("youtube_token.json", alias="YOUTUBE_OAUTH_TOKEN")
     # Второй канал: отдельный файл + второй OAuth. По умолчанию выключено (один канал).
@@ -255,8 +258,13 @@ class Settings(BaseSettings):
         return resolved
 
     def youtube_token_path_for_profile(self, profile: str) -> Path:
-        """primary = YOUTUBE_OAUTH_TOKEN, secondary = YOUTUBE_OAUTH_TOKEN_B (обязано быть задано)."""
+        """Путь к JSON токена для профиля (реестр YOUTUBE_PROFILES_CONFIG или legacy primary/secondary)."""
+        from agents.publisher.youtube_multi import get_youtube_profile, try_load_youtube_profiles
+
         key = (profile or "primary").strip().lower()
+        profs = try_load_youtube_profiles(self)
+        if profs is not None:
+            return get_youtube_profile(self, key).token_path
         if key in ("secondary", "second", "b", "2"):
             sec = self.youtube_token_file_secondary
             if sec is None:

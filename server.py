@@ -20,9 +20,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 from config import settings
+from casino_routes import register_casino_routes
 
 # ── Session store ─────────────────────────────────────────────────────────────
 _sessions: dict[str, dict] = {}
@@ -380,6 +381,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+register_casino_routes(app)
+
 
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 
@@ -405,13 +408,36 @@ class LibraryRegenerateBody(BaseModel):
 
 
 class YouTubeUploadBody(BaseModel):
-    """Публикация готового файла из библиотеки на YouTube Shorts (videos.insert)."""
-    session_id: str
+    """Публикация на YouTube Shorts: библиотека (История) или соц-ролик «Казино» — один эндпоинт."""
+
+    session_id: str | None = None
     filename: str | None = None
     lang: str | None = None
     privacy_status: str = "public"
     # primary = YOUTUBE_OAUTH_TOKEN, secondary = YOUTUBE_OAUTH_TOKEN_B (другой канал / тот же Gmail)
     channel_profile: str = "primary"
+    # --- Казино (TikTok-канал): те же OAuth-токены, что у библиотеки ---
+    social_channel_id: str | None = None
+    social_video_key: str | None = None
+    branding_corner: str | None = "tr"
+    title: str | None = None
+    description: str | None = None
+    keywords: str | None = None
+    tags: str | None = None
+    category_id: str | None = None
+
+    @model_validator(mode="after")
+    def _library_or_social(self) -> "YouTubeUploadBody":
+        sid = (self.session_id or "").strip()
+        sc = (self.social_channel_id or "").strip()
+        sk = (self.social_video_key or "").strip()
+        if sc or sk:
+            if not sc or not sk:
+                raise ValueError("Для соц-ролика укажи и social_channel_id, и social_video_key")
+            return self
+        if not sid:
+            raise ValueError("Укажи session_id (библиотека) или пару social_channel_id + social_video_key (Казино)")
+        return self
 
     @field_validator("privacy_status")
     @classmethod
@@ -424,9 +450,19 @@ class YouTubeUploadBody(BaseModel):
     @field_validator("channel_profile")
     @classmethod
     def _chprof(cls, v: str) -> str:
+        from agents.publisher.youtube_multi import try_load_youtube_profiles
+
         x = (v or "primary").strip().lower()
-        if x not in ("primary", "secondary"):
-            raise ValueError("channel_profile: primary | secondary")
+        profs = try_load_youtube_profiles(settings)
+        if profs is None:
+            if x not in ("primary", "secondary"):
+                raise ValueError("channel_profile: primary | secondary")
+            return x
+        allowed = {p.normalized_id() for p in profs}
+        if x not in allowed:
+            raise ValueError(
+                f"channel_profile: одно из {', '.join(sorted(allowed))}"
+            )
         return x
 
     @field_validator("lang")
@@ -1032,10 +1068,31 @@ async def youtube_api_status(quick: bool = Query(False)):
     """
     quick=true — только файлы токенов на диске, без Google API (не падает на channels.list/build).
     """
-    cs = settings.youtube_client_secrets_file
-    configured = bool(cs and cs.is_file())
     from agents.publisher import youtube_direct
-    from agents.publisher.youtube_multi import iter_youtube_token_slots
+    from agents.publisher.youtube_multi import (
+        try_load_youtube_profiles,
+        uses_youtube_registry,
+        youtube_profiles_registry_path,
+    )
+
+    profs = try_load_youtube_profiles(settings)
+    if not profs:
+        reg = youtube_profiles_registry_path(settings)
+        return {
+            "client_configured": False,
+            "authorized": False,
+            "authorized_any": False,
+            "has_secondary": False,
+            "uses_registry": bool(reg and reg.is_file()),
+            "registry_path": str(reg) if reg else "",
+            "profile_order": [],
+            "profile_list": [],
+            "profiles": {},
+        }
+
+    reg_path = youtube_profiles_registry_path(settings)
+    uses_reg = uses_youtube_registry(settings)
+    configured_global = any(p.client_secrets_path.is_file() for p in profs)
 
     def _auth_ok(path: Path) -> bool:
         if not path.is_file():
@@ -1046,24 +1103,29 @@ async def youtube_api_status(quick: bool = Query(False)):
         except Exception:
             return False
 
-    lab1 = (settings.youtube_channel_primary_label or "").strip() or "Канал 1"
-    lab2 = (settings.youtube_channel_secondary_label or "").strip() or "Канал 2"
-    slots = iter_youtube_token_slots(settings)
-    has_secondary = len(slots) > 1
+    profile_order = [p.id for p in profs]
     profiles: dict[str, dict] = {}
-    for prof_id, path in slots:
-        label = lab1 if prof_id == "primary" else lab2
-        ok = _auth_ok(path)
+    profile_list: list[dict] = []
+
+    for p in profs:
+        cs = p.client_secrets_path
+        ok = _auth_ok(p.token_path)
         entry: dict = {
-            "token_file": str(path),
+            "id": p.id,
+            "token_file": str(p.token_path),
             "authorized": ok,
-            "label": label,
+            "label": p.label,
             "channels": [],
             "channel_hint": "",
+            "client_secret_path": str(cs),
+            "client_secret_configured": cs.is_file(),
+            "gcp_project": p.gcp_project or "",
         }
-        if ok and configured and cs and not quick:
+        if ok and cs.is_file() and not quick:
             try:
-                creds = await asyncio.to_thread(youtube_direct.get_valid_credentials, cs, path)
+                creds = await asyncio.to_thread(
+                    youtube_direct.get_valid_credentials, cs, p.token_path
+                )
                 if creds:
                     chans = await asyncio.to_thread(
                         youtube_direct.list_managed_channels_preview, creds
@@ -1071,13 +1133,30 @@ async def youtube_api_status(quick: bool = Query(False)):
                     entry["channels"] = chans
                     entry["channel_hint"] = _youtube_channel_hint(chans)
             except Exception as ex:
-                logger.warning(f"[YouTube] status enrich {prof_id}: {ex}")
-        profiles[prof_id] = entry
+                logger.warning(f"[YouTube] status enrich {p.id}: {ex}")
+        profiles[p.id] = {k: v for k, v in entry.items() if k != "id"}
+        profile_list.append(entry)
+
+    has_secondary = len(profs) > 1
+    first_id = profile_order[0]
+    authorized_first = bool(profiles.get(first_id, {}).get("authorized"))
+    authorized_any = any(
+        bool(profiles.get(pid, {}).get("authorized")) for pid in profile_order
+    )
+    legacy_primary = profiles.get("primary", {}).get("authorized")
+    top_authorized = (
+        legacy_primary if "primary" in profiles else authorized_first
+    )
 
     return {
-        "client_configured": configured,
-        "authorized": profiles["primary"]["authorized"],
+        "client_configured": configured_global,
+        "authorized": bool(top_authorized),
+        "authorized_any": authorized_any,
         "has_secondary": has_secondary,
+        "uses_registry": uses_reg,
+        "registry_path": str(reg_path) if reg_path else "",
+        "profile_order": profile_order,
+        "profile_list": profile_list,
         "profiles": profiles,
     }
 
@@ -1088,13 +1167,16 @@ async def youtube_reset_all_tokens():
     Удаляет локальные youtube_token*.json (основной + второй, если настроен),
     пытается отозвать у Google (best-effort), сбрасывает pending OAuth state.
     """
-    cs = settings.youtube_client_secrets_file
-    if not cs or not cs.is_file():
-        raise HTTPException(400, "YOUTUBE_OAUTH_CLIENT_SECRETS не настроен")
+    from agents.publisher.youtube_multi import try_load_youtube_profiles
 
-    from agents.publisher.youtube_multi import iter_youtube_token_slots
+    profs = try_load_youtube_profiles(settings)
+    if not profs:
+        raise HTTPException(
+            400,
+            "YouTube не настроен: укажи YOUTUBE_PROFILES_CONFIG или YOUTUBE_OAUTH_CLIENT_SECRETS",
+        )
 
-    paths = [p for _, p in iter_youtube_token_slots(settings)]
+    paths = [p.token_path for p in profs]
 
     removed: list[str] = []
     for p in paths:
@@ -1115,26 +1197,29 @@ async def youtube_reset_all_tokens():
 
 @app.get("/api/youtube/oauth/authorize")
 async def youtube_oauth_authorize(profile: str = Query("primary")):
-    cs = settings.youtube_client_secrets_file
-    if not cs or not cs.is_file():
+    from agents.publisher import youtube_direct
+    from agents.publisher.youtube_multi import get_youtube_profile, try_load_youtube_profiles
+
+    profs = try_load_youtube_profiles(settings)
+    if not profs:
         raise HTTPException(
             400,
-            "Укажи YOUTUBE_OAUTH_CLIENT_SECRETS — путь к JSON OAuth client из Google Cloud.",
+            "YouTube не настроен: YOUTUBE_PROFILES_CONFIG или YOUTUBE_OAUTH_CLIENT_SECRETS",
         )
     key = (profile or "primary").strip().lower()
-    if key not in ("primary", "secondary"):
-        raise HTTPException(400, "profile: primary | secondary")
-    if key == "secondary" and settings.youtube_token_file_secondary is None:
-        raise HTTPException(400, "Для второго канала задай YOUTUBE_OAUTH_TOKEN_B в .env")
     try:
-        settings.youtube_token_path_for_profile(key)
+        yp = get_youtube_profile(settings, key)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+    cs = yp.client_secrets_path
+    if not cs.is_file():
+        raise HTTPException(
+            400,
+            f"OAuth client JSON не найден для профиля «{key}»: {cs}",
+        )
 
     _youtube_oauth_cleanup_states()
     try:
-        from agents.publisher import youtube_direct
-
         flow = youtube_direct.create_flow(cs, settings.youtube_oauth_redirect_uri)
         auth_url, state = flow.authorization_url(
             access_type="offline",
@@ -1144,8 +1229,8 @@ async def youtube_oauth_authorize(profile: str = Query("primary")):
     except Exception as e:
         logger.exception(f"[YouTube] authorization_url failed: {e}")
         raise HTTPException(500, f"OAuth URL: {e}") from e
-    _youtube_oauth_states[state] = {"t": time.time(), "profile": key}
-    return {"authorization_url": auth_url, "state": state, "profile": key}
+    _youtube_oauth_states[state] = {"t": time.time(), "profile": yp.id}
+    return {"authorization_url": auth_url, "state": state, "profile": yp.id}
 
 
 @app.get("/api/youtube/oauth/callback")
@@ -1171,15 +1256,17 @@ async def youtube_oauth_callback(
     if time.time() - t0 > 600:
         return RedirectResponse(f"{redir}?youtube_error={quote('oauth_state_expired')}")
     try:
-        token_path = settings.youtube_token_path_for_profile(prof)
+        from agents.publisher import youtube_direct
+        from agents.publisher.youtube_multi import get_youtube_profile
+
+        yp = get_youtube_profile(settings, prof)
+        token_path = yp.token_path
+        cs = yp.client_secrets_path
     except ValueError as e:
         return RedirectResponse(f"{redir}?youtube_error={quote(str(e)[:120])}")
-    cs = settings.youtube_client_secrets_file
-    if not cs or not cs.is_file():
+    if not cs.is_file():
         return RedirectResponse(f"{redir}?youtube_error={quote('client_secrets_missing')}")
     try:
-        from agents.publisher import youtube_direct
-
         youtube_direct.save_token_from_code(
             cs,
             token_path,
@@ -1193,18 +1280,28 @@ async def youtube_oauth_callback(
     return RedirectResponse(f"{redir}?youtube_oauth=ok")
 
 
+def _youtube_upload_limit_exceeded(exc: BaseException) -> bool:
+    s = str(exc).lower()
+    return "uploadlimitexceeded" in s.replace(" ", "") or "exceeded the number of videos" in s
+
+
 @app.post("/api/youtube/upload")
 async def youtube_upload_short(body: YouTubeUploadBody):
-    cs = settings.youtube_client_secrets_file
-    if not cs or not cs.is_file():
-        raise HTTPException(400, "YOUTUBE_OAUTH_CLIENT_SECRETS не настроен")
     from agents.publisher import youtube_direct
+    from agents.publisher.youtube_multi import get_youtube_profile
     from googleapiclient.errors import HttpError
 
     try:
-        token_path = settings.youtube_token_path_for_profile(body.channel_profile)
+        yp = get_youtube_profile(settings, body.channel_profile)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+    cs = yp.client_secrets_path
+    token_path = yp.token_path
+    if not cs.is_file():
+        raise HTTPException(
+            400,
+            f"OAuth client JSON для профиля «{yp.id}» не найден: {cs}",
+        )
 
     creds = youtube_direct.get_valid_credentials(cs, token_path)
     if not creds:
@@ -1213,6 +1310,59 @@ async def youtube_upload_short(body: YouTubeUploadBody):
             f"Нет токена для профиля «{body.channel_profile}»: открой /history и подключи этот канал (OAuth).",
         )
 
+    # ── Казино: скачанный TikTok-ролик (тот же upload_video_file + оверлей, что в casino_routes) ──
+    sc = (body.social_channel_id or "").strip()
+    sk = (body.social_video_key or "").strip()
+    if sc and sk:
+        from casino_routes import run_social_youtube_upload_with_lock
+
+        def _run_social() -> tuple[str, str, str]:
+            return run_social_youtube_upload_with_lock(
+                sc,
+                sk,
+                channel_profile=body.channel_profile,
+                branding_corner=(body.branding_corner or "tr"),
+                title=body.title or "",
+                description=body.description or "",
+                keywords=body.keywords or "",
+                tags=body.tags or "",
+                privacy=body.privacy_status,
+                category_id=body.category_id or "",
+            )
+
+        try:
+            vid, _ch_id, title_used = await asyncio.to_thread(_run_social)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        except HttpError as e:
+            msg = youtube_direct.format_http_error(e)
+            logger.error(f"[YouTube] social upload HttpError: {msg}")
+            if _youtube_upload_limit_exceeded(e):
+                raise HTTPException(
+                    status_code=429,
+                    detail="YouTube лимит загрузок: аккаунт/канал превысил допустимое число видео за период.",
+                ) from e
+            raise HTTPException(502, f"YouTube API: {msg}") from e
+        except RuntimeError as e:
+            msg = str(e)
+            if _youtube_upload_limit_exceeded(e):
+                raise HTTPException(
+                    status_code=429,
+                    detail="YouTube лимит загрузок: аккаунт/канал превысил допустимое число видео за период.",
+                ) from e
+            raise HTTPException(502, msg) from e
+        except Exception as e:
+            logger.exception(f"[YouTube] social upload failed: {e}")
+            raise HTTPException(500, str(e)) from e
+
+        return {
+            "ok": True,
+            "video_id": vid,
+            "url": f"https://www.youtube.com/shorts/{vid}" if vid else None,
+            "title": title_used,
+        }
+
+    # ── библиотека (История видео) ──
     fn = (body.filename or "").strip() or f"video_{body.session_id}.mp4"
     path = _resolve_video_path(body.session_id, fn)
     if not path or not path.is_file():
@@ -1301,21 +1451,23 @@ async def delete_video(
             target.relative_to(session_dir.resolve())
         except ValueError:
             raise HTTPException(400, "Некорректный путь") from None
-        if not target.is_file():
-            raise HTTPException(404, "Video not found")
-        target.unlink()
-        removed = True
-        rest = [
-            p
-            for p in session_dir.glob("*.mp4")
-            if p.is_file() and _is_public_session_mp4(p.name)
-        ]
-        if not rest:
-            shutil.rmtree(session_dir)
-            from agents.topics_history import remove_topic
+        if target.is_file():
+            target.unlink()
+            removed = True
+            rest = [
+                p
+                for p in session_dir.glob("*.mp4")
+                if p.is_file() and _is_public_session_mp4(p.name)
+            ]
+            if not rest:
+                shutil.rmtree(session_dir)
+                from agents.topics_history import remove_topic
 
-            remove_topic(session_id)
-        return {"deleted": True, "partial": True}
+                remove_topic(session_id)
+            return {"deleted": True, "partial": True}
+        # Финал часто в корне videos/ (video_{sid}.mp4), а session_id/ — только clips и т.д.
+        if fname != f"video_{session_id}.mp4":
+            raise HTTPException(404, "Video not found")
 
     # Удалить плоский файл
     flat_path = videos_dir / f"video_{session_id}.mp4"

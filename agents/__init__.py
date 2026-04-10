@@ -1,1 +1,1 @@
-﻿
+# Namespace package for agents.*

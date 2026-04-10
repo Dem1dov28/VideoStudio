@@ -8,6 +8,7 @@ import History from './pages/History';
 import Topics from './pages/Topics';
 
 const Generate = lazy(() => import('./pages/Generate'));
+const Casino = lazy(() => import('./pages/Casino'));
 const Progress = lazy(() => import('./pages/Progress'));
 
 function Spinner() {
@@ -31,6 +32,7 @@ export default function App() {
                   <Route path="/run/:sid" element={<Progress />} />
                   <Route path="/history"  element={<History />} />
                   <Route path="/topics"   element={<Topics />} />
+                  <Route path="/casino" element={<Casino />} />
                   <Route path="*"         element={<Navigate to="/" replace />} />
                 </Routes>
               </Suspense>

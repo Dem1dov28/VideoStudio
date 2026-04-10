@@ -10,6 +10,7 @@ import {
 } from 'react-icons/ri';
 import { api } from '../services/api';
 import VideoCard from '../components/VideoCard';
+import { youtubeSlotsFromStatus } from '../utils/youtubeProfiles';
 
 const initialState = { videos: [], loading: true, error: false };
 
@@ -97,7 +98,10 @@ export default function History() {
     const fallback = {
       client_configured: true,
       authorized: false,
+      authorized_any: false,
       has_secondary: false,
+      profile_order: [],
+      profile_list: [],
       status_fetch_failed: true,
       profiles: {
         primary: {
@@ -207,60 +211,58 @@ export default function History() {
           </p>
         )}
         {!ytLoading && ytStatus?.client_configured && (() => {
-          const p = ytStatus.profiles;
-          const needP = !p?.primary?.authorized;
-          const needS = ytStatus.has_secondary && !p?.secondary?.authorized;
-          if (!needP && !needS) return null;
+          const slots = youtubeSlotsFromStatus(ytStatus);
+          const needOAuth = slots.filter(
+            (s) => !s.authorized && s.client_secret_configured !== false,
+          );
+          if (!needOAuth.length) return null;
           return (
             <div className="mt-4 flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2">
               <span className="text-xs text-amber-200/90">YouTube: войти в Google</span>
-              {needP && (
+              {needOAuth.map((s) => (
                 <button
+                  key={s.id}
                   type="button"
                   className="text-xs font-medium px-2 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-100"
                   onClick={async () => {
                     try {
-                      const r = await api.youtubeOAuthStart('primary');
+                      const r = await api.youtubeOAuthStart(s.id);
                       if (r?.authorization_url) window.open(r.authorization_url, '_blank', 'noopener,noreferrer');
                     } catch (e) {
                       alert(e.message || String(e));
                     }
                   }}
                 >
-                  {ytStatus?.profiles?.primary?.label || 'Канал 1'}
+                  {s.label || s.id}
+                  {s.gcp_project ? ` (${s.gcp_project})` : ''}
                 </button>
-              )}
-              {needS && (
-                <button
-                  type="button"
-                  className="text-xs font-medium px-2 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-100"
-                  onClick={async () => {
-                    try {
-                      const r = await api.youtubeOAuthStart('secondary');
-                      if (r?.authorization_url) window.open(r.authorization_url, '_blank', 'noopener,noreferrer');
-                    } catch (e) {
-                      alert(e.message || String(e));
-                    }
-                  }}
-                >
-                  {ytStatus?.profiles?.secondary?.label || 'Канал 2'}
-                </button>
-              )}
+              ))}
             </div>
           );
         })()}
-        {!ytLoading && ytStatus?.client_configured && ytStatus?.profiles?.primary?.authorized &&
-          (!ytStatus.has_secondary || ytStatus?.profiles?.secondary?.authorized) && (
-          <p className="mt-3 text-xs text-emerald-400/90">
-            YouTube API: {ytStatus.has_secondary ? 'оба канала подключены' : 'канал подключён'}
-          </p>
-        )}
-        {!ytLoading && ytStatus?.client_configured && ytStatus?.profiles?.primary?.authorized &&
-          ytStatus.has_secondary && !ytStatus?.profiles?.secondary?.authorized && (
-          <p className="mt-3 text-[11px] text-[#a1a1aa]">
-            Канал 1 готов. Для второго канала нажми «Канал 2» и при входе в Google выбери нужный канал / brand account.
-          </p>
-        )}
+        {!ytLoading && ytStatus?.client_configured && (() => {
+          const slots = youtubeSlotsFromStatus(ytStatus);
+          const allOk =
+            slots.length > 0 && slots.every((s) => s.authorized);
+          if (!allOk) return null;
+          return (
+            <p className="mt-3 text-xs text-emerald-400/90">
+              YouTube API:{' '}
+              {slots.length > 1 ? `подключены все слоты (${slots.length})` : 'канал подключён'}
+            </p>
+          );
+        })()}
+        {!ytLoading && ytStatus?.client_configured && (() => {
+          const slots = youtubeSlotsFromStatus(ytStatus);
+          const someOk = slots.some((s) => s.authorized);
+          const allOk = slots.length > 0 && slots.every((s) => s.authorized);
+          if (!someOk || allOk || slots.length <= 1) return null;
+          return (
+            <p className="mt-3 text-[11px] text-[#a1a1aa]">
+              Часть слотов подключена. Для остальных нажми соответствующую кнопку выше и при входе в Google выбери нужный канал / brand account.
+            </p>
+          );
+        })()}
         {!ytLoading && ytStatus && !ytStatus.client_configured && (
           <p className="mt-3 text-[11px] text-[#52525b]">
             Прямой YouTube: укажи в .env <code className="text-[#71717a]">YOUTUBE_OAUTH_CLIENT_SECRETS</code> (см. .env.example)
@@ -275,7 +277,7 @@ export default function History() {
               onClick={async () => {
                 if (
                   !confirm(
-                    'Сбросить все сохранённые входы YouTube на этом компьютере? Файлы токенов удалятся, нужно снова нажать «Канал 1» / «Канал 2».',
+                    'Сбросить все сохранённые входы YouTube на этом компьютере? Файлы токенов удалятся, нужно снова пройти OAuth для каждого слота.',
                   )
                 )
                   return;

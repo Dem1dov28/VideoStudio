@@ -16,7 +16,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaFileUpload
+from googleapiclient.http import MediaIoBaseUpload
 from loguru import logger
 
 YOUTUBE_UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
@@ -276,24 +276,29 @@ def upload_video_file(
 
     http = _authorized_http_for_youtube(creds)
     youtube = build("youtube", "v3", http=http, cache_discovery=False)
-    media = MediaFileUpload(str(video_path), mimetype="video/mp4", resumable=True, chunksize=8 * 1024 * 1024)
-    request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
-    response = None
-    while response is None:
-        status = None
-        attempt = 0
-        while attempt < 3:
-            try:
-                status, response = request.next_chunk()
-                break
-            except Exception as e:
-                attempt += 1
-                if not _is_transient_network_error(e) or attempt >= 3:
-                    raise
-                logger.warning(f"[YouTube] сеть при chunk, повтор {attempt}/3: {e}")
-                time.sleep(1.0 * attempt)
-        if status and getattr(status, "progress", None) is not None:
-            logger.debug(f"[YouTube] upload progress {int(status.progress() * 100)}%")
+    # MediaFileUpload держит файл открытым до __del__ (GC) — на Windows unlink временного
+    # файла после загрузки падает с WinError 32. Явный with закрывает дескриптор до return.
+    with open(video_path, "rb") as fh:
+        media = MediaIoBaseUpload(
+            fh, mimetype="video/mp4", resumable=True, chunksize=8 * 1024 * 1024
+        )
+        request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+        response = None
+        while response is None:
+            status = None
+            attempt = 0
+            while attempt < 3:
+                try:
+                    status, response = request.next_chunk()
+                    break
+                except Exception as e:
+                    attempt += 1
+                    if not _is_transient_network_error(e) or attempt >= 3:
+                        raise
+                    logger.warning(f"[YouTube] сеть при chunk, повтор {attempt}/3: {e}")
+                    time.sleep(1.0 * attempt)
+            if status and getattr(status, "progress", None) is not None:
+                logger.debug(f"[YouTube] upload progress {int(status.progress() * 100)}%")
 
     vid = (response or {}).get("id", "")
     logger.success(f"[YouTube] Видео загружено, id={vid}")

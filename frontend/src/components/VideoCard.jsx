@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { RiPlayCircleLine, RiDownloadLine, RiDeleteBinLine, RiFileCopyLine } from 'react-icons/ri';
 import { motion } from 'framer-motion';
 import { api } from '../services/api';
+import { youtubeSlotsFromStatus } from '../utils/youtubeProfiles';
 
 function formatDate(ts) {
   if (ts == null) return '—';
@@ -33,19 +34,16 @@ export default function VideoCard({ video, onClick, onDelete, youtubeStatus = nu
   const [ytBusy, setYtBusy] = useState(false);
   const [ytChannelModal, setYtChannelModal] = useState(false);
 
-  const primaryAuth = Boolean(youtubeStatus?.profiles?.primary?.authorized);
-  const secondaryAuth = Boolean(
-    youtubeStatus?.has_secondary && youtubeStatus?.profiles?.secondary?.authorized,
-  );
+  const ytSlots = youtubeSlotsFromStatus(youtubeStatus);
+  const authorizedSlots = ytSlots.filter((s) => s.authorized);
   const showYoutubePanel = Boolean(
     youtubeLoading || youtubeStatus?.client_configured,
   );
   const youtubeAnyReady = Boolean(
     !youtubeLoading &&
       youtubeStatus?.client_configured &&
-      (primaryAuth || secondaryAuth),
+      (youtubeStatus?.authorized_any ?? authorizedSlots.length > 0),
   );
-  // Совместимость со старыми чанками / HMR
   const youtubeReady = youtubeAnyReady;
 
   const base = import.meta.env.VITE_API_URL || '';
@@ -84,13 +82,8 @@ export default function VideoCard({ video, onClick, onDelete, youtubeStatus = nu
   function handleYoutubeButtonClick(e) {
     e.stopPropagation();
     if (ytBusy || youtubeLoading || !youtubeReady) return;
-    if (!youtubeStatus?.has_secondary) {
-      runYoutubeUpload('primary');
-      return;
-    }
-    const nAuth = (primaryAuth ? 1 : 0) + (secondaryAuth ? 1 : 0);
-    if (nAuth === 1) {
-      runYoutubeUpload(primaryAuth ? 'primary' : 'secondary');
+    if (authorizedSlots.length <= 1) {
+      runYoutubeUpload(authorizedSlots[0]?.id || 'primary');
       return;
     }
     setYtChannelModal(true);
@@ -98,8 +91,7 @@ export default function VideoCard({ video, onClick, onDelete, youtubeStatus = nu
 
   async function pickChannelAndUpload(profile) {
     setYtChannelModal(false);
-    if (profile === 'primary' && !primaryAuth) return;
-    if (profile === 'secondary' && !secondaryAuth) return;
+    if (!authorizedSlots.some((s) => s.id === profile)) return;
     await runYoutubeUpload(profile);
   }
 
@@ -138,7 +130,7 @@ export default function VideoCard({ video, onClick, onDelete, youtubeStatus = nu
   const channelPickerModal =
     typeof document !== 'undefined' &&
     ytChannelModal &&
-    youtubeStatus?.has_secondary &&
+    authorizedSlots.length > 1 &&
     createPortal(
       <div
         className="fixed inset-0 z-[200] flex items-center justify-center bg-black/70 p-4"
@@ -153,38 +145,32 @@ export default function VideoCard({ video, onClick, onDelete, youtubeStatus = nu
         >
           <p className="text-sm font-medium text-white text-center">Куда залить видео?</p>
           <div className="flex flex-col gap-2">
-            <button
-              type="button"
-              disabled={!primaryAuth || ytBusy}
-              onClick={() => pickChannelAndUpload('primary')}
-              className="w-full py-2.5 rounded-lg text-sm font-medium bg-[#27272f] hover:bg-[#3f3f46] text-white disabled:opacity-40 disabled:cursor-not-allowed text-left px-3"
-            >
-              <span className="block">
-                {youtubeStatus?.profiles?.primary?.label || 'Канал 1'}
-                {!primaryAuth ? ' (не подключён)' : ''}
-              </span>
-              {primaryAuth && youtubeStatus?.profiles?.primary?.channel_hint ? (
-                <span className="block text-[11px] font-normal text-[#a1a1aa] mt-0.5 truncate" title={youtubeStatus.profiles.primary.channel_hint}>
-                  {youtubeStatus.profiles.primary.channel_hint}
+            {authorizedSlots.map((slot) => (
+              <button
+                key={slot.id}
+                type="button"
+                disabled={ytBusy}
+                onClick={() => pickChannelAndUpload(slot.id)}
+                className="w-full py-2.5 rounded-lg text-sm font-medium bg-[#27272f] hover:bg-[#3f3f46] text-white disabled:opacity-40 disabled:cursor-not-allowed text-left px-3"
+              >
+                <span className="block">
+                  {slot.label || slot.id}
+                  {slot.gcp_project ? (
+                    <span className="text-[10px] font-normal text-[#71717a] ml-1">
+                      ({slot.gcp_project})
+                    </span>
+                  ) : null}
                 </span>
-              ) : null}
-            </button>
-            <button
-              type="button"
-              disabled={!secondaryAuth || ytBusy}
-              onClick={() => pickChannelAndUpload('secondary')}
-              className="w-full py-2.5 rounded-lg text-sm font-medium bg-[#27272f] hover:bg-[#3f3f46] text-white disabled:opacity-40 disabled:cursor-not-allowed text-left px-3"
-            >
-              <span className="block">
-                {youtubeStatus?.profiles?.secondary?.label || 'Канал 2'}
-                {!secondaryAuth ? ' (не подключён)' : ''}
-              </span>
-              {secondaryAuth && youtubeStatus?.profiles?.secondary?.channel_hint ? (
-                <span className="block text-[11px] font-normal text-[#a1a1aa] mt-0.5 truncate" title={youtubeStatus.profiles.secondary.channel_hint}>
-                  {youtubeStatus.profiles.secondary.channel_hint}
-                </span>
-              ) : null}
-            </button>
+                {slot.channel_hint ? (
+                  <span
+                    className="block text-[11px] font-normal text-[#a1a1aa] mt-0.5 truncate"
+                    title={slot.channel_hint}
+                  >
+                    {slot.channel_hint}
+                  </span>
+                ) : null}
+              </button>
+            ))}
           </div>
           <button
             type="button"

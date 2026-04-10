@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
-import { RiVideoAddLine, RiHistoryLine, RiSparklingLine, RiBookmarkLine, RiLoader4Line, RiPauseLine } from 'react-icons/ri';
+import { RiVideoAddLine, RiHistoryLine, RiSparklingLine, RiBookmarkLine, RiLoader4Line, RiPauseLine, RiDiceLine } from 'react-icons/ri';
 import { motion } from 'framer-motion';
 import { api } from '../services/api';
 import RateLimitPanel from './RateLimitPanel';
@@ -9,6 +9,7 @@ const NAV = [
   { to: '/',        icon: RiVideoAddLine,  label: 'Создать' },
   { to: '/history', icon: RiHistoryLine,   label: 'Видео' },
   { to: '/topics',  icon: RiBookmarkLine,  label: 'Темы' },
+  { to: '/casino',  icon: RiDiceLine,       label: 'Казино' },
 ];
 
 const MODE_LABELS = { 1: '5 фактов', 2: 'Почему X?', 3: 'Реставрация', 4: 'Цитата', 5: 'Длинные', 6: 'Релакс', 7: '2 клипа', 8: 'Было→стало', 9: 'Keyframe', 10: 'Пляж' };
