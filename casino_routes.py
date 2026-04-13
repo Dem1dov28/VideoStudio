@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
 import shutil
 import subprocess
 import tempfile
@@ -34,17 +35,103 @@ from config import settings
 
 # ── Defaults (как CAS / youtubeUploadDefaults) ───────────────────────────────
 DEFAULT_YOUTUBE_TITLE = "🤑ССЫЛКА В ШАПКЕ ПРОФИЛЯ🤑"
-DEFAULT_YOUTUBE_DESCRIPTION = """🎰 Очередная нарезка казино – смотри до конца, будет жарко!
+# Для каждой заливки: случайный набор из 10 (если поля в запросе пустые — берётся весь пакет;
+# если что-то заполнено — добиваем только пустые поля из того же пакета).
+CASINO_YOUTUBE_METADATA_PACKS: list[dict[str, str]] = [
+    {
+        "description": """🎰 Очередная нарезка казино – смотри до конца, будет жарко!
 
-💎 Все ссылки на бонусы и лучшие казино – в шапке профиля (клик на аватарку).
+📢 Подпишись, чтобы не пропустить новые моменты: #нарезкиказино #игравпрофиле #джекпот #Shorts""",
+        "keywords": "нарезки казино, крупные выигрыши, слот 777, джекпот срыв, игра в профиле, эмоции игроков, лучшие моменты казино",
+        "tags": "Shorts, нарезки казино, крупные выигрыши, слот 777, джекпот, казино онлайн, casino highlights, big win, slot machine, jackpot",
+    },
+    {
+        "description": """🔥 Момент, ради которого заходят в ленту.
 
-📢 Подпишись, чтобы не пропустить новые моменты: #нарезкиказино #игравпрофиле #джекпот #Shorts"""
-DEFAULT_YOUTUBE_KEYWORDS = (
-    "нарезки казино, крупные выигрыши, слот 777, джекпот срыв, игра в профиле, эмоции игроков, лучшие моменты казино."
-)
-DEFAULT_YOUTUBE_TAGS = (
-    "Shorts, нарезки казино, крупные выигрыши, слот 777, джекпот, казино онлайн, casino highlights, big win, slot machine, jackpot"
-)
+🎰 Казино-нарезка без лишних слов — досмотри до конца.
+📢 Ещё больше драйва в профиле: #казино #слоты #большойвыигрыш #Shorts""",
+        "keywords": "казино нарезка, слоты онлайн, большой выигрыш, эмоции в казино, лучшие спины, игра в профиле",
+        "tags": "Shorts, casino, slots, big win, jackpot moment, онлайн казино, нарезка слотов, lucky spin",
+    },
+    {
+        "description": """💥 Тут либо занос, либо адреналин — и то, и другое.
+
+🎰 Короткая нарезка из казино — лови вайб.
+📢 Подписка, чтобы не терять такие кадры: #нарезкиказино #слоты #выигрыш #Shorts""",
+        "keywords": "адреналин казино, нарезка выигрышей, слоты 777, занос, реакция игрока, топ моменты",
+        "tags": "Shorts, casino highlights, slot win, русское казино, джекпот, нарезки, gambling moments",
+    },
+    {
+        "description": """🍀 Сегодня удача на твоей стороне — хотя бы в ленте.
+
+🎰 Подборка лучших кадров со слотов.
+📢 Залетай за новыми нарезками: #казиноонлайн #игравпрофиле #слот #Shorts""",
+        "keywords": "удача в казино, онлайн слоты, топ нарезка, крупный выигрыш, реакции, шортс казино",
+        "tags": "Shorts, online casino, slot machine, lucky win, казино шортс, выигрыш в слотах, bonus hunt",
+    },
+    {
+        "description": """⚡️ Быстро, громко, по делу — казино-контент как он есть.
+
+🎰 Смотри внимательно: там, где надо, всё «взрывается».
+📢 Хэштеги не забудь в профиле: #нарезкиказино #джекпот #слоты #Shorts""",
+        "keywords": "быстрая нарезка казино, джекпот момент, слоты нарезка, вирусные моменты, эмоции, шортс",
+        "tags": "Shorts, jackpot, slots highlights, casino clips, big win reaction, русские нарезки, slot 777",
+    },
+    {
+        "description": """🎰 Для тех, кто любит «пощёкотать нервы» коротким видео.
+
+💎 Здесь только сочные кадры и динамика.
+📢 Подпишись — будет ещё: #казино #крупныйвыигрыш #слоты #Shorts""",
+        "keywords": "сочная нарезка казино, крупный выигрыш шортс, динамичные слоты, лучшие реакции, игра онлайн",
+        "tags": "Shorts, casino big win, slot highlights, крупный занос, онлайн слоты, gambling shorts, win moment",
+    },
+    {
+        "description": """🤑 Если любишь слоты — ты по адресу.
+
+🎰 Ещё один кусок нарезки: держи ритм до финала.
+📢 Ссылка/контент в шапке профиля — не пропусти: #игравпрофиле #казино #слот #Shorts""",
+        "keywords": "любителям слотов, нарезка казино, игра в профиле, крупные заносы, эмоции, шортс 9:16",
+        "tags": "Shorts, slots, casino online, profile game, huge win, slot clips, казино нарезка, bonus",
+    },
+    {
+        "description": """🎲 Маленькое видео — много энергии.
+
+🎰 Казино-моменты, которые хочется пересмотреть.
+📢 За новыми нарезками — в профиль: #нарезкиказино #слоты #выигрыш #Shorts""",
+        "keywords": "энергичная нарезка, казино моменты, слоты выигрыш, пересмотреть шортс, топ кадры, джекпот",
+        "tags": "Shorts, casino moments, slot win, energy edit, русская нарезка, online slots, win streak",
+    },
+    {
+        "description": """✨ Коротко, ярко, по теме казино.
+
+🎰 Лента любит такие кадры — проверь сам.
+📢 Подписка спасает от скуки: #казино #нарезка #джекпот #Shorts""",
+        "keywords": "яркая нарезка казино, тема казино, джекпот кадр, лучшие спины, шортс алгоритм, эмоции игроков",
+        "tags": "Shorts, casino edit, bright highlights, jackpot clip, slot moments, казино клипы, viral casino",
+    },
+    {
+        "description": """🏆 Финишная прямая — и тут начинается самое интересное.
+
+🎰 Нарезка из казино: держи паузу на нужных кадрах.
+📢 Ещё контента в профиле: #слоты #казиноонлайн #крупныйвыигрыш #Shorts""",
+        "keywords": "финишная нарезка, казино онлайн, крупный выигрыш шортс, интересные кадры, слоты топ, профиль",
+        "tags": "Shorts, final moments, casino win, huge jackpot, slot highlights, казино онлайн, big payout",
+    },
+]
+
+
+def _fill_casino_upload_metadata(description: str, keywords: str, tags: str) -> tuple[str, str, str]:
+    desc_s = (description or "").strip()
+    kw_s = (keywords or "").strip()
+    tags_s = (tags or "").strip()
+    if desc_s and kw_s and tags_s:
+        return desc_s, kw_s, tags_s
+    pack = random.choice(CASINO_YOUTUBE_METADATA_PACKS)
+    return (
+        desc_s or pack["description"],
+        kw_s or pack["keywords"],
+        tags_s or pack["tags"],
+    )
 DEFAULT_YOUTUBE_PRIVACY = "public"
 DEFAULT_YOUTUBE_CATEGORY_ID = "22"
 YOUTUBE_TAG_MAX_COUNT = 15
@@ -284,6 +371,44 @@ def _resolve_social_media_path(channel_id: str, video_key: str) -> Path:
     raise HTTPException(status_code=404, detail="video not found")
 
 
+def _cleanup_uploaded_social_video(channel_id: str, video_key: str) -> None:
+    """
+    Remove uploaded video from social store and delete local media file.
+    Store cleanup is mandatory; file cleanup is best-effort with warning logs.
+    """
+    st = _social_store()
+    removed = st.pop_video(channel_id, video_key)
+    if not removed:
+        raise ValueError("failed to delete uploaded video from store")
+
+    rel_path = (removed.rel_path or "").strip()
+    if not rel_path:
+        return
+    try:
+        media_path = _ensure_under_data((_data_dir() / rel_path).resolve())
+    except Exception as e:
+        logger.warning(
+            "[Casino] uploaded social video file path invalid during cleanup: channel=%s video=%s rel_path=%r err=%s",
+            channel_id,
+            video_key,
+            rel_path,
+            e,
+        )
+        return
+    if not media_path.is_file():
+        return
+    try:
+        media_path.unlink(missing_ok=True)
+    except Exception as e:
+        logger.warning(
+            "[Casino] failed to delete uploaded social media file: channel=%s video=%s path=%s err=%s",
+            channel_id,
+            video_key,
+            media_path,
+            e,
+        )
+
+
 def _upload_social_video_sync(
     channel_id: str,
     video_key: str,
@@ -353,9 +478,7 @@ def _upload_social_video_sync(
         raise ValueError(f"Нет валидного токена для профиля «{channel_profile}»")
 
     title_f = (title or "").strip() or DEFAULT_YOUTUBE_TITLE
-    description_f = (description or "").strip() or DEFAULT_YOUTUBE_DESCRIPTION
-    keywords_f = (keywords or "").strip() or DEFAULT_YOUTUBE_KEYWORDS
-    tags_f = (tags or "").strip() or DEFAULT_YOUTUBE_TAGS
+    description_f, keywords_f, tags_f = _fill_casino_upload_metadata(description, keywords, tags)
     privacy_f = (privacy or "").strip() or DEFAULT_YOUTUBE_PRIVACY
     category_f = (category_id or "").strip() or DEFAULT_YOUTUBE_CATEGORY_ID
     if privacy_f not in ("private", "unlisted", "public"):
@@ -377,8 +500,7 @@ def _upload_social_video_sync(
             raise ValueError("upload returned no video id")
         raw_snip = (resp or {}).get("snippet") or {}
         ch_id = str(raw_snip.get("channelId") or "") if isinstance(raw_snip, dict) else ""
-        if not st.update_video_youtube(channel_id, video_key, yt_id):
-            raise ValueError("failed to persist youtube id")
+        _cleanup_uploaded_social_video(channel_id, video_key)
         return yt_id, ch_id, title_f
     finally:
         if tmp_overlay is not None and tmp_overlay.is_file():
