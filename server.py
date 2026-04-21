@@ -1,13 +1,16 @@
 """
 FastAPI web server for AI Content Factory.
 
-Run:  uvicorn server:app --reload --port 8000
+Run:  uvicorn server:app --reload --port 8000 --reload-exclude .venv --reload-exclude MyVideo
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
+import os
+import tempfile
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -79,12 +82,6 @@ def _session_topic_from_request(req: "StartRequest") -> str:
         if st:
             return f"Памятник: {st}"[:100]
         return "Памятники (деконструкция)"
-    if m == 12:
-        rt = (getattr(req, "mode12_room_type", None) or "").strip()
-        rl = (getattr(req, "mode12_room_lighting", None) or "").strip()
-        if rt or rl:
-            return f"Комната: {rt or '?'} / {rl or '?'}"[:100]
-        return "Уборка и реставрация комнаты"
     if m == 8:
         hs = (getattr(req, "mode8_house_style", None) or "").strip()
         loc = (getattr(req, "mode8_location", None) or "").strip()
@@ -110,6 +107,16 @@ def _session_topic_from_request(req: "StartRequest") -> str:
         if ol == "en":
             return f"{base} · EN"
         return f"{base} · RU+EN"
+    if m == 13:
+        return "Аудио → слайды (режим 13)"
+    if m == 5:
+        header = (getattr(req, "mode5_video_header_title", None) or "").strip()
+        txt = (getattr(req, "mode5_script_text", None) or "").strip()
+        if header:
+            return header[:100]
+        if txt:
+            return f"Long-form: {txt[:90]}"
+        return "Ручной long-form (режим 5)"
     return (
         req.topic
         or getattr(req, "mode3_topic", None)
@@ -157,6 +164,21 @@ async def _run_pipeline_task(
             mode4_person_name=getattr(req, "mode4_person_name", None),
             mode4_photo_path=getattr(req, "mode4_photo_path", None),
             mode4_only_lang=getattr(req, "mode4_only_lang", None),
+            mode4_show_author_on_video=getattr(req, "mode4_show_author_on_video", True),
+            mode4_video_header_title=getattr(req, "mode4_video_header_title", None),
+            mode4_subtitle_style=getattr(req, "mode4_subtitle_style", "karaoke") or "karaoke",
+            mode4_multiclip=getattr(req, "mode4_multiclip", False),
+            mode4_segments=getattr(req, "mode4_segments", None),
+            mode4_skip_final_assembly=getattr(req, "mode4_skip_final_assembly", True),
+            mode5_script_text=getattr(req, "mode5_script_text", None),
+            mode5_language=getattr(req, "mode5_language", None),
+            mode5_chunk_seconds=int(getattr(req, "mode5_chunk_seconds", 300) or 300),
+            mode5_segment_seconds=int(getattr(req, "mode5_segment_seconds", 15) or 15),
+            mode5_skip_final_assembly=bool(getattr(req, "mode5_skip_final_assembly", True)),
+            mode5_max_parallel_images=int(getattr(req, "mode5_max_parallel_images", 10) or 10),
+            mode5_video_header_title=getattr(req, "mode5_video_header_title", None),
+            mode5_bible_mode=bool(getattr(req, "mode5_bible_mode", False)),
+            mode5_sub_mode=getattr(req, "mode5_sub_mode", "manual") or "manual",
             mode6_num_characters=getattr(req, "mode6_num_characters", 3),
             mode7_keyboards=getattr(req, "mode7_keyboards", None),
             mode7_animal_type=getattr(req, "mode7_animal_type", None),
@@ -172,8 +194,29 @@ async def _run_pipeline_task(
             mode10_num_stages=getattr(req, "mode10_num_stages", 5),
             mode11_structure_type=getattr(req, "mode11_structure_type", None),
             mode11_num_stages=getattr(req, "mode11_num_stages", 5),
-            mode12_room_type=getattr(req, "mode12_room_type", None),
-            mode12_room_lighting=getattr(req, "mode12_room_lighting", None),
+            mode13_audio_path=getattr(req, "mode13_audio_path", None),
+            mode13_voice_preset=getattr(req, "mode13_voice_preset", "studio") or "studio",
+            mode13_language=getattr(req, "mode13_language", None),
+            mode13_show_subtitles=getattr(req, "mode13_show_subtitles", True),
+            mode13_skip_final_assembly=getattr(req, "mode13_skip_final_assembly", True),
+            mode13_chunk_seconds=int(getattr(req, "mode13_chunk_seconds", 300) or 300),
+            mode13_segment_seconds=int(getattr(req, "mode13_segment_seconds", 30) or 30),
+            mode13_video_header_title=getattr(req, "mode13_video_header_title", None),
+            mode13_voice_gain_db=float(getattr(req, "mode13_voice_gain_db", 0.0) or 0.0),
+            mode13_voice_tempo_scale=float(getattr(req, "mode13_voice_tempo_scale", 1.0) or 1.0),
+            mode13_voice_pitch_semitones=float(getattr(req, "mode13_voice_pitch_semitones", 0.0) or 0.0),
+            mode13_voice_ai_cleanup=float(getattr(req, "mode13_voice_ai_cleanup", 0.0) or 0.0),
+            mode13_voice_noise_suppression=float(
+                getattr(req, "mode13_voice_noise_suppression", 50.0) or 50.0
+            ),
+            mode13_voice_level_normalize=float(
+                getattr(req, "mode13_voice_level_normalize", 50.0) or 50.0
+            ),
+            mode13_voice_highpass_hz=getattr(req, "mode13_voice_highpass_hz", None),
+            mode13_voice_deesser=float(getattr(req, "mode13_voice_deesser", 0.0) or 0.0),
+            mode13_voice_clarity=float(getattr(req, "mode13_voice_clarity", 0.0) or 0.0),
+            mode13_voice_mud_cut=float(getattr(req, "mode13_voice_mud_cut", 0.0) or 0.0),
+            mode13_voice_compression=float(getattr(req, "mode13_voice_compression", 0.0) or 0.0),
             control=control,
         )
 
@@ -190,16 +233,33 @@ async def _run_pipeline_task(
             "trend": result.get("trend"),
             "session_id": session_id,
             "publishing": result.get("publishing"),
+            "mode4_multiclip_ready": result.get("mode4_multiclip_ready"),
+            "mode4_clip_filenames": result.get("mode4_clip_filenames"),
+            "mode4_show_subtitles": result.get("mode4_show_subtitles"),
+            "mode4_segments": result.get("mode4_segments"),
+            "mode5_review_ready": result.get("mode5_review_ready"),
+            "mode5_clip_filenames": result.get("mode5_clip_filenames"),
+            "mode5_chunks_meta": result.get("mode5_chunks_meta"),
+            "mode5_sub_mode": result.get("mode5_sub_mode"),
+            "mode5_can_resume": result.get("mode5_can_resume"),
+            "mode5_checkpoint_stage": result.get("mode5_checkpoint_stage"),
+            "mode5_resume_reason": result.get("mode5_resume_reason"),
+            "mode13_review_ready": result.get("mode13_review_ready"),
+            "mode13_clip_filenames": result.get("mode13_clip_filenames"),
+            "mode13_show_subtitles": result.get("mode13_show_subtitles"),
+            "mode13_chunks_meta": result.get("mode13_chunks_meta"),
         }
         await queue.put({"type": "done", **session["result"]})
         try:
-            from agents.topics_history import attach_start_request_to_session
+            from agents.topics_history import upsert_start_request_for_session
 
             req_snap = session.get("request")
             if req_snap:
-                attach_start_request_to_session(session_id, req_snap)
+                upsert_start_request_for_session(
+                    session_id, session.get("topic") or "", req_snap
+                )
         except Exception as ex:
-            logger.warning(f"[TopicsHistory] attach_start_request failed: {ex}")
+            logger.warning(f"[TopicsHistory] upsert_start_request failed: {ex}")
 
     except asyncio.CancelledError:
         logger.info(f"Pipeline task cancelled for session {session_id}")
@@ -221,6 +281,101 @@ async def _run_pipeline_task(
         except Exception:
             # Queue might be closed during shutdown
             pass
+        try:
+            from agents.topics_history import upsert_start_request_for_session
+
+            req_snap = session.get("request")
+            if req_snap:
+                upsert_start_request_for_session(
+                    session_id, session.get("topic") or "", req_snap
+                )
+        except Exception as ex:
+            logger.warning(f"[TopicsHistory] upsert_start_request on error failed: {ex}")
+    finally:
+        if sink_id is not None:
+            logger.remove(sink_id)
+
+
+def _drain_async_queue(q: asyncio.Queue) -> None:
+    while True:
+        try:
+            q.get_nowait()
+        except asyncio.QueueEmpty:
+            return
+
+
+async def _run_mode5_resume_task(session_id: str, queue: asyncio.Queue, control: dict) -> None:
+    """Фоновое продолжение facts50 после ошибки; пишет в ту же очередь, что и основной пайплайн (SSE)."""
+    session = _sessions[session_id]
+    sink_id: int | None = None
+    try:
+        loop = asyncio.get_event_loop()
+        sink = _SessionSink(queue, loop)
+        sink_id = logger.add(sink, format="{message}", level="DEBUG", enqueue=False)
+        settings.ensure_dirs()
+
+        from agents.topics_history import get_start_request_for_session
+        from modes.mode5.pipeline import resume_mode5_pipeline
+
+        req_hist = get_start_request_for_session(session_id)
+        skip_fa = True
+        if isinstance(req_hist, dict):
+            skip_fa = bool(req_hist.get("mode5_skip_final_assembly", True))
+
+        result = await resume_mode5_pipeline(
+            session_id,
+            skip_final_assembly=skip_fa,
+            control=control,
+        )
+        if control.get("cancelled"):
+            return
+        session["status"] = "done"
+        session["result"] = {
+            "video_path": result.get("video_path"),
+            "video_paths": result.get("video_paths"),
+            "topic": result.get("topic"),
+            "quote_caption": result.get("quote_caption"),
+            "quote_caption_ru": result.get("quote_caption_ru"),
+            "quote_caption_en": result.get("quote_caption_en"),
+            "trend": result.get("trend"),
+            "session_id": session_id,
+            "publishing": result.get("publishing"),
+            "mode5_review_ready": result.get("mode5_review_ready"),
+            "mode5_clip_filenames": result.get("mode5_clip_filenames"),
+            "mode5_chunks_meta": result.get("mode5_chunks_meta"),
+            "mode5_sub_mode": result.get("mode5_sub_mode"),
+            "mode5_can_resume": result.get("mode5_can_resume"),
+            "mode5_checkpoint_stage": result.get("mode5_checkpoint_stage"),
+            "mode5_resume_reason": result.get("mode5_resume_reason"),
+        }
+        await queue.put({"type": "done", **session["result"]})
+        try:
+            from agents.topics_history import upsert_start_request_for_session
+
+            req_snap = session.get("request")
+            if req_snap:
+                upsert_start_request_for_session(session_id, session.get("topic") or "", req_snap)
+        except Exception as ex:
+            logger.warning(f"[TopicsHistory] upsert_start_request (mode5 resume) failed: {ex}")
+    except asyncio.CancelledError:
+        logger.info(f"Mode5 resume task cancelled for session {session_id}")
+        session["status"] = "cancelled"
+        control["cancelled"] = True
+        try:
+            await queue.put({"type": "error", "error": "Генерация отменена"})
+        except Exception:
+            pass
+    except Exception as exc:
+        import traceback
+
+        tb = traceback.format_exc()
+        logger.error(f"Mode5 resume error: {exc}\n{tb}")
+        session["status"] = "error"
+        session["error"] = str(exc)
+        try:
+            await queue.put({"type": "error", "error": str(exc)})
+        except Exception:
+            pass
     finally:
         if sink_id is not None:
             logger.remove(sink_id)
@@ -233,6 +388,11 @@ async def lifespan(app: FastAPI):
     """Graceful startup and shutdown handler."""
     # Startup
     logger.info("[Server] Starting up...")
+    # До первого пайплайна pydub может импортироваться из других модулей — убрать предупреждение про ffmpeg в PATH
+    from utils.ffmpeg_resolve import configure_pydub_ffmpeg
+
+    if configure_pydub_ffmpeg():
+        logger.debug("[Server] pydub: ffmpeg/ffprobe пути заданы (PATH / FFMPEG_PATH / imageio-ffmpeg)")
     # Background worker: server-side queue processing
     from utils.queue_manager import get_queue_manager
     from utils.rate_limiter import get_rate_limiter
@@ -342,6 +502,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Content Factory API", version="1.0", lifespan=lifespan)
 
+# Периодический опрос с фронта — не засоряют INFO (оставьте LOGURU_LEVEL=DEBUG при отладке).
+_API_LOG_DEBUG_PATHS = frozenset({
+    "/api/rate-limit/status",
+    "/api/queue/status",
+    "/api/pipeline/sessions",
+})
+
 
 @app.middleware("http")
 async def _log_requests(request, call_next):
@@ -357,6 +524,8 @@ async def _log_requests(request, call_next):
         if path.startswith("/api/"):
             if status >= 400:
                 logger.warning(f"[API] {method} {path} → {status} ({elapsed:.0f}ms)")
+            elif path in _API_LOG_DEBUG_PATHS:
+                logger.debug(f"[API] {method} {path} → {status} ({elapsed:.0f}ms)")
             else:
                 logger.info(f"[API] {method} {path} → {status} ({elapsed:.0f}ms)")
         return response
@@ -500,6 +669,24 @@ class StartRequest(BaseModel):
     mode4_photo_path: str | None = None
     # Mode 4: null = RU+EN; "ru" | "en" = один ролик
     mode4_only_lang: str | None = None
+    mode4_show_author_on_video: bool = True
+    mode4_video_header_title: str | None = None
+    # "karaoke" | "plain_whisper" (несколько фрагментов: белый текст по Whisper, синхрон с речью)
+    mode4_subtitle_style: str = "karaoke"
+    mode4_multiclip: bool = False
+    mode4_segments: list[str] | None = None
+    mode4_skip_final_assembly: bool = True
+    # Mode 5: ручной long-form текст -> ElevenLabs -> review before final assembly
+    mode5_script_text: str | None = None
+    mode5_language: str | None = None
+    mode5_chunk_seconds: int = 300
+    mode5_segment_seconds: int = 15
+    mode5_skip_final_assembly: bool = True
+    mode5_max_parallel_images: int = 10
+    mode5_video_header_title: str | None = None
+    mode5_bible_mode: bool = False
+    # manual | bible | facts50 | outline | book_night (legacy: mode5_bible_mode)
+    mode5_sub_mode: str = "manual"
     # Mode 6: viral cartoon drama
     mode6_num_characters: int = 3
     # Mode 7: ASMR animal keyboard videos
@@ -522,9 +709,27 @@ class StartRequest(BaseModel):
     mode11_structure_type: str | None = None
     # None = взять num_scenes (очередь / старые клиенты); иначе явно 5 или 7 после нормализации
     mode11_num_stages: int | None = None
-    # Mode 12: уборка и реставрация комнаты (5 стадий фиксированно в пайплайне)
-    mode12_room_type: str | None = None
-    mode12_room_lighting: str | None = None
+    # Mode 13: загрузка аудио → смена тембра → картинки по 30 с → превью по 5 мин
+    mode13_audio_path: str | None = None
+    mode13_voice_preset: str = "studio"
+    mode13_language: str | None = None
+    mode13_show_subtitles: bool = True
+    mode13_skip_final_assembly: bool = True
+    mode13_chunk_seconds: int = 300
+    mode13_segment_seconds: int = 30
+    mode13_video_header_title: str | None = None
+    # Ручная настройка звука (mode 13): то же, что ползунки на форме
+    mode13_voice_gain_db: float = 0.0
+    mode13_voice_tempo_scale: float = 1.0
+    mode13_voice_pitch_semitones: float = 0.0
+    mode13_voice_ai_cleanup: float = 0.0
+    mode13_voice_noise_suppression: float = 50.0
+    mode13_voice_level_normalize: float = 50.0
+    mode13_voice_highpass_hz: int | None = None
+    mode13_voice_deesser: float = 0.0
+    mode13_voice_clarity: float = 0.0
+    mode13_voice_mud_cut: float = 0.0
+    mode13_voice_compression: float = 0.0
 
     @field_validator("mode4_only_lang", mode="before")
     @classmethod
@@ -535,9 +740,104 @@ class StartRequest(BaseModel):
             return v.lower()
         raise ValueError("mode4_only_lang must be 'ru', 'en', or null")
 
+    @field_validator("mode4_subtitle_style", mode="before")
+    @classmethod
+    def _normalize_mode4_subtitle_style(cls, v):  # noqa: ANN001
+        if v is None or v == "":
+            return "karaoke"
+        s = str(v).strip().lower()
+        if s in ("karaoke", "plain_whisper", "plain"):
+            return "plain_whisper" if s in ("plain_whisper", "plain") else "karaoke"
+        raise ValueError("mode4_subtitle_style must be 'karaoke' or 'plain_whisper'")
+
+    @field_validator("mode5_sub_mode", mode="before")
+    @classmethod
+    def _normalize_mode5_sub_mode(cls, v):  # noqa: ANN001
+        if v is None or (isinstance(v, str) and not str(v).strip()):
+            return "manual"
+        s = str(v).strip().lower()
+        if s in ("manual", "bible", "facts50", "outline", "book_night"):
+            return s
+        return "manual"
+
+
+class RegenerateClipIndexBody(BaseModel):
+    index: int
+
+
+class AssembleClipsBody(BaseModel):
+    show_subtitles: bool | None = None
+
+
+class Mode13RegenerateSegmentBody(BaseModel):
+    chunk_index: int
+    segment_index: int
+
+
+class Mode5RegenerateImageBody(BaseModel):
+    chunk_index: int
+    segment_index: int
+
+
+class Mode5RegenerateChunkBody(BaseModel):
+    chunk_index: int
+    text: str
+
+
+class Mode13VoicePreviewBody(BaseModel):
+    """Предпрослушивание обработки голоса (первые ~45 с). path — файл из /api/upload/audio."""
+
+    path: str
+    preset: str = "studio"
+    gain_db: float = 0.0
+    tempo_scale: float = 1.0
+    pitch_semitones: float = 0.0
+    ai_cleanup: float = 0.0
+    noise_suppression: float = 50.0
+    level_normalize: float = 50.0
+    highpass_hz: int | None = None
+    deesser: float = 0.0
+    clarity: float = 0.0
+    mud_cut: float = 0.0
+    compression: float = 0.0
+    max_seconds: float = 45.0
+
+
+def _safe_uploads_audio_path(path_str: str) -> Path | None:
+    """Только файлы внутри settings.uploads_dir (защита от path traversal)."""
+    if not path_str or not isinstance(path_str, str):
+        return None
+    try:
+        p = Path(path_str).expanduser().resolve()
+        root = Path(settings.uploads_dir).resolve()
+        p.relative_to(root)
+    except ValueError:
+        return None
+    if not p.is_file():
+        return None
+    return p
+
+
+def _effective_mode5_sub_mode(req: StartRequest) -> str:
+    raw = (getattr(req, "mode5_sub_mode", None) or "manual")
+    if not isinstance(raw, str):
+        return "manual"
+    s = raw.strip().lower()
+    if s not in ("manual", "bible", "facts50", "outline", "book_night"):
+        s = "manual"
+    if s == "manual" and getattr(req, "mode5_bible_mode", False):
+        return "bible"
+    return s
+
 
 def _validate_start_request(req: StartRequest) -> None:
     """Проверки перед запуском пайплайна (общие для /pipeline/start и перегенерации)."""
+    if req.mode == 12:
+        raise HTTPException(
+            400,
+            "Режим 12 отключён. Несколько фрагментов — в режиме 4 «Цитата + фото»: "
+            "несколько абзацев в поле цитаты через пустую строку, один язык (RU или EN).",
+        )
     if req.mode == 3:
         has_images = bool(req.mode3_start_image_path and req.mode3_end_image_path)
         has_topic = bool(req.mode3_topic and str(req.mode3_topic).strip())
@@ -547,19 +847,59 @@ def _validate_start_request(req: StartRequest) -> None:
                 "Mode 3: загрузите 2 фото (дом ДО и ПОСЛЕ) или опишите дом текстом для автогенерации",
             )
     elif req.mode == 4:
-        if not getattr(req, "mode4_quote", "") or not getattr(req, "mode4_person_name", "") or not getattr(
-            req, "mode4_photo_path", ""
-        ):
+        if not getattr(req, "mode4_quote", "") or not getattr(req, "mode4_photo_path", ""):
             raise HTTPException(
                 400,
-                "Mode 4: введите имя личности, цитату и загрузите фото",
+                "Mode 4: введите цитату и загрузите фото",
             )
+        if getattr(req, "mode4_multiclip", False):
+            ol4 = (getattr(req, "mode4_only_lang", None) or "").strip().lower()
+            if ol4 not in ("ru", "en"):
+                raise HTTPException(
+                    400,
+                    "Несколько фрагментов: выберите «Только русская» или «Только английская» (не «оба сразу»).",
+                )
+            raw_mc = [str(s).strip() for s in (getattr(req, "mode4_segments", None) or []) if str(s).strip()]
+            if len(raw_mc) == 1:
+                raise HTTPException(
+                    400,
+                    "Задайте минимум 2 блока текста (пустая строка между блоками) или оставьте ручные фрагменты пустыми для авторазбиения.",
+                )
+    elif req.mode == 13:
+        ap = (getattr(req, "mode13_audio_path", None) or "").strip()
+        if not ap:
+            raise HTTPException(400, "Mode 13: загрузите аудиофайл")
+        if not Path(ap).is_file():
+            raise HTTPException(400, "Mode 13: файл аудио не найден на сервере")
     elif req.mode == 5:
-        if not req.topic or not req.topic.strip():
-            raise HTTPException(400, "Mode 5: введите тему для длинного видео")
-    elif req.mode in (6, 7, 8, 9, 10, 11, 12):
+        sub5 = _effective_mode5_sub_mode(req)
+        txt = (getattr(req, "mode5_script_text", None) or "").strip()
+        if sub5 == "outline":
+            from modes.mode5.outline_generator import MIN_OUTLINE_BRIEF_CHARS
+
+            if len(txt) < MIN_OUTLINE_BRIEF_CHARS:
+                raise HTTPException(
+                    400,
+                    f"Mode 5: для «плана из описания» введите краткое описание сюжета (от {MIN_OUTLINE_BRIEF_CHARS} символов).",
+                )
+        elif sub5 == "book_night" and len(txt) < 8:
+            raise HTTPException(
+                400,
+                "Mode 5: для «книга на ночь» введите название книги (от 8 символов).",
+            )
+        elif sub5 == "facts50" and len(txt) < 8:
+            raise HTTPException(
+                400,
+                "Mode 5: для «77 фактов» введите тему или заголовок (от 8 символов).",
+            )
+        elif sub5 not in ("facts50", "outline", "book_night") and len(txt) < 80:
+            raise HTTPException(400, "Mode 5: вставьте полноценный текст для озвучки")
+        lang5 = (getattr(req, "mode5_language", None) or getattr(req, "language", "auto") or "auto").strip().lower()
+        if lang5 not in ("ru", "en", "auto", ""):
+            raise HTTPException(400, "Mode 5: язык должен быть auto, ru или en")
+    elif req.mode in (6, 7, 8, 9, 10, 11):
         pass
-    elif not req.topic and not req.auto_topic:
+    elif req.mode != 13 and not req.topic and not req.auto_topic:
         raise HTTPException(400, "Provide 'topic' or set 'auto_topic: true'")
 
 
@@ -576,9 +916,43 @@ def _normalize_mode_specific_request(req: StartRequest) -> None:
         req.mode11_num_stages = 7 if n >= 7 else 5
         req.num_scenes = req.mode11_num_stages
         req.show_subtitles = False
-    if req.mode == 12:
-        req.num_scenes = 5
+    if req.mode == 5:
+        from modes.mode5.pipeline import detect_mode5_language
+
         req.show_subtitles = False
+        req.use_scenario = False
+        req.auto_topic = False
+        req.num_scenes = 1
+        sub5 = _effective_mode5_sub_mode(req)
+        req.mode5_sub_mode = sub5
+        req.mode5_bible_mode = sub5 == "bible"
+        script_text = (req.mode5_script_text or "").strip()
+        hdr = (req.mode5_video_header_title or "").strip()
+        preferred_lang = (req.mode5_language or req.language or "auto").strip().lower() or "auto"
+        lang_blob = f"{script_text} {hdr}".strip() if sub5 in ("facts50", "outline", "book_night") else script_text
+        req.language = detect_mode5_language(lang_blob, preferred_lang)
+        req.mode5_language = req.language
+        req.topic = (
+            hdr
+            or script_text
+            or (
+                "50 фактов"
+                if sub5 == "facts50"
+                else "Лонгрид по описанию"
+                if sub5 == "outline"
+                else "Книга на ночь"
+                if sub5 == "book_night"
+                else "Ручной long-form"
+            )
+        ).strip() or (
+            "50 фактов"
+            if sub5 == "facts50"
+            else "Лонгрид по описанию"
+            if sub5 == "outline"
+            else "Книга на ночь"
+            if sub5 == "book_night"
+            else "Ручной long-form"
+        )
 
 
 def _ensure_regenerate_assets_exist(req: StartRequest) -> None:
@@ -588,11 +962,17 @@ def _ensure_regenerate_assets_exist(req: StartRequest) -> None:
             400,
             "Файл фото для цитаты не найден. Создайте видео заново с главной страницы.",
         )
+    if req.mode == 5:
+        pass
     if req.mode == 3:
         if req.mode3_start_image_path and not Path(req.mode3_start_image_path).is_file():
             raise HTTPException(400, "Фото «дом ДО» не найдено — перегенерация невозможна.")
         if req.mode3_end_image_path and not Path(req.mode3_end_image_path).is_file():
             raise HTTPException(400, "Фото «дом ПОСЛЕ» не найдено — перегенерация невозможна.")
+    if req.mode == 13:
+        ap = (getattr(req, "mode13_audio_path", None) or "").strip()
+        if ap and not Path(ap).is_file():
+            raise HTTPException(400, "Аудиофайл режима 13 не найден. Загрузите снова или создайте видео заново.")
     if req.reference_image_path and not Path(req.reference_image_path).is_file():
         raise HTTPException(400, "Референсное изображение не найдено на сервере.")
     if req.custom_title_bg_path and not Path(req.custom_title_bg_path).is_file():
@@ -623,6 +1003,122 @@ async def upload_image(file: UploadFile = File(...)):
         return {"path": str(path.resolve())}
     except Exception as e:
         raise HTTPException(500, str(e))
+
+
+@app.post("/api/upload/audio")
+async def upload_audio(file: UploadFile = File(...)):
+    """Загрузка аудио для mode 13: сразу конвертация в моно 48 kHz WAV (как в пайплайне)."""
+    from modes.mode13.voice_transform import convert_upload_to_mono_wav48
+
+    allowed_suffix = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".webm", ".flac", ".opus"}
+    settings.ensure_dirs()
+    suffix = Path(file.filename or "audio").suffix.lower()
+    if suffix not in allowed_suffix:
+        suffix = ".mp3"
+    ts = int(time.time() * 1000)
+    uid = id(file) % 10000
+    raw_path = settings.uploads_dir / f"{ts}_{uid}_raw{suffix}"
+    mono_path = settings.uploads_dir / f"{ts}_{uid}_mono48.wav"
+    try:
+        content = await file.read()
+        if len(content) > 200 * 1024 * 1024:
+            raise HTTPException(400, "File too large (max 200 MB)")
+        raw_path.write_bytes(content)
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(
+                None,
+                functools.partial(convert_upload_to_mono_wav48, raw_path, mono_path),
+            )
+        except Exception as ex:
+            raw_path.unlink(missing_ok=True)
+            mono_path.unlink(missing_ok=True)
+            raise HTTPException(
+                500,
+                f"Не удалось конвертировать аудио в моно WAV (нужен ffmpeg). {ex}",
+            ) from ex
+        raw_path.unlink(missing_ok=True)
+        return {"path": str(mono_path.resolve()), "mono": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raw_path.unlink(missing_ok=True)
+        mono_path.unlink(missing_ok=True)
+        raise HTTPException(500, str(e)) from e
+
+
+@app.get("/api/upload/audio-serve")
+async def serve_upload_audio(path: str = Query(..., description="Абсолютный путь из ответа upload/audio")):
+    """Раздача загруженного WAV для <audio src> в UI."""
+    p = _safe_uploads_audio_path(path)
+    if not p:
+        raise HTTPException(404, "Файл не найден или недоступен")
+    return FileResponse(str(p), media_type="audio/wav", filename=p.name)
+
+
+@app.post("/api/mode13/voice-preview")
+async def mode13_voice_preview(body: Mode13VoicePreviewBody):
+    """Короткий WAV с теми же фильтрами, что при генерации — для предпрослушивания."""
+    from modes.mode13.voice_transform import render_voice_preview_wav
+
+    inp = _safe_uploads_audio_path(body.path.strip())
+    if not inp:
+        raise HTTPException(400, "Некорректный или отсутствующий путь к аудио")
+
+    gain_db = max(-24.0, min(24.0, float(body.gain_db)))
+    tempo_scale = max(0.75, min(1.25, float(body.tempo_scale)))
+    pitch_semitones = max(-8.0, min(8.0, float(body.pitch_semitones)))
+    max_sec = max(10.0, min(90.0, float(body.max_seconds)))
+    ai_cleanup = max(0.0, min(100.0, float(body.ai_cleanup)))
+    noise_sup = max(0.0, min(100.0, float(body.noise_suppression)))
+    level_n = max(0.0, min(100.0, float(body.level_normalize)))
+    deesser = max(0.0, min(100.0, float(body.deesser)))
+    clarity = max(0.0, min(100.0, float(body.clarity)))
+    mud_cut = max(0.0, min(100.0, float(body.mud_cut)))
+    compression = max(0.0, min(100.0, float(body.compression)))
+    hp = body.highpass_hz
+    hp_use = int(hp) if hp is not None and 40 <= int(hp) <= 200 else None
+
+    vp = (body.preset or "studio").strip().lower()
+    if vp not in ("original", "studio", "calm", "natural", "soft", "medium", "strong"):
+        vp = "studio"
+
+    loop = asyncio.get_event_loop()
+    fd, tmp_name = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    out_p = Path(tmp_name)
+    try:
+
+        def _run() -> None:
+            render_voice_preview_wav(
+                inp,
+                out_p,
+                vp,
+                gain_db=gain_db,
+                tempo_scale=tempo_scale,
+                pitch_semitones=pitch_semitones,
+                ai_cleanup=ai_cleanup,
+                noise_suppression=noise_sup,
+                level_normalize=level_n,
+                highpass_hz=hp_use,
+                deesser=deesser,
+                clarity=clarity,
+                mud_cut=mud_cut,
+                compression=compression,
+                max_seconds=max_sec,
+            )
+
+        await loop.run_in_executor(None, _run)
+        data = out_p.read_bytes()
+        if len(data) < 64:
+            raise HTTPException(500, "Пустой превью-файл")
+        return Response(content=data, media_type="audio/wav")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Превью аудио: {e}") from e
+    finally:
+        out_p.unlink(missing_ok=True)
 
 
 @app.post("/api/pipeline/start")
@@ -763,32 +1259,326 @@ async def stream_logs(session_id: str):
 async def get_status(session_id: str):
     session = _sessions.get(session_id)
     if not session:
-        raise HTTPException(404, "Session not found")
+        # Fallback for persisted Mode 5 sessions (History -> Progress after server restart).
+        try:
+            from modes.mode5.pipeline import mode5_status_from_plan
+
+            result = mode5_status_from_plan(session_id)
+            return {
+                "session_id": session_id,
+                "status": "done",
+                "result": result,
+                "error": None,
+                "topic": result.get("topic", ""),
+                "mode": 5,
+            }
+        except Exception:
+            raise HTTPException(404, "Session not found")
+    result = session.get("result")
+    if int(session.get("mode") or 0) == 5 and session.get("status") in ("error", "cancelled"):
+        try:
+            from modes.mode5.pipeline import load_mode5_plan, mode5_resume_snapshot_for_plan
+
+            plan = load_mode5_plan(session_id)
+            snap = mode5_resume_snapshot_for_plan(session_id, plan)
+            merged: dict = dict(result) if isinstance(result, dict) else {}
+            merged.setdefault("session_id", session_id)
+            merged["mode5_can_resume"] = bool(snap.get("can_resume"))
+            merged["mode5_checkpoint_stage"] = snap.get("stage")
+            merged["mode5_resume_reason"] = snap.get("reason") or None
+            if merged.get("mode5_sub_mode") is None:
+                merged["mode5_sub_mode"] = plan.get("sub_mode")
+            result = merged
+        except Exception:
+            pass
     return {
         "session_id": session_id,
         "status": session.get("status", "unknown"),
-        "result": session.get("result"),
+        "result": result,
         "error": session.get("error"),
         "topic": session.get("topic", ""),
         "mode": session.get("mode", 1),
     }
 
 
+@app.get("/api/pipeline/{session_id}/start-request")
+async def get_pipeline_start_request(session_id: str):
+    """Снимок тела StartRequest для подстановки в форму «Создать видео» (активная сессия или история)."""
+    session = _sessions.get(session_id)
+    if session:
+        snap = session.get("request")
+        if isinstance(snap, dict) and snap:
+            return {"request": snap}
+    from agents.topics_history import get_start_request_for_session
+
+    snap = get_start_request_for_session(session_id)
+    if isinstance(snap, dict) and snap:
+        return {"request": snap}
+    raise HTTPException(404, "Параметры запуска для этой сессии не найдены")
+
+
+@app.post("/api/mode4/{session_id}/regenerate-clip")
+async def mode4_regenerate_clip_ep(session_id: str, body: RegenerateClipIndexBody):
+    from modes.mode4.multiclip import regenerate_mode4_multiclip_clip
+
+    try:
+        return await regenerate_mode4_multiclip_clip(session_id, body.index)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(500, str(e)) from e
+
+
+@app.post("/api/mode4/{session_id}/assemble")
+async def mode4_assemble_ep(session_id: str, body: AssembleClipsBody):
+    from modes.mode4.multiclip import assemble_mode4_multiclip_final_sync
+
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(
+            None,
+            functools.partial(assemble_mode4_multiclip_final_sync, session_id, body.show_subtitles),
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+    sess = _sessions.get(session_id)
+    if sess and isinstance(sess.get("result"), dict):
+        r = sess["result"]
+        r["video_path"] = result.get("video_path")
+        r["video_paths"] = result.get("video_paths")
+        r["topic"] = result.get("topic")
+        r["quote_caption"] = result.get("quote_caption")
+        r["quote_caption_ru"] = result.get("quote_caption_ru")
+        r["quote_caption_en"] = result.get("quote_caption_en")
+        r["mode4_multiclip_ready"] = False
+        r.pop("mode4_clip_filenames", None)
+        r.pop("mode4_show_subtitles", None)
+        r.pop("mode4_segments", None)
+    return result
+
+
+@app.post("/api/mode13/{session_id}/regenerate-segment")
+async def mode13_regenerate_segment_ep(session_id: str, body: Mode13RegenerateSegmentBody):
+    from modes.mode13.pipeline import regenerate_mode13_segment
+
+    try:
+        return await regenerate_mode13_segment(session_id, body.chunk_index, body.segment_index)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.post("/api/mode5/{session_id}/regenerate-image")
+async def mode5_regenerate_image_ep(session_id: str, body: Mode5RegenerateImageBody):
+    from modes.mode5.pipeline import regenerate_mode5_image
+
+    try:
+        return await regenerate_mode5_image(session_id, body.chunk_index, body.segment_index)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.post("/api/mode5/{session_id}/regenerate-chunk")
+async def mode5_regenerate_chunk_ep(session_id: str, body: Mode5RegenerateChunkBody):
+    from modes.mode5.pipeline import regenerate_mode5_chunk
+
+    try:
+        result = await regenerate_mode5_chunk(session_id, body.chunk_index, body.text)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+    sess = _sessions.get(session_id)
+    if sess and isinstance(sess.get("result"), dict):
+        r = sess["result"]
+        if "chunk_meta" in result and isinstance(r.get("mode5_chunks_meta"), list):
+            metas = list(r["mode5_chunks_meta"])
+            idx = result.get("chunk_index")
+            if isinstance(idx, int) and 0 <= idx < len(metas):
+                metas[idx] = result["chunk_meta"]
+                r["mode5_chunks_meta"] = metas
+    return result
+
+
+@app.post("/api/mode5/{session_id}/assemble")
+async def mode5_assemble_ep(session_id: str):
+    from modes.mode5.pipeline import assemble_mode5_final_sync
+
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(
+            None,
+            functools.partial(assemble_mode5_final_sync, session_id),
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+    sess = _sessions.get(session_id)
+    if sess and isinstance(sess.get("result"), dict):
+        r = sess["result"]
+        r["video_path"] = result.get("video_path")
+        r["video_paths"] = result.get("video_paths")
+        r["topic"] = result.get("topic")
+        r["quote_caption"] = result.get("quote_caption")
+        r["quote_caption_ru"] = result.get("quote_caption_ru")
+        r["quote_caption_en"] = result.get("quote_caption_en")
+        r["mode5_review_ready"] = False
+        r.pop("mode5_clip_filenames", None)
+        r.pop("mode5_chunks_meta", None)
+        if isinstance(result.get("mode5_sub_mode"), str):
+            r["mode5_sub_mode"] = result["mode5_sub_mode"]
+    return result
+
+
+@app.get("/api/mode5/{session_id}/review-state")
+async def mode5_review_state_ep(session_id: str):
+    from modes.mode5.pipeline import mode5_review_snapshot
+
+    try:
+        return mode5_review_snapshot(session_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.post("/api/mode5/{session_id}/continue-generation")
+async def mode5_continue_generation_ep(session_id: str):
+    """Продолжить facts50 с последнего сохранённого этапа (TTS/картинки/слайсы на диске)."""
+    from modes.mode5.pipeline import load_mode5_plan, mode5_resume_snapshot
+
+    snap = mode5_resume_snapshot(session_id)
+    if not snap.get("can_resume"):
+        raise HTTPException(
+            400,
+            detail=str(snap.get("reason") or "cannot_resume"),
+        )
+
+    existing = _sessions.get(session_id)
+    if existing:
+        t = existing.get("task")
+        if existing.get("status") == "running" and t is not None and not t.done():
+            raise HTTPException(409, "Для этой сессии уже идёт генерация")
+
+    try:
+        plan = load_mode5_plan(session_id)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+
+    topic = (
+        (plan.get("header_title") or plan.get("facts_topic") or "").strip()
+        or f"Mode 5 ({session_id})"
+    )
+
+    from agents.topics_history import get_start_request_for_session
+
+    req_hist = get_start_request_for_session(session_id)
+    req_final = None
+    if isinstance(existing, dict) and isinstance(existing.get("request"), dict):
+        req_final = existing["request"]
+    elif isinstance(req_hist, dict):
+        req_final = req_hist
+    if not isinstance(req_final, dict):
+        req_final = {"mode": 5, "mode5_skip_final_assembly": True}
+
+    if isinstance(existing, dict) and isinstance(existing.get("queue"), asyncio.Queue):
+        queue = existing["queue"]
+        _drain_async_queue(queue)
+    else:
+        queue = asyncio.Queue()
+
+    pause_event = asyncio.Event()
+    pause_event.set()
+    control = {
+        "pause_event": pause_event,
+        "cancelled": False,
+        "fastgen_cancel_event": threading.Event(),
+    }
+
+    _sessions[session_id] = {
+        "status": "running",
+        "queue": queue,
+        "result": (existing or {}).get("result") if isinstance(existing, dict) else None,
+        "error": None,
+        "started_at": time.time(),
+        "control": control,
+        "topic": topic,
+        "mode": 5,
+        "request": req_final,
+    }
+    task = asyncio.create_task(_run_mode5_resume_task(session_id, queue, control))
+    _sessions[session_id]["task"] = task
+    return {"session_id": session_id, "continuing": True}
+
+
+@app.post("/api/mode13/{session_id}/assemble")
+async def mode13_assemble_ep(session_id: str, body: AssembleClipsBody):
+    from modes.mode13.pipeline import assemble_mode13_final_sync
+
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(
+            None,
+            functools.partial(assemble_mode13_final_sync, session_id, body.show_subtitles),
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+    sess = _sessions.get(session_id)
+    if sess and isinstance(sess.get("result"), dict):
+        r = sess["result"]
+        r["video_path"] = result.get("video_path")
+        r["video_paths"] = result.get("video_paths")
+        r["topic"] = result.get("topic")
+        r["quote_caption"] = result.get("quote_caption")
+        r["quote_caption_ru"] = result.get("quote_caption_ru")
+        r["quote_caption_en"] = result.get("quote_caption_en")
+        r["mode13_review_ready"] = False
+        r.pop("mode13_clip_filenames", None)
+        r.pop("mode13_show_subtitles", None)
+        r.pop("mode13_chunks_meta", None)
+    return result
+
+
 @app.get("/api/pipeline/sessions")
 async def list_pipeline_sessions():
-    """Список активных сессий (running, paused) — для показа в UI."""
-    active = [
-        {
-            "session_id": sid,
-            "status": st,
-            "topic": s.get("topic", "") or f"#{sid[-8:]}",
-            "mode": s.get("mode", 1),
-            "started_at": s.get("started_at"),
-        }
-        for sid, s in _sessions.items()
-        if (st := s.get("status")) in ("running", "paused")
-    ]
-    logger.info(f"[API /pipeline/sessions] returning {len(active)} active")
+    """Список сессий для сайдбара: running/paused, проверка клипов, ошибка/отмена (чтобы не «пропадали»)."""
+    active = []
+    for sid, s in _sessions.items():
+        st = s.get("status")
+        result = s.get("result") if isinstance(s.get("result"), dict) else {}
+        review_pending = bool(
+            st == "done"
+            and (
+                result.get("mode4_multiclip_ready")
+                or result.get("mode13_review_ready")
+            )
+        )
+        terminal_visible = st in ("error", "cancelled")
+        if st not in ("running", "paused") and not review_pending and not terminal_visible:
+            continue
+        active.append(
+            {
+                "session_id": sid,
+                "status": st,
+                "topic": s.get("topic", "") or f"#{sid[-8:]}",
+                "mode": s.get("mode", 1),
+                "started_at": s.get("started_at"),
+                "review_pending": review_pending,
+            }
+        )
+    logger.debug(f"[API /pipeline/sessions] returning {len(active)} active")
     return {"sessions": sorted(active, key=lambda x: x.get("started_at") or 0, reverse=True)}
 
 
@@ -868,6 +1658,8 @@ async def restart_pipeline(session_id: str):
     # Новая сессия с теми же параметрами
     req = StartRequest(**req_data)
     _normalize_mode_specific_request(req)
+    _validate_start_request(req)
+    _ensure_regenerate_assets_exist(req)
     new_sid = str(int(time.time() * 1000))
     queue: asyncio.Queue = asyncio.Queue()
     pause_event = asyncio.Event()
@@ -954,18 +1746,81 @@ def _get_video_metadata() -> list[dict]:
         for session_dir in videos_dir.iterdir():
             if not session_dir.is_dir() or session_dir.name.startswith("_"):
                 continue
-            for mp4 in session_dir.glob("*.mp4"):
+            sid = session_dir.name
+            all_mp4 = [p for p in session_dir.glob("*.mp4") if _is_public_session_mp4(p.name)]
+            final_m5 = session_dir / "video_mode5.mp4"
+            has_final_m5 = final_m5.is_file()
+            preview_m5 = sorted(
+                (p for p in all_mp4 if p.name.startswith("mode5_preview_")),
+                key=lambda p: p.name,
+            )
+            base = topics_by_session.get(sid) or f"Цитата #{sid[-8:]}"
+            cap_en = quote_caption_en_by_session.get(sid)
+            cap_ru = topics_by_session.get(sid)
+
+            # Mode 5 long-form: один пункт в библиотеке — финал или одна «связка» превью + склейка.
+            if has_final_m5:
+                mp4 = final_m5
+                key = (sid, mp4.name)
+                if key not in seen:
+                    seen.add(key)
+                    stat = mp4.stat()
+                    thumb_q = quote(mp4.name, safe="")
+                    videos.append({
+                        "session_id": sid,
+                        "filename": mp4.name,
+                        "title": topics_by_session.get(sid) or f"Видео #{sid[-8:]}",
+                        "size_mb": round(stat.st_size / 1024 / 1024, 1),
+                        "created_at": stat.st_mtime,
+                        "url": f"/api/video/{sid}/{mp4.name}",
+                        "thumbnail_url": f"/api/video/{sid}/thumbnail?file={thumb_q}",
+                        "can_regenerate": sid in regen_sessions,
+                        "quote_caption_ru": cap_ru,
+                        "quote_caption_en": cap_en,
+                        "video_lang": None,
+                        "publishing": publishing_by_session.get(sid),
+                        "mode5_has_final": True,
+                    })
+            elif preview_m5:
+                bkey = (sid, "__mode5_bundle__")
+                if bkey not in seen:
+                    seen.add(bkey)
+                    first = preview_m5[0]
+                    created = max(p.stat().st_mtime for p in preview_m5)
+                    total_sz = sum(p.stat().st_size for p in preview_m5)
+                    thumb_q = quote(first.name, safe="")
+                    n = len(preview_m5)
+                    videos.append({
+                        "session_id": sid,
+                        "filename": first.name,
+                        "title": f"{topics_by_session.get(sid) or f'Видео #{sid[-8:]}'} · {n} ч. (склеить в финал)",
+                        "size_mb": round(total_sz / 1024 / 1024, 1),
+                        "created_at": created,
+                        "url": f"/api/video/{sid}/{first.name}",
+                        "thumbnail_url": f"/api/video/{sid}/thumbnail?file={thumb_q}",
+                        "can_regenerate": sid in regen_sessions,
+                        "quote_caption_ru": cap_ru,
+                        "quote_caption_en": cap_en,
+                        "video_lang": None,
+                        "publishing": publishing_by_session.get(sid),
+                        "mode5_can_assemble": True,
+                        "mode5_preview_count": n,
+                    })
+
+            for mp4 in all_mp4:
+                if has_final_m5 and mp4.name.startswith("mode5_preview_"):
+                    continue
+                if preview_m5 and mp4.name.startswith("mode5_preview_"):
+                    continue
+                if has_final_m5 and mp4.name == "video_mode5.mp4":
+                    continue
                 if not _is_public_session_mp4(mp4.name):
                     continue
-                sid = session_dir.name
                 key = (sid, mp4.name)
                 if key in seen:
                     continue
                 seen.add(key)
-                # Для video_ru.mp4 / video_en.mp4 — заголовок на языке ролика; миниатюра с того же файла
                 stem = mp4.stem
-                base = topics_by_session.get(sid) or f"Цитата #{sid[-8:]}"
-                cap_en = quote_caption_en_by_session.get(sid)
                 if stem == "video_ru":
                     title = base if base else f"Видео #{sid[-8:]}"
                     if not title.endswith("(RU)") and " (RU)" not in title:
@@ -975,7 +1830,6 @@ def _get_video_metadata() -> list[dict]:
                 else:
                     title = topics_by_session.get(sid) or f"Видео #{sid[-8:]}"
                 stat = mp4.stat()
-                cap_ru = topics_by_session.get(sid)
                 thumb_q = quote(mp4.name, safe="")
                 videos.append({
                     "session_id": sid,
@@ -1590,14 +2444,34 @@ async def regenerate_video_from_library(
 
 
 def _resolve_video_path(session_id: str, filename: str) -> Path | None:
-    """Resolve path: flat video_{sid}.mp4 или legacy session_id/filename."""
+    """Resolve path: flat video_{sid}.mp4, legacy session_id/filename, или session_id/clips/clip_*.mp4."""
     videos_dir = settings.videos_dir
     flat_path = videos_dir / f"video_{session_id}.mp4"
     if flat_path.exists():
         return flat_path
-    legacy_path = videos_dir / session_id / filename
-    if legacy_path.exists():
-        return legacy_path
+    if ".." in filename:
+        return None
+    legacy_root = (videos_dir / session_id).resolve()
+    if not legacy_root.is_dir():
+        return None
+    norm = filename.replace("\\", "/")
+    parts = Path(norm).parts
+    candidates: list[Path] = []
+    if len(parts) == 1:
+        candidates.append(legacy_root / parts[0])
+        fn = parts[0]
+        if fn.lower().startswith("clip_") and fn.endswith(".mp4"):
+            candidates.append(legacy_root / "clips" / fn)
+    elif len(parts) == 2 and parts[0] == "clips":
+        candidates.append(legacy_root / "clips" / parts[1])
+    for cand in candidates:
+        try:
+            rc = cand.resolve()
+            rc.relative_to(legacy_root)
+        except ValueError:
+            continue
+        if rc.is_file():
+            return rc
     return None
 
 
@@ -1611,13 +2485,66 @@ def _pick_legacy_thumbnail_path(legacy_dir: Path) -> Path | None:
     mp4s = sorted(p for p in legacy_dir.glob("*.mp4") if _is_public_session_mp4(p.name))
     if not mp4s:
         return None
-    for name in ("video_ru.mp4", "video_en.mp4"):
+    for name in ("video_ru.mp4", "video_en.mp4", "video_parable_ru.mp4", "video_parable_en.mp4", "video_parable.mp4"):
         p = legacy_dir / name
         if p.exists():
             return p
     # без финалов — любой файл кроме очевидных клипов (если есть другой)
     non_clip = [p for p in mp4s if not p.name.lower().startswith("clip_")]
     return non_clip[0] if non_clip else mp4s[0]
+
+
+def _legacy_thumbnail_candidate_paths(legacy: Path, preferred: Path | None) -> list[Path]:
+    """Порядок mp4 для превью: сначала выбранный файл, затем остальные финалы и клипы (без дубликатов)."""
+    lr = legacy.resolve()
+    out: list[Path] = []
+    seen: set[str] = set()
+
+    def push(p: Path | None) -> None:
+        if p is None or not p.is_file():
+            return
+        try:
+            rp = p.resolve()
+            rp.relative_to(lr)
+        except ValueError:
+            return
+        k = str(rp)
+        if k in seen:
+            return
+        seen.add(k)
+        out.append(rp)
+
+    push(preferred)
+    for name in ("video_ru.mp4", "video_en.mp4", "video_parable_ru.mp4", "video_parable_en.mp4", "video_parable.mp4"):
+        push(lr / name)
+    for p in sorted(legacy.glob("*.mp4")):
+        if _is_public_session_mp4(p.name):
+            push(p.resolve())
+    clips = lr / "clips"
+    if clips.is_dir():
+        for p in sorted(clips.glob("clip_*.mp4"))[:48]:
+            push(p.resolve())
+    return out
+
+
+def _jpeg_first_frame_moviepy(video_path: Path) -> bytes | None:
+    """Первый кадр как JPEG, или None если файл битый / без moov / пустой."""
+    try:
+        from moviepy import VideoFileClip
+        import io
+        from PIL import Image
+
+        vc = VideoFileClip(str(video_path))
+        try:
+            frame = vc.get_frame(0)
+        finally:
+            vc.close()
+        img = Image.fromarray(frame)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        return buf.getvalue()
+    except Exception:
+        return None
 
 
 @app.get("/api/video/{session_id}/thumbnail")
@@ -1631,19 +2558,22 @@ async def serve_video_thumbnail(
     flat_path = videos_dir / f"video_{session_id}.mp4"
     legacy = videos_dir / session_id
     path: Path | None = None
-    
-    # 1) Если передан video_file и есть legacy папка - ищем там
+
+    # 1) Если передан video_file и есть legacy папка — корень или clips/
     if video_file and legacy.is_dir():
         safe_name = Path(video_file).name
         if safe_name.endswith(".mp4") and _is_public_session_mp4(safe_name):
-            candidate = (legacy / safe_name).resolve()
-            try:
-                candidate.relative_to(legacy.resolve())
-            except ValueError:
-                raise HTTPException(400, "Invalid file path") from None
-            if candidate.is_file():
-                path = candidate
-    
+            lr = legacy.resolve()
+            for rel in (legacy / safe_name, legacy / "clips" / safe_name):
+                candidate = rel.resolve()
+                try:
+                    candidate.relative_to(lr)
+                except ValueError:
+                    raise HTTPException(400, "Invalid file path") from None
+                if candidate.is_file():
+                    path = candidate
+                    break
+
     # 2) Если не нашли в legacy, пробуем flat формат в корне videos_dir
     if path is None:
         # Проверяем video_{session_id}.mp4
@@ -1655,27 +2585,37 @@ async def serve_video_thumbnail(
                 if candidate.is_file():
                     path = candidate
                     break
-    
+
     # 3) Если не нашли flat, пробуем legacy папку
     if path is None and legacy.is_dir():
         path = _pick_legacy_thumbnail_path(legacy)
     if not path or not path.exists():
         raise HTTPException(404, "Video not found")
-    try:
-        from moviepy import VideoFileClip
-        vc = VideoFileClip(str(path))
-        frame = vc.get_frame(0)
-        vc.close()
-        import io
-        from PIL import Image
-        img = Image.fromarray(frame)
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
-        buf.seek(0)
-        return Response(content=buf.getvalue(), media_type="image/jpeg")
-    except Exception as e:
-        logger.warning(f"Thumbnail failed: {e}")
-        raise HTTPException(500, "Could not generate thumbnail")
+
+    candidates: list[Path] = []
+    if legacy.is_dir():
+        try:
+            path.resolve().relative_to(legacy.resolve())
+            candidates = _legacy_thumbnail_candidate_paths(legacy, path)
+        except ValueError:
+            pass
+    if not candidates:
+        candidates = [path]
+
+    last_fail: str | None = None
+    for src in candidates:
+        jpeg = _jpeg_first_frame_moviepy(src)
+        if jpeg is not None:
+            return Response(content=jpeg, media_type="image/jpeg")
+        last_fail = src.name
+
+    logger.debug(
+        f"Thumbnail: no readable mp4 for session {session_id} (tried {len(candidates)}, last={last_fail})"
+    )
+    raise HTTPException(
+        404,
+        "Could not read video for thumbnail (file incomplete or corrupt — e.g. interrupted export)",
+    )
 
 
 @app.get("/api/video/{session_id}/{filename}")
@@ -1874,9 +2814,9 @@ async def get_rate_limit_status():
     
     Returns:
         {
-            "limit": int (1-3),
+            "limit": int (0 = без лимита, иначе 1, 2, 3, 5, 10, 15, 30),
             "used": int,
-            "remaining": int,
+            "remaining": int | null (null если лимит отключён),
             "hour_key": str,
             "next_reset": str (ISO format)
         }
@@ -1892,7 +2832,7 @@ async def set_rate_limit(limit: int = Body(..., embed=True)):
     Set the hourly generation limit.
     
     Args:
-        limit: New limit value (must be 1, 2, or 3)
+        limit: Новое значение: 0 (без лимита) или 1, 2, 3, 5, 10, 15, 30
         
     Returns:
         {"success": bool, "limit": int}
@@ -1903,7 +2843,10 @@ async def set_rate_limit(limit: int = Body(..., embed=True)):
     success = limiter.set_limit(limit)
     
     if not success:
-        raise HTTPException(400, f"Invalid limit: {limit}. Must be 1, 2, or 3.")
+        raise HTTPException(
+            400,
+            f"Invalid limit: {limit}. Allowed: 0 (off), 1, 2, 3, 5, 10, 15, 30.",
+        )
     
     return {"success": True, "limit": limit}
 

@@ -20,11 +20,46 @@ from moviepy import VideoClip, VideoFileClip
 from PIL import Image
 
 from agents.video_editor.subtitles import (
+    apply_whisper_word_start_lead,
+    get_mode4_quote_font_size,
     render_mode4_quote_karaoke_overlay,
+    render_quote_header_overlay,
     render_static_quote_caption_overlay,
     render_subtitle_overlay,
 )
 from config import settings
+
+
+def _estimate_karaoke_word_timestamps(
+    script: str | None,
+    duration: float,
+) -> tuple[list[tuple[float, float]] | None, list[str] | None]:
+    """
+    Fallback для mode4, когда faster-whisper не установлен или не дал таймкоды:
+    строим приблизительную пословную разметку, чтобы не терять золотое караоке полностью.
+    """
+    text = (script or "").strip()
+    if not text or duration <= 0.25:
+        return (None, None)
+    words = text.split()
+    if not words:
+        return (None, None)
+    lead_in = min(0.16, duration * 0.12)
+    usable = max(0.12, duration - lead_in)
+    weights = [max(1.0, min(12.0, len(w.strip(".,!?;:()[]{}\"'«»")))) for w in words]
+    total = sum(weights) or float(len(words))
+    cur = lead_in
+    ts: list[tuple[float, float]] = []
+    for weight in weights:
+        span = usable * (weight / total)
+        start = cur
+        end = min(duration, max(start + 0.05, cur + span))
+        ts.append((start, end))
+        cur = end
+    if ts:
+        last_start, _last_end = ts[-1]
+        ts[-1] = (last_start, duration)
+    return (ts, words)
 
 
 def _compute_letterbox_bounds(arr: np.ndarray, black_threshold: int = 25) -> tuple[int, int, int, int] | None:
@@ -69,6 +104,23 @@ def _resize_fill(img: Image.Image, w: int, h: int, bottom_crop: float = 0.0) -> 
     return img.crop((left, top, left + w, top + h))
 
 
+def _clamp_word_timestamps_to_duration(
+    wt: list[tuple[float, float]], dur: float
+) -> list[tuple[float, float]]:
+    """Таймкоды не выходят за длину клипа — иначе караоке «уезжает» в конце."""
+    if dur <= 0 or not wt:
+        return wt
+    out: list[tuple[float, float]] = []
+    eps = 0.02
+    for a, b in wt:
+        a = max(0.0, min(float(a), max(0.0, dur - eps)))
+        b = max(0.0, min(float(b), dur))
+        if b < a + eps:
+            b = min(dur, a + eps)
+        out.append((a, b))
+    return out
+
+
 def _alpha_blit(base: np.ndarray, overlay_rgba: np.ndarray) -> np.ndarray:
     a = overlay_rgba[:, :, 3:4].astype(np.float32) / 255.0
     fg = overlay_rgba[:, :, :3].astype(np.float32)
@@ -88,10 +140,25 @@ def _make_subtitle_clip(
     static_caption: bool = False,
     spoken_script: str | None = None,
     author_name: str | None = None,
+    subclip_range: tuple[float, float] | None = None,
+    header_title: str | None = None,
+    plain_timed_subtitles: bool = False,
 ) -> tuple[VideoClip, VideoFileClip]:
     """Видео + субтитры. Аудио только из FastGen. Караоке по Whisper или статическая подпись."""
     vc = VideoFileClip(str(video_path))
     vid_dur = float(vc.duration)
+    quote_scale = max(
+        0.7, min(2.0, float(getattr(settings, "mode4_quote_subtitle_scale", 1.6) or 1.6))
+    )
+    if subclip_range is not None:
+        t0, t1 = subclip_range
+        t0 = max(0.0, min(t0, vid_dur - 0.12))
+        t1 = max(t0 + 0.12, min(t1, vid_dur))
+        vc = vc.subclipped(t0, t1)
+        vid_dur = float(vc.duration)
+    wts = list(word_timestamps) if word_timestamps else None
+    if wts and vid_dur > 0:
+        wts = _clamp_word_timestamps_to_duration(wts, vid_dur)
     bounds_cache: list[tuple[int, int, int, int] | None] = [None]
 
     def make_frame(t: float) -> np.ndarray:
@@ -113,8 +180,31 @@ def _make_subtitle_clip(
                 ov = render_static_quote_caption_overlay(
                     subtitle_text, target_w, target_h, t, vid_dur,
                 )
+            elif plain_timed_subtitles and wts and tts_words:
+                ov = render_subtitle_overlay(
+                    subtitle_text,
+                    target_w,
+                    target_h,
+                    t,
+                    vid_dur,
+                    karaoke=False,
+                    word_timestamps=wts,
+                    tts_words=tts_words,
+                    transition_state={},
+                    timed_plain=True,
+                    timed_plain_font_scale=quote_scale,
+                )
+                dur = vid_dur
+                fi = max(0, min(1, t / 0.45)) ** 2 * (3 - 2 * max(0, min(1, t / 0.45)))
+                fo = max(0, min(1, (dur - t) / 0.45)) ** 2 * (
+                    3 - 2 * max(0, min(1, (dur - t) / 0.45))
+                )
+                alpha = fi * fo
+                if alpha < 1.0:
+                    ov = ov.copy()
+                    ov[:, :, 3] = (ov[:, :, 3] * alpha).astype(np.uint8)
             elif (
-                word_timestamps
+                wts
                 and tts_words
                 and spoken_script
                 and spoken_script.strip()
@@ -126,10 +216,10 @@ def _make_subtitle_clip(
                     target_h,
                     t,
                     vid_dur,
-                    word_timestamps,
+                    wts,
                     tts_words,
                 )
-            elif word_timestamps and tts_words:
+            elif wts and tts_words:
                 ov = render_subtitle_overlay(
                     subtitle_text,
                     target_w,
@@ -137,8 +227,11 @@ def _make_subtitle_clip(
                     t,
                     vid_dur,
                     karaoke=False,
-                    word_timestamps=word_timestamps,
+                    word_timestamps=wts,
                     tts_words=tts_words,
+                    transition_state={},
+                    timed_plain=True,
+                    timed_plain_font_scale=quote_scale,
                 )
                 dur = vid_dur
                 fi = max(0, min(1, t / 0.45)) ** 2 * (3 - 2 * max(0, min(1, t / 0.45)))
@@ -154,6 +247,10 @@ def _make_subtitle_clip(
                     subtitle_text, target_w, target_h, t, vid_dur,
                 )
             arr = _alpha_blit(arr, ov)
+        ht = (header_title or "").strip()
+        if ht:
+            hdr = render_quote_header_overlay(ht, target_w, target_h, t, vid_dur)
+            arr = _alpha_blit(arr, hdr)
         return arr
 
     clip = VideoClip(make_frame, duration=vid_dur).with_fps(fps)
@@ -170,6 +267,11 @@ def _assemble_mode4_impl(
     spoken_scripts: list[str] | None = None,
     authors: list[str | None] | None = None,
     whisper_languages: list[str | None] | None = None,
+    *,
+    trim_clips_to_whisper_speech: bool = False,
+    whisper_vad_filter: bool = True,
+    header_title: str | None = None,
+    plain_timed_subtitles: bool = False,
 ) -> Path:
     """Внутренняя реализация — вызывается в subprocess на Windows."""
     from agents.video_editor.whisper_timestamps import get_word_timestamps_from_video
@@ -177,6 +279,7 @@ def _assemble_mode4_impl(
     target_w, target_h = settings.video_resolution
     fps = settings.video_fps
     bottom_crop = max(0, min(0.2, getattr(settings, "video_bottom_crop", 0.05)))
+    quote_font_px = get_mode4_quote_font_size(target_w)
 
     clips: list[VideoClip] = []
     vc_refs: list[VideoFileClip] = []
@@ -199,14 +302,60 @@ def _assemble_mode4_impl(
             if whisper_languages and i < len(whisper_languages)
             else None
         )
+        subclip_range: tuple[float, float] | None = None
         if sub and sub.strip() and not static_subtitles and whisper_script:
             wt, tw = get_word_timestamps_from_video(
-                path, script=whisper_script, language=wlang
+                path,
+                script=whisper_script,
+                language=wlang,
+                vad_filter=whisper_vad_filter,
             )
             if wt and tw:
+                shift = float(getattr(settings, "subtitle_whisper_time_shift_sec", 0.0) or 0.0)
+                if shift:
+                    wt = [
+                        (max(0.0, float(a) + shift), max(0.0, float(b) + shift))
+                        for a, b in wt
+                    ]
+                lead = float(
+                    getattr(settings, "subtitle_whisper_word_start_lead_sec", 0.0) or 0.0
+                )
+                if lead:
+                    wt = apply_whisper_word_start_lead(wt, lead_sec=lead)
                 logger.info(
                     f"[Mode4 Assembler] Whisper sync: {len(wt)} words (karaoke + voice)"
                 )
+            elif spoken:
+                vc_probe = VideoFileClip(str(path))
+                try:
+                    est_dur = float(vc_probe.duration)
+                finally:
+                    vc_probe.close()
+                wt, tw = _estimate_karaoke_word_timestamps(spoken, est_dur)
+                if wt and tw:
+                    logger.info(
+                        f"[Mode4 Assembler] Whisper unavailable -> estimated karaoke sync: {len(wt)} words"
+                    )
+            if (
+                trim_clips_to_whisper_speech
+                and wt
+                and len(wt) > 0
+                and tw
+            ):
+                vc_probe = VideoFileClip(str(path))
+                full_dur = float(vc_probe.duration)
+                vc_probe.close()
+                pad_start = 0.04
+                pad_end = 0.07
+                t0 = max(0.0, float(wt[0][0]) - pad_start)
+                t1 = min(full_dur, float(wt[-1][1]) + pad_end)
+                if t1 - t0 > 0.18:
+                    subclip_range = (t0, t1)
+                    wt = [(max(0.0, a - t0), max(0.0, b - t0)) for a, b in wt]
+                    logger.info(
+                        f"[Mode4 Assembler] Trim clip to speech [{t0:.2f}s–{t1:.2f}s] "
+                        f"(tight join, −{t0:.2f}s lead / −{full_dur - t1:.2f}s tail)"
+                    )
         clip, vc = _make_subtitle_clip(
             path,
             target_w,
@@ -219,6 +368,31 @@ def _assemble_mode4_impl(
             static_caption=static_subtitles and bool(sub and sub.strip()),
             spoken_script=spoken,
             author_name=author,
+            subclip_range=subclip_range,
+            header_title=header_title,
+            plain_timed_subtitles=plain_timed_subtitles,
+        )
+        has_sub = bool(sub and str(sub).strip())
+        if not has_sub:
+            renderer_name = "none"
+        elif static_subtitles:
+            renderer_name = "static_quote_caption (forced)"
+        elif plain_timed_subtitles and wt and tw:
+            renderer_name = "plain_whisper_timed"
+        elif wt and tw and spoken and spoken.strip():
+            renderer_name = "quote_karaoke"
+        elif wt and tw:
+            renderer_name = "plain_timed_fallback"
+        else:
+            renderer_name = "static_quote_caption (fallback)"
+        logger.info(
+            "[Mode4 Assembler] Subtitle renderer: {} | scale={} | quote_font_px={} | sub={} | spoken={} | wt={}",
+            renderer_name,
+            float(getattr(settings, "mode4_quote_subtitle_scale", 1.6) or 1.6),
+            quote_font_px,
+            has_sub,
+            bool(spoken and spoken.strip()),
+            len(wt or []),
         )
         clips.append(clip)
         vc_refs.append(vc)
@@ -281,6 +455,10 @@ def _run_in_process(
     spoken_scripts: list[str] | None,
     authors: list[str | None] | None,
     whisper_languages: list[str | None] | None,
+    trim_clips_to_whisper_speech: bool,
+    whisper_vad_filter: bool,
+    header_title: str | None,
+    plain_timed_subtitles: bool,
 ) -> None:
     try:
         _assemble_mode4_impl(
@@ -291,6 +469,10 @@ def _run_in_process(
             spoken_scripts=spoken_scripts,
             authors=authors,
             whisper_languages=whisper_languages,
+            trim_clips_to_whisper_speech=trim_clips_to_whisper_speech,
+            whisper_vad_filter=whisper_vad_filter,
+            header_title=header_title,
+            plain_timed_subtitles=plain_timed_subtitles,
         )
     except Exception as e:
         err_q.put(e)
@@ -305,9 +487,18 @@ def assemble_mode4_video(
     spoken_scripts: list[str] | None = None,
     authors: list[str | None] | None = None,
     whisper_languages: list[str | None] | None = None,
+    trim_clips_to_whisper_speech: bool = False,
+    whisper_vad_filter: bool = True,
+    header_title: str | None = None,
+    plain_timed_subtitles: bool = False,
 ) -> Path:
     """
     Собирает видео. На Windows — в subprocess (избегаем WinError 32 с temp-файлами).
+
+    trim_clips_to_whisper_speech: обрезать клип по первому/последнему слову Whisper (экспериментально;
+    может резать начало речи и ломать караоке — для притчи отключено).
+    whisper_vad_filter: False — полная дорожка в Whisper без VAD (лучше первые слова и караоке).
+    header_title: опциональный заголовок у верхнего края кадра (весь ролик).
     """
     if sys.platform == "win32":
         q: Queue = Queue()
@@ -322,6 +513,10 @@ def assemble_mode4_video(
                 spoken_scripts,
                 authors,
                 whisper_languages,
+                trim_clips_to_whisper_speech,
+                whisper_vad_filter,
+                header_title,
+                plain_timed_subtitles,
             ),
         )
         p.start()
@@ -337,5 +532,9 @@ def assemble_mode4_video(
             spoken_scripts=spoken_scripts,
             authors=authors,
             whisper_languages=whisper_languages,
+            trim_clips_to_whisper_speech=trim_clips_to_whisper_speech,
+            whisper_vad_filter=whisper_vad_filter,
+            header_title=header_title,
+            plain_timed_subtitles=plain_timed_subtitles,
         )
     return output_path

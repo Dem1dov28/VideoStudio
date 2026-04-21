@@ -8,6 +8,7 @@ Subtitle overlay for MoviePy 2.x — text-only subtitle.
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -15,6 +16,7 @@ from PIL import Image, ImageDraw
 
 from agents.video_editor import design_tokens as dt
 from agents.video_editor.fonts import load_ui_font
+from config import settings
 
 if TYPE_CHECKING:
     from PIL import ImageFont
@@ -124,14 +126,21 @@ def _word_style_plain(word: str) -> tuple[tuple[int, int, int, int], int]:
     return dt.SUB_WHITE, 5
 
 
-def align_script_to_whisper(
+def _norm_word_align(w: str) -> str:
+    """Нормализация для сопоставления скрипта с токенами Whisper."""
+    t = (w or "").strip().lower()
+    t = re.sub(r"[^\w\d]", "", t, flags=re.UNICODE)
+    if t:
+        return t
+    raw = (w or "").strip().lower()
+    return raw[:1] if raw else "\u200b"
+
+
+def _align_script_to_whisper_proportional(
     script_words: list[str],
     word_timestamps: list[tuple[float, float]],
 ) -> list[tuple[float, float]] | None:
-    """
-    Сопоставляет слова скрипта с таймкодами Whisper (разная длина).
-    Возвращает (start, end) для каждого слова скрипта.
-    """
+    """Старый пропорциональный маппинг — запасной путь без текста Whisper."""
     if not word_timestamps or not script_words:
         return None
     K, N = len(word_timestamps), len(script_words)
@@ -143,7 +152,6 @@ def align_script_to_whisper(
         return None
     result: list[tuple[float, float]] = []
     if N <= K:
-        # Скрипт короче — объединяем интервалы Whisper
         ratio = K / N
         for i in range(N):
             j0 = min(int(i * ratio), K - 1)
@@ -152,7 +160,6 @@ def align_script_to_whisper(
             end = word_timestamps[j1 - 1][1] if j1 > j0 else word_timestamps[j0][1]
             result.append((start, end))
     else:
-        # Скрипт длиннее — распределяем по интервалам
         ratio = N / K
         for i in range(N):
             k = min(int(i / ratio), K - 1)
@@ -166,6 +173,230 @@ def align_script_to_whisper(
             end = seg_s + (sub_i + 1) * step
             result.append((start, end))
     return result
+
+
+def apply_whisper_word_start_lead(
+    wt: list[tuple[float, float]],
+    *,
+    lead_sec: float,
+) -> list[tuple[float, float]]:
+    """
+    Сдвигает границы слов чуть раньше: Whisper часто ставит start позже слышимого слога —
+    подсветка/смена строки меньше отстают (режим цитаты / несколько фрагментов и др.).
+    """
+    if lead_sec <= 0 or not wt:
+        return list(wt)
+    min_span = 0.042
+    out: list[tuple[float, float]] = []
+    for a, b in wt:
+        fa, fb = float(a), float(b)
+        na = max(0.0, fa - lead_sec)
+        nb = max(na + min_span, fb - lead_sec * 0.35)
+        out.append((na, nb))
+    return _enforce_monotonic_word_times(out)
+
+
+def _enforce_monotonic_word_times(
+    ts: list[tuple[float, float]], *, eps: float = 0.012
+) -> list[tuple[float, float]]:
+    """Убирает сильные перекрытия границ слов (Whisper иногда даёт end > next.start)."""
+    if not ts:
+        return ts
+    out: list[tuple[float, float]] = [ts[0]]
+    for i in range(1, len(ts)):
+        a, b = float(ts[i][0]), float(ts[i][1])
+        pa, pb = out[-1]
+        if a < pb:
+            a = pb + eps * 0.35
+        if b < a + eps:
+            b = a + eps
+        out.append((a, b))
+    return out
+
+
+def _enforce_min_word_span(
+    ts: list[tuple[float, float]],
+    duration: float,
+    *,
+    min_dur: float = 0.056,
+    eps: float = 0.008,
+) -> list[tuple[float, float]]:
+    """
+    Растягивает слишком короткие интервалы Whisper — иначе караоке «скачет» и визуально догоняет голос.
+    Не выходит за duration и за начало следующего слова (если есть).
+    """
+    if not ts or duration <= 0.02:
+        return ts
+    out: list[tuple[float, float]] = [(float(a), float(b)) for a, b in ts]
+    n = len(out)
+    for i in range(n):
+        a, b = out[i]
+        cap_next = duration if i + 1 >= n else out[i + 1][0] - eps
+        if b - a < min_dur and cap_next > a + eps:
+            out[i] = (a, min(cap_next, a + min_dur))
+    for i in range(1, n):
+        a, b = out[i]
+        pm = out[i - 1][1]
+        if a < pm + eps:
+            na = pm + eps
+            nb = max(b, na + min_dur * 0.45)
+            out[i] = (na, min(nb, duration))
+    if out[-1][1] > duration:
+        out[-1] = (min(out[-1][0], duration - eps * 2), duration)
+    return out
+
+
+def _draw_mode4_quote_lines(
+    draw: ImageDraw.ImageDraw,
+    lines: list[list[tuple[str, int]]],
+    line_heights: list[int],
+    max_lh: int,
+    line_gap: int,
+    width: int,
+    font: object,
+    stroke_w: int,
+    y_band: int,
+    active_index: int | None,
+) -> int:
+    """Рисует строки цитаты Mode 4; active_index=None — все слова белые (преролл до Whisper)."""
+    for li, (ln, lh) in enumerate(zip(lines, line_heights)):
+        words_line = [w for w, _ in ln]
+        disp = " ".join(words_line)
+        total_line_w = _pil_text_advance(draw, font, disp, stroke_w)
+        x0 = int(round((width - total_line_w) / 2.0))
+        y_text = y_band + (max_lh - lh) // 2
+
+        def _word_start_x_row(words_row: list[str], j: int) -> float:
+            if j <= 0:
+                return 0.0
+            prefix = " ".join(words_row[0:j]) + " "
+            return _pil_text_advance(draw, font, prefix, stroke_w)
+
+        for j, (word, wi) in enumerate(ln):
+            cx = x0 + int(round(_word_start_x_row(words_line, j)))
+            is_act = active_index is not None and wi == active_index
+            fill = dt.SUB_GOLD if is_act else dt.SUB_WHITE
+            if _NUMBER_RE.search(word) and not is_act:
+                fill = dt.SUB_PURPLE
+            draw.text(
+                (cx, y_text),
+                word,
+                font=font,
+                fill=fill,
+                stroke_width=stroke_w,
+                stroke_fill=(20, 12, 30, 245),
+            )
+        y_band += max_lh + (line_gap if li < len(lines) - 1 else 0)
+    return y_band
+
+
+def align_script_to_whisper(
+    script_words: list[str],
+    word_timestamps: list[tuple[float, float]],
+    whisper_words: list[str] | None = None,
+) -> list[tuple[float, float]] | None:
+    """
+    Сопоставляет слова скрипта (после merge коротких) с таймкодами Whisper.
+    Сначала выравнивание по тексту (SequenceMatcher), иначе — пропорциональный fallback.
+    """
+    if not word_timestamps or not script_words:
+        return None
+    K, N = len(word_timestamps), len(script_words)
+    if whisper_words is None or len(whisper_words) != K:
+        raw = _align_script_to_whisper_proportional(script_words, word_timestamps)
+        return _enforce_monotonic_word_times(raw) if raw else None
+
+    seq_a = [_norm_word_align(w) for w in script_words]
+    seq_b = [_norm_word_align(w) for w in whisper_words]
+    if N == K and seq_a == seq_b:
+        return _enforce_monotonic_word_times(list(word_timestamps))
+
+    sm = SequenceMatcher(a=seq_a, b=seq_b, autojunk=False)
+    result: list[tuple[float, float] | None] = [None] * N
+    pending_lead_start: float | None = None
+
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            for di in range(i2 - i1):
+                result[i1 + di] = (
+                    float(word_timestamps[j1 + di][0]),
+                    float(word_timestamps[j1 + di][1]),
+                )
+        elif tag == "replace":
+            ws = script_words[i1:i2]
+            chunk = word_timestamps[j1:j2]
+            if not chunk or not ws:
+                continue
+            t0, t1w = float(chunk[0][0]), float(chunk[-1][1])
+            if len(ws) == 1:
+                result[i1] = (t0, t1w)
+            else:
+                weights = [max(1, len(_norm_word_align(w)) or 1) for w in ws]
+                total_w = sum(weights)
+                cur = t0
+                span = max(t1w - t0, 0.02)
+                for idx, w in enumerate(ws):
+                    dur = span * (weights[idx] / total_w)
+                    result[i1 + idx] = (cur, cur + dur)
+                    cur += dur
+        elif tag == "insert":
+            if j2 <= j1:
+                continue
+            t_ins0 = float(word_timestamps[j1][0])
+            t_ins1 = float(word_timestamps[j2 - 1][1])
+            if i1 == 0:
+                pending_lead_start = (
+                    t_ins0 if pending_lead_start is None else min(pending_lead_start, t_ins0)
+                )
+            if i1 > 0:
+                pi = i1 - 1
+                if result[pi] is not None:
+                    s, e = result[pi]
+                    result[pi] = (s, max(e, t_ins1))
+            if i1 < N and result[i1] is not None:
+                s, e = result[i1]
+                result[i1] = (min(s, t_ins0), e)
+        # delete: заполним интерполяцией ниже
+
+    if pending_lead_start is not None:
+        fi = next((i for i, r in enumerate(result) if r is not None), None)
+        if fi is not None:
+            s, e = result[fi]
+            result[fi] = (min(s, pending_lead_start), e)
+
+    # Интерполяция для «осиротевших» слов скрипта (delete / пропуски)
+    for i in range(N):
+        if result[i] is not None:
+            continue
+        prev_t: tuple[float, float] | None = None
+        next_t: tuple[float, float] | None = None
+        for j in range(i - 1, -1, -1):
+            if result[j] is not None:
+                prev_t = result[j]
+                break
+        for j in range(i + 1, N):
+            if result[j] is not None:
+                next_t = result[j]
+                break
+        if prev_t and next_t:
+            t0, t1 = prev_t[1], next_t[0]
+            if t1 <= t0:
+                t1 = t0 + 0.04
+            result[i] = (t0, t1)
+        elif prev_t:
+            result[i] = (prev_t[1], prev_t[1] + 0.08)
+        elif next_t:
+            result[i] = (max(0.0, next_t[0] - 0.08), next_t[0])
+        else:
+            raw = _align_script_to_whisper_proportional(script_words, word_timestamps)
+            return _enforce_monotonic_word_times(raw) if raw else None
+
+    if any(r is None for r in result):
+        raw = _align_script_to_whisper_proportional(script_words, word_timestamps)
+        return _enforce_monotonic_word_times(raw) if raw else None
+
+    out = [(float(a), float(b)) for a, b in result]
+    return _enforce_monotonic_word_times(out)
 
 
 def _active_word_index(
@@ -256,6 +487,223 @@ def _blend_overlays(
     return out
 
 
+def _render_subtitle_block_static(
+    text: str,
+    width: int,
+    height: int,
+    *,
+    font_divisor: int = 15,
+) -> np.ndarray:
+    """
+    Весь текст сегмента сразу: перенос по ширине, несколько строк, без пословного караоке.
+    Меньший шрифт, чем обычные субтитры (mode 13).
+    """
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    plain = (text or "").strip()
+    if not plain:
+        return np.array(img)
+
+    draw = ImageDraw.Draw(img)
+    div = max(10, min(26, int(font_divisor)))
+    font_size = max(18, min(34, width // div))
+    font = load_ui_font(font_size, bold=True)
+    stroke_w = max(2, font_size // 12)
+
+    max_text_w = int(width * dt.SUBTITLE_MAX_WIDTH_FRAC) - 2 * dt.SUBTITLE_PAD_X
+    lines: list[str] = []
+    for para in (p.strip() for p in plain.replace("\r\n", "\n").split("\n")):
+        if not para:
+            continue
+        lines.extend(_wrap_text(para, font, max_text_w, draw, stroke_width=stroke_w))
+    if not lines:
+        return np.array(img)
+
+    line_heights: list[int] = []
+    for line in lines:
+        bb = draw.textbbox((0, 0), line, font=font, stroke_width=stroke_w)
+        line_heights.append(bb[3] - bb[1])
+
+    line_gap = max(8, font_size // 5) + stroke_w
+    max_lh = max(line_heights)
+    n = len(lines)
+    total_h = n * max_lh + (n - 1) * line_gap
+    center_y = height * dt.SUBTITLE_VERTICAL_CENTER_FRAC
+    y_band = int(center_y - total_h / 2)
+    y_band = max(dt.SUBTITLE_PAD_Y, y_band)
+
+    for line, lh in zip(lines, line_heights):
+        bb = draw.textbbox((0, 0), line, font=font, stroke_width=stroke_w)
+        line_w = bb[2] - bb[0]
+        x = (width - line_w) // 2
+        y_text = y_band + (max_lh - lh) // 2
+        if _NUMBER_RE.search(line):
+            # Одна строка может содержать числа — упростим: весь ряд белый, кроме токенов
+            words_line = line.split()
+            cx = x
+            space_w = _pil_text_advance(draw, font, " ", stroke_w)
+            for w in words_line:
+                fill = dt.SUB_PURPLE if _NUMBER_RE.search(w) else dt.SUB_WHITE
+                draw.text(
+                    (cx, y_text),
+                    w,
+                    font=font,
+                    fill=fill,
+                    stroke_width=stroke_w,
+                    stroke_fill=(20, 12, 30, 245),
+                )
+                cx += int(_pil_text_advance(draw, font, w, stroke_w) + space_w)
+        else:
+            draw.text(
+                (x, y_text),
+                line,
+                font=font,
+                fill=dt.SUB_WHITE,
+                stroke_width=stroke_w,
+                stroke_fill=(20, 12, 30, 245),
+            )
+        y_band += max_lh + line_gap
+
+    return np.array(img)
+
+
+def _mode4_quote_font_size(width: int) -> int:
+    """Размер шрифта для Mode 4 (цитаты) с масштабом из env."""
+    # Для 9:16 базу держим крупнее обычных «универсальных» сабов в цитатах.
+    base_size = width // 12
+    raw_scale = float(getattr(settings, "mode4_quote_subtitle_scale", 1.2) or 1.2)
+    scale = max(0.7, min(2.0, raw_scale))
+    return max(42, min(120, int(round(base_size * scale))))
+
+
+def get_mode4_quote_font_size(width: int) -> int:
+    """Public helper for logging/debug in assembler."""
+    return _mode4_quote_font_size(width)
+
+
+def _render_subtitle_timed_plain(
+    text: str,
+    width: int,
+    height: int,
+    t: float,
+    duration: float,
+    *,
+    word_timestamps: list[tuple[float, float]] | None = None,
+    tts_words: list[str] | None = None,
+    transition_state: dict | None = None,
+    max_words_per_line: int = 2,
+    font_scale: float = 1.0,
+) -> np.ndarray:
+    """
+    Plain-Whisper для Mode 4: короткая активная строка без золотого слова.
+    Нужен для поведения «как раньше» — по 2-3 слова в строке, а не весь текст сразу.
+    """
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    plain = (text or "").strip()
+    if not plain:
+        return np.array(img)
+
+    draw = ImageDraw.Draw(img)
+    safe_scale = max(0.7, min(2.0, float(font_scale or 1.0)))
+    base_font_size = max(44, min(72, width // 11))
+    font_size = max(44, min(110, int(round(base_font_size * safe_scale))))
+    font = load_ui_font(font_size, bold=True)
+
+    raw = plain.split()
+    words = _merge_dashes_with_words(raw)
+    words = _merge_short_with_adjacent(words)
+    ts_for_display: list[tuple[float, float]] | None = None
+    if word_timestamps and tts_words and len(tts_words) == len(word_timestamps):
+        if len(words) == len(word_timestamps):
+            ts_for_display = _enforce_monotonic_word_times(list(word_timestamps))
+        else:
+            ts_for_display = align_script_to_whisper(words, word_timestamps, tts_words)
+
+    if not words:
+        return np.array(img)
+    if ts_for_display and len(ts_for_display) == len(words):
+        ts_for_display = _enforce_min_word_span(ts_for_display, float(duration))
+
+    active_index = _active_word_index(t, duration, words, ts_for_display)
+    max_text_w = int(width * dt.SUBTITLE_MAX_WIDTH_FRAC) - 2 * dt.SUBTITLE_PAD_X
+
+    lines: list[list[tuple[str, int]]] = []
+    line: list[tuple[str, int]] = []
+    for i, w in enumerate(words):
+        candidate = " ".join(wd for wd, _ in line) + (" " + w if line else w)
+        bb = draw.textbbox((0, 0), candidate, font=font)
+        too_wide = (bb[2] - bb[0]) > max_text_w
+        too_long = len(line) >= max_words_per_line
+        if line and (too_wide or too_long):
+            lines.append(line)
+            line = [(w, i)]
+        else:
+            line.append((w, i))
+    if line:
+        lines.append(line)
+
+    ideal_line_idx = 0
+    for idx, ln in enumerate(lines):
+        if any(gi == active_index for _, gi in ln):
+            ideal_line_idx = idx
+            break
+    line_words = lines[ideal_line_idx] if lines else [(words[active_index], active_index)]
+
+    TRANSITION_DUR = 0.24
+    STABLE_FWD = 0.08
+    STABLE_BWD = 0.18
+    SWITCH_COOLDOWN = 0.26
+    use_transition = transition_state is not None and len(lines) > 1
+    if use_transition and transition_state:
+        cur = transition_state.get("line_idx", -1)
+        req_line = transition_state.get("requested_line_idx", -1)
+        req_start = transition_state.get("request_start_t", 0.0)
+        last_switch = transition_state.get("last_switch_t", -999.0)
+
+        if ideal_line_idx != cur:
+            if cur < 0:
+                transition_state["line_idx"] = ideal_line_idx
+                transition_state["line_words"] = line_words
+                transition_state["requested_line_idx"] = -1
+                transition_state["last_switch_t"] = t
+            elif (t - last_switch) < SWITCH_COOLDOWN:
+                line_words = lines[cur] if 0 <= cur < len(lines) else line_words
+            else:
+                stable = STABLE_BWD if ideal_line_idx < cur else STABLE_FWD
+                if ideal_line_idx == req_line and (t - req_start) >= stable:
+                    old_words = transition_state.get("line_words")
+                    if old_words is None and 0 <= cur < len(lines):
+                        old_words = lines[cur]
+                    transition_state["prev_line_words"] = old_words or line_words
+                    transition_state["line_idx"] = ideal_line_idx
+                    transition_state["line_words"] = line_words
+                    transition_state["switch_t"] = t
+                    transition_state["last_switch_t"] = t
+                    transition_state["requested_line_idx"] = -1
+                else:
+                    if ideal_line_idx != req_line:
+                        transition_state["requested_line_idx"] = ideal_line_idx
+                        transition_state["request_start_t"] = t
+                    line_words = lines[cur] if 0 <= cur < len(lines) else line_words
+
+        prev_words = transition_state.get("prev_line_words")
+        elapsed = t - transition_state.get("switch_t", t)
+        cur_displayed = transition_state.get("line_idx", ideal_line_idx)
+        displayed_words = lines[cur_displayed] if 0 <= cur_displayed < len(lines) else line_words
+        if elapsed < TRANSITION_DUR and prev_words and prev_words != displayed_words:
+            raw_blend = elapsed / TRANSITION_DUR
+            progress = raw_blend * raw_blend * (3.0 - 2.0 * raw_blend)
+            img_prev = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            dr_prev = ImageDraw.Draw(img_prev)
+            _draw_line(img_prev, prev_words, width, height, font, dr_prev)
+            img_next = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            dr_next = ImageDraw.Draw(img_next)
+            _draw_line(img_next, displayed_words, width, height, font, dr_next)
+            return _blend_overlays(np.array(img_prev), np.array(img_next), progress)
+
+    _draw_line(img, line_words, width, height, font, draw)
+    return np.array(img)
+
+
 def render_subtitle_overlay(
     text: str,
     width: int,
@@ -267,14 +715,36 @@ def render_subtitle_overlay(
     word_timestamps: list[tuple[float, float]] | None = None,
     tts_words: list[str] | None = None,
     transition_state: dict | None = None,
+    static_font_divisor: int = 15,
+    timed_plain: bool = False,
+    timed_plain_font_scale: float = 1.0,
 ) -> np.ndarray:
     """
     Full-frame RGBA with a bottom text subtitle (no background pill).
-    All words white, numbers purple. Line transitions crossfade over 0.25s.
+    karaoke=True: одна строка за раз + подсветка «активного» слова (эвристика / Whisper).
+    karaoke=False: весь текст сегмента сразу, меньший шрифт (mode 13).
     """
     img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     if not text or not text.strip():
         return np.array(img)
+
+    if not karaoke and timed_plain:
+        return _render_subtitle_timed_plain(
+            text.strip(),
+            width,
+            height,
+            t,
+            duration,
+            word_timestamps=word_timestamps,
+            tts_words=tts_words,
+            transition_state=transition_state,
+            font_scale=timed_plain_font_scale,
+        )
+
+    if not karaoke:
+        return _render_subtitle_block_static(
+            text.strip(), width, height, font_divisor=static_font_divisor
+        )
 
     draw = ImageDraw.Draw(img)
     font_size = max(56, min(92, width // 9))
@@ -287,18 +757,23 @@ def render_subtitle_overlay(
     ts_for_display: list[tuple[float, float]] | None = None
     if word_timestamps and tts_words and len(tts_words) == len(word_timestamps):
         if len(words) == len(word_timestamps):
-            ts_for_display = word_timestamps
+            ts_for_display = _enforce_monotonic_word_times(list(word_timestamps))
         else:
-            ts_for_display = align_script_to_whisper(words, word_timestamps)
+            ts_for_display = align_script_to_whisper(words, word_timestamps, tts_words)
 
     if not words:
         return np.array(img)
 
-    # Не показывать субтитры до начала первой фразы (озвучка FastGen может начинаться с паузы)
-    if ts_for_display and len(ts_for_display) > 0 and t < ts_for_display[0][0]:
-        return np.array(img)
+    if ts_for_display and len(ts_for_display) == len(words):
+        ts_for_display = _enforce_min_word_span(ts_for_display, float(duration))
 
-    active_index = _active_word_index(t, duration, words, ts_for_display)
+    preroll = bool(
+        ts_for_display and len(ts_for_display) > 0 and t < float(ts_for_display[0][0])
+    )
+    if preroll:
+        active_index = 0
+    else:
+        active_index = _active_word_index(t, duration, words, ts_for_display)
 
     max_text_w = int(width * dt.SUBTITLE_MAX_WIDTH_FRAC) - 2 * dt.SUBTITLE_PAD_X
 
@@ -403,7 +878,7 @@ def render_static_quote_caption_overlay(
     if not text or not text.strip():
         return np.array(img)
     draw = ImageDraw.Draw(img)
-    font_size = max(30, min(54, width // 16))
+    font_size = _mode4_quote_font_size(width)
     font = load_ui_font(font_size, bold=True)
     stroke_w = 5
     max_text_w = int(width * dt.SUBTITLE_MAX_WIDTH_FRAC) - 2 * dt.SUBTITLE_PAD_X
@@ -448,6 +923,69 @@ def render_static_quote_caption_overlay(
     return arr
 
 
+def render_quote_header_overlay(
+    text: str,
+    width: int,
+    height: int,
+    t: float,
+    duration: float,
+    *,
+    fade_in: float = 0.35,
+    top_frac: float = 0.05,
+) -> np.ndarray:
+    """
+    Фиксированный заголовок у верхнего края (Mode 4): крупный жёлтый текст с тёмной обводкой.
+    """
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    if not text or not text.strip():
+        return np.array(img)
+    draw = ImageDraw.Draw(img)
+    # Заметно крупнее обычных субтитров; на узком 9:16 — верхняя граница ~ширина/7
+    font_size = max(46, min(92, width // 7))
+    font = load_ui_font(font_size, bold=True)
+    stroke_w = max(5, font_size // 9)
+    max_text_w = int(width * dt.SUBTITLE_MAX_WIDTH_FRAC) - 2 * dt.SUBTITLE_PAD_X
+    lines = _wrap_text(text.strip(), font, max_text_w, draw, stroke_width=stroke_w)
+    if not lines:
+        return np.array(img)
+
+    line_heights: list[int] = []
+    for line in lines:
+        bb = draw.textbbox((0, 0), line, font=font, stroke_width=stroke_w)
+        line_heights.append(bb[3] - bb[1])
+    line_gap = max(12, font_size // 5) + stroke_w
+    max_lh = max(line_heights)
+    n = len(lines)
+    total_h = n * max_lh + (n - 1) * line_gap
+    y0 = max(dt.SUBTITLE_PAD_Y, int(height * top_frac))
+    y_band = y0
+
+    alpha_m = min(1.0, t / fade_in) if fade_in > 0 else 1.0
+    # Яркий жёлтый как акцент (тот же золотой токен, что караоке-слово)
+    yellow_fill = tuple(dt.SUB_GOLD[:3])
+
+    for line, lh in zip(lines, line_heights):
+        bb = draw.textbbox((0, 0), line, font=font, stroke_width=stroke_w)
+        line_w = bb[2] - bb[0]
+        x = (width - line_w) // 2
+        y_text = y_band + (max_lh - lh) // 2
+        draw.text(
+            (x, y_text),
+            line,
+            font=font,
+            fill=yellow_fill,
+            stroke_width=stroke_w,
+            stroke_fill=(24, 18, 6, 255),
+        )
+        y_band += max_lh + line_gap
+
+    arr = np.array(img)
+    if alpha_m < 1.0:
+        arr = arr.copy()
+        arr[:, :, 3] = (arr[:, :, 3].astype(np.float32) * alpha_m).astype(np.uint8)
+    return arr
+
+
 def render_mode4_quote_karaoke_overlay(
     quote_text: str,
     author_name: str | None,
@@ -458,12 +996,13 @@ def render_mode4_quote_karaoke_overlay(
     word_timestamps: list[tuple[float, float]] | None,
     tts_words: list[str] | None,
     *,
-    fade_in: float = 0.45,
+    fade_in: float = 0.22,
     bottom_frac: float = 0.88,
 ) -> np.ndarray:
     """
     Mode 4: многострочная цитата у нижнего края; текущее слово — SUB_GOLD, остальные белые.
     Таймкоды Whisper по дорожке FastGen (word_timestamps + tts_words → align к словам скрипта).
+    До первого таймкода Whisper текст показывается целиком белым (без «пустого» начала фрагмента).
     Автор под цитатой отдельной строкой (без караоке).
     """
     img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
@@ -472,7 +1011,7 @@ def render_mode4_quote_karaoke_overlay(
         return np.array(img)
 
     draw = ImageDraw.Draw(img)
-    font_size = max(30, min(54, width // 16))
+    font_size = _mode4_quote_font_size(width)
     font = load_ui_font(font_size, bold=True)
     stroke_w = 5
 
@@ -482,17 +1021,15 @@ def render_mode4_quote_karaoke_overlay(
     ts_for_display: list[tuple[float, float]] | None = None
     if word_timestamps and tts_words and len(tts_words) == len(word_timestamps):
         if len(words) == len(word_timestamps):
-            ts_for_display = word_timestamps
+            ts_for_display = _enforce_monotonic_word_times(list(word_timestamps))
         else:
-            ts_for_display = align_script_to_whisper(words, word_timestamps)
+            ts_for_display = align_script_to_whisper(words, word_timestamps, tts_words)
 
     if not words:
         return np.array(img)
 
-    if ts_for_display and len(ts_for_display) > 0 and t < ts_for_display[0][0]:
-        return np.array(img)
-
-    active_index = _active_word_index(t, duration, words, ts_for_display)
+    if ts_for_display and len(ts_for_display) == len(words):
+        ts_for_display = _enforce_min_word_span(ts_for_display, float(duration))
 
     max_text_w = int(width * dt.SUBTITLE_MAX_WIDTH_FRAC) - 2 * dt.SUBTITLE_PAD_X
     lines: list[list[tuple[str, int]]] = []
@@ -532,37 +1069,30 @@ def render_mode4_quote_karaoke_overlay(
     total_quote_h = n * max_lh + (n - 1) * line_gap if n else 0
     total_h = total_quote_h + (author_gap + author_h if author_h else 0)
     bottom_y = int(height * bottom_frac)
-    y_band = max(dt.SUBTITLE_PAD_Y, bottom_y - total_h)
+    y_band0 = max(dt.SUBTITLE_PAD_Y, bottom_y - total_h)
 
-    # Позиции слов через textlength префиксов — как у одной строки с пробелами:
-    # одинаковые зазоры + кернинг; textbbox по словам + отдельный пробел даёт «рваные» промежутки.
-    def _word_start_x(words_row: list[str], j: int) -> float:
-        if j <= 0:
-            return 0.0
-        prefix = " ".join(words_row[0:j]) + " "
-        return _pil_text_advance(draw, font, prefix, stroke_w)
+    preroll = bool(
+        ts_for_display
+        and len(ts_for_display) > 0
+        and t < float(ts_for_display[0][0])
+    )
+    if preroll:
+        active_index: int | None = None
+    else:
+        active_index = _active_word_index(t, duration, words, ts_for_display)
 
-    for li, (ln, lh) in enumerate(zip(lines, line_heights)):
-        words_line = [w for w, _ in ln]
-        disp = " ".join(words_line)
-        total_line_w = _pil_text_advance(draw, font, disp, stroke_w)
-        x0 = int(round((width - total_line_w) / 2.0))
-        y_text = y_band + (max_lh - lh) // 2
-        for j, (word, wi) in enumerate(ln):
-            cx = x0 + int(round(_word_start_x(words_line, j)))
-            is_act = wi == active_index
-            fill = dt.SUB_GOLD if is_act else dt.SUB_WHITE
-            if _NUMBER_RE.search(word) and not is_act:
-                fill = dt.SUB_PURPLE
-            draw.text(
-                (cx, y_text),
-                word,
-                font=font,
-                fill=fill,
-                stroke_width=stroke_w,
-                stroke_fill=(20, 12, 30, 245),
-            )
-        y_band += max_lh + (line_gap if li < len(lines) - 1 else 0)
+    y_band = _draw_mode4_quote_lines(
+        draw,
+        lines,
+        line_heights,
+        max_lh,
+        line_gap,
+        width,
+        font,
+        stroke_w,
+        y_band0,
+        active_index,
+    )
 
     if author_line:
         aw = _pil_text_advance(draw, font, author_line, stroke_w)

@@ -23,9 +23,18 @@ function quoteCaptionForVideo(v) {
   return ru || en;
 }
 
-export default function VideoCard({ video, onClick, onDelete, youtubeStatus = null, youtubeLoading = false }) {
+export default function VideoCard({
+  video,
+  onClick,
+  onOpenProgress = null,
+  onDelete,
+  youtubeStatus = null,
+  youtubeLoading = false,
+  onListRefresh = null,
+}) {
   const [hovered, setHovered] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [m5AssembleBusy, setM5AssembleBusy] = useState(false);
   const [showPublishing, setShowPublishing] = useState(false);
   const [ytPrivacy, setYtPrivacy] = useState('public');
   const [ytLang, setYtLang] = useState(() =>
@@ -235,6 +244,42 @@ export default function VideoCard({ video, onClick, onDelete, youtubeStatus = nu
           <span className="text-xs text-[#71717a]">{video.size_mb ?? '—'} MB</span>
           <span className="text-[10px] text-[#52525b]">{formatDate(video.created_at)}</span>
         </div>
+
+        {video.mode5_can_assemble && (
+          <div className="grid grid-cols-1 gap-1.5">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (!video.session_id) return;
+                onOpenProgress?.(video.session_id);
+              }}
+              className="w-full flex items-center justify-center gap-1.5 text-xs font-semibold py-2 px-2 rounded-lg border border-[#3f3f46] text-[#d4d4d8] hover:bg-[#1f1f2a]"
+            >
+              Открыть редактирование фрагментов
+            </button>
+            <button
+              type="button"
+              onClick={async (e) => {
+                e.stopPropagation();
+                if (!video.session_id || m5AssembleBusy) return;
+                setM5AssembleBusy(true);
+                try {
+                  await api.mode5Assemble(video.session_id);
+                  onListRefresh?.();
+                } catch (err) {
+                  alert(err.message || 'Не удалось склеить видео');
+                } finally {
+                  setM5AssembleBusy(false);
+                }
+              }}
+              disabled={m5AssembleBusy}
+              className="w-full flex items-center justify-center gap-1.5 text-xs font-semibold py-2 px-2 rounded-lg bg-emerald-600/90 hover:bg-emerald-500 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {m5AssembleBusy ? 'Монтаж…' : `Склеить в одно видео${video.mode5_preview_count ? ` (${video.mode5_preview_count})` : ''}`}
+            </button>
+          </div>
+        )}
         
         {/* Publishing metadata button */}
         {video.publishing && (
@@ -264,7 +309,7 @@ export default function VideoCard({ video, onClick, onDelete, youtubeStatus = nu
                 {/* Title RU */}
                 <div>
                   <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
-                    Название
+                    Название (основное)
                   </label>
                   <div className="flex gap-1.5">
                     <input
@@ -282,6 +327,33 @@ export default function VideoCard({ video, onClick, onDelete, youtubeStatus = nu
                     </button>
                   </div>
                 </div>
+                {Array.isArray(video.publishing.ru.title_variants) && video.publishing.ru.title_variants.length > 0 && (
+                  <div>
+                    <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
+                      Ещё варианты заголовка (A / B / C)
+                    </label>
+                    <div className="space-y-1.5">
+                      {video.publishing.ru.title_variants.map((t, i) => (
+                        <div key={i} className="flex gap-1.5 items-center">
+                          <span className="text-[10px] text-[#52525b] w-5 shrink-0 font-mono">{String.fromCharCode(65 + i)}</span>
+                          <input
+                            type="text"
+                            value={t || ''}
+                            readOnly
+                            className="flex-1 bg-[#0d0d14] border border-[#27272f] rounded px-2 py-1 text-xs text-white min-w-0"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => copyToClipboard(t || '', `Заголовок ${String.fromCharCode(65 + i)}`)}
+                            className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2 py-1 rounded transition-colors shrink-0"
+                          >
+                            Копия
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 
                 {/* Description RU */}
                 <div>
@@ -326,6 +398,28 @@ export default function VideoCard({ video, onClick, onDelete, youtubeStatus = nu
                     </button>
                   </div>
                 </div>
+                {video.publishing.ru.first_comment ? (
+                  <div>
+                    <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
+                      Первый комментарий (закрепить)
+                    </label>
+                    <div className="flex gap-1.5">
+                      <textarea
+                        value={video.publishing.ru.first_comment || ''}
+                        readOnly
+                        rows={2}
+                        className="flex-1 bg-[#0d0d14] border border-[#27272f] rounded px-2 py-1 text-xs text-white resize-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => copyToClipboard(video.publishing.ru.first_comment || '', 'Первый комментарий')}
+                        className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2 py-1 rounded transition-colors self-start"
+                      >
+                        Копия
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
               </div>
             )}
             
@@ -340,7 +434,7 @@ export default function VideoCard({ video, onClick, onDelete, youtubeStatus = nu
                 {/* Title EN */}
                 <div>
                   <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
-                    Title
+                    Title (primary)
                   </label>
                   <div className="flex gap-1.5">
                     <input
@@ -358,6 +452,33 @@ export default function VideoCard({ video, onClick, onDelete, youtubeStatus = nu
                     </button>
                   </div>
                 </div>
+                {Array.isArray(video.publishing.en.title_variants) && video.publishing.en.title_variants.length > 0 && (
+                  <div>
+                    <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
+                      More title options (A / B / C)
+                    </label>
+                    <div className="space-y-1.5">
+                      {video.publishing.en.title_variants.map((t, i) => (
+                        <div key={i} className="flex gap-1.5 items-center">
+                          <span className="text-[10px] text-[#52525b] w-5 shrink-0 font-mono">{String.fromCharCode(65 + i)}</span>
+                          <input
+                            type="text"
+                            value={t || ''}
+                            readOnly
+                            className="flex-1 bg-[#0d0d14] border border-[#27272f] rounded px-2 py-1 text-xs text-white min-w-0"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => copyToClipboard(t || '', `Title ${String.fromCharCode(65 + i)}`)}
+                            className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2 py-1 rounded transition-colors shrink-0"
+                          >
+                            Copy
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 
                 {/* Description EN */}
                 <div>
@@ -402,6 +523,28 @@ export default function VideoCard({ video, onClick, onDelete, youtubeStatus = nu
                     </button>
                   </div>
                 </div>
+                {video.publishing.en.first_comment ? (
+                  <div>
+                    <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1">
+                      First comment (pin)
+                    </label>
+                    <div className="flex gap-1.5">
+                      <textarea
+                        value={video.publishing.en.first_comment || ''}
+                        readOnly
+                        rows={2}
+                        className="flex-1 bg-[#0d0d14] border border-[#27272f] rounded px-2 py-1 text-xs text-white resize-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => copyToClipboard(video.publishing.en.first_comment || '', 'First comment')}
+                        className="text-[10px] bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-2 py-1 rounded transition-colors self-start"
+                      >
+                        Copy
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
               </div>
             )}
           </div>

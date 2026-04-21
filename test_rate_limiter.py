@@ -61,13 +61,13 @@ def test_limit_validation():
     limiter = get_rate_limiter()
     
     # Valid limits
-    for valid_limit in [1, 2, 3]:
+    for valid_limit in [0, 1, 2, 3, 5, 10, 15, 30]:
         result = limiter.set_limit(valid_limit)
         assert result, f"Should accept valid limit {valid_limit}"
         print(f"✓ Valid limit {valid_limit} accepted")
     
     # Invalid limits
-    for invalid_limit in [0, 4, 5, -1]:
+    for invalid_limit in [4, 6, 7, 20, -1, 100]:
         result = limiter.set_limit(invalid_limit)
         assert not result, f"Should reject invalid limit {invalid_limit}"
         print(f"✓ Invalid limit {invalid_limit} rejected")
@@ -114,6 +114,24 @@ def test_get_remaining():
     print(f"✓ After 3 increments: {remaining}")
 
 
+def test_unlimited():
+    """Limit 0: always allowed; remaining is None."""
+    print("\n=== Test 5: Unlimited (limit 0) ===")
+    limiter = get_rate_limiter()
+    assert limiter.set_limit(0), "set 0"
+    limiter.reset_usage()
+    allowed, reason = limiter.check_allowed()
+    assert allowed, reason
+    for _ in range(20):
+        assert limiter.increment_usage(), "increment should always succeed"
+    st = limiter.get_status()
+    assert st["limit"] == 0
+    assert st["remaining"] is None
+    assert st.get("unlimited") is True
+    assert limiter.get_remaining() is None
+    print("✓ Unlimited mode OK")
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("Rate Limiter Tests")
@@ -124,6 +142,7 @@ if __name__ == "__main__":
         test_limit_validation()
         test_hour_key_generation()
         test_get_remaining()
+        test_unlimited()
         
         print("\n" + "=" * 60)
         print("✅ All tests passed!")

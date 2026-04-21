@@ -1,145 +1,1917 @@
 """
-Mode 5 Pipeline — Длинные видео (~1 час).
-
-Шаги:
-  1. Long-form Scenario Writer — тема → длинный сценарий с сегментами и точками смены картинки
-  2. Image Generator — генерирует изображения только для сегментов с image_prompt
-  3. TTS — озвучка каждого сегмента (RU или EN)
-  4. Video Assembler — склейка: изображение + аудио по сегментам, без субтитров
+Mode 5 Pipeline — ручной long-form текст -> TTS (VoiceAPI) по чанкам ->
+окна ~30 с -> картинки в едином стиле -> превью по чанкам -> review/regenerate -> финальная склейка.
 """
 
 from __future__ import annotations
 
 import asyncio
 import functools
+import json
+import random
+import threading
+from datetime import datetime, timezone
+import re
+import shutil
+import subprocess
 import time
+import wave
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
-from agents.content_generator.fastgen_scraper import generate_images_fastgen
-from agents.video_editor.tts import synthesize_all
+from agents.video_editor.music_gen import generate_background_music
+from agents.video_editor.tts import plain_text_for_voiceapi_tts, synthesize
+from agents.video_editor.whisper_timestamps import get_word_timestamps_from_audio_path
 from config import settings
-from modes.mode5.scenario_writer import run_long_form_scenario_writer
+from modes.mode13.pipeline import (
+    VISUAL_POLICY_LONGFORM_FLEX,
+    _build_image_prompt_async,
+    _derive_style_suffix,
+    _ffmpeg_concat,
+    _generate_one_image,
+    _text_for_window,
+    _windows_for_duration,
+)
+from modes.mode13.visual_bible import derive_mode5_visual_bible, mode5_art_direction_tail_horizontal
+from modes.mode5.facts50_visual_style import derive_facts50_unified_style_suffix
 from modes.mode5.video_assembler import assemble_mode5_video
+from utils.ffmpeg_resolve import require_ffmpeg_or_raise, resolve_ffmpeg_executable
+from utils.wav_pcm import slice_wav_time_range
+
+MODE5_PLAN = "mode5_plan.json"
+
+MODE5_CKPT_STUB = "stub"
+MODE5_CKPT_AFTER_TTS = "after_tts"
+MODE5_CKPT_AFTER_IMAGES = "after_images"
+MODE5_CKPT_AFTER_SLICES = "after_slices"
+MODE5_CKPT_AFTER_PREVIEWS = "after_previews"
+MODE5_CKPT_COMPLETED = "completed"
+
+_mode5_plan_io_locks: dict[str, threading.Lock] = {}
+
+
+def _mode5_plan_io_lock(session_id: str) -> threading.Lock:
+    if session_id not in _mode5_plan_io_locks:
+        _mode5_plan_io_locks[session_id] = threading.Lock()
+    return _mode5_plan_io_locks[session_id]
+
+
+def _touch_mode5_checkpoint(plan: dict[str, Any], stage: str, **extra: Any) -> None:
+    payload: dict[str, Any] = {
+        "stage": stage,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "schema": 1,
+    }
+    if extra:
+        payload["extra"] = {k: v for k, v in extra.items() if v is not None}
+    plan["pipeline_checkpoint"] = payload
+
+
+def _mode5_visual_policy(sub_mode: str | None) -> str:
+    sm = (sub_mode or "").strip().lower()
+    if sm == "facts50":
+        return "facts50"
+    if sm == "book_night":
+        return "book_night"
+    if sm == "outline":
+        return VISUAL_POLICY_LONGFORM_FLEX
+    return "default"
+CHUNK_SEC_DEFAULT = 300
+SEG_SEC_DEFAULT = 15
+_WORDS_PER_MIN = {"ru": 135.0, "en": 150.0}
+_MIN_CHUNK_TEXT_LEN = 80
+_MIN_CHUNK_TEXT_LEN_FACTS50 = 40
+_MODE5_OUTPUT_FORMAT = "horizontal"
+_MODE5_IMAGE_ASPECT_RATIO = "16:9"
+
+
+def _mode5_parallel_images_cap() -> int:
+    v = int(getattr(settings, "mode5_max_parallel_images", 10) or 10)
+    return max(1, min(32, v))
+
+
+def _clamp_mode5_parallel_images(value: int | None) -> int:
+    cap = _mode5_parallel_images_cap()
+    if value is None:
+        return cap
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return cap
+    v = max(1, v)
+    return min(cap, v)
+
+
+def _session_dir(session_id: str) -> Path:
+    return settings.videos_dir / session_id
+
+
+def _mode5_dir(session_id: str) -> Path:
+    d = _session_dir(session_id) / "clips" / "mode5"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _write_mode5_placeholder_image(path: Path, *, aspect_ratio: str = _MODE5_IMAGE_ASPECT_RATIO) -> None:
+    """
+    Last-resort fallback: write a neutral placeholder frame so one failed image does not
+    abort the entire already-generated pipeline.
+    """
+    ff = resolve_ffmpeg_executable()
+    if not ff:
+        raise RuntimeError("ffmpeg not found for mode5 placeholder image fallback")
+    size = "1280x720" if str(aspect_ratio).strip() == "16:9" else "720x1280"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        ff,
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        f"color=c=#242833:s={size}",
+        "-frames:v",
+        "1",
+        str(path),
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _rel_session(session_root: Path, path: Path) -> str:
+    return path.resolve().relative_to(session_root.resolve()).as_posix()
+
+
+def detect_mode5_language(text: str, preferred: str | None = None) -> str:
+    pref = (preferred or "").strip().lower()
+    if pref in {"ru", "en"}:
+        return pref
+    sample = " ".join((text or "").split())[:4000]
+    if not sample:
+        return "ru"
+    cyr = sum(1 for ch in sample if "\u0400" <= ch <= "\u04ff")
+    lat = sum(1 for ch in sample.lower() if "a" <= ch <= "z")
+    if cyr >= 8 and cyr >= lat:
+        return "ru"
+    if lat >= 8 and lat > cyr:
+        return "en"
+    common_ru = (" и ", " что ", " это ", " как ", " для ", " его ", " она ", " был ", " были ")
+    common_en = (" the ", " and ", " of ", " to ", " in ", " was ", " were ", " with ", " that ")
+    low = f" {sample.lower()} "
+    ru_hits = sum(low.count(token) for token in common_ru)
+    en_hits = sum(low.count(token) for token in common_en)
+    return "en" if en_hits > ru_hits else "ru"
+
+
+def load_mode5_plan(session_id: str) -> dict[str, Any]:
+    p = _session_dir(session_id) / MODE5_PLAN
+    if not p.is_file():
+        raise FileNotFoundError(f"{MODE5_PLAN} not found for session {session_id}")
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+def _save_mode5_plan(
+    session_id: str,
+    plan: dict[str, Any],
+    *,
+    checkpoint: str | None = None,
+    **checkpoint_extra: Any,
+) -> None:
+    """Atomic JSON write; optional checkpoint touch in the same critical section (thread-safe)."""
+    with _mode5_plan_io_lock(session_id):
+        if checkpoint is not None:
+            _touch_mode5_checkpoint(plan, checkpoint, **checkpoint_extra)
+        root = _session_dir(session_id)
+        root.mkdir(parents=True, exist_ok=True)
+        dst = root / MODE5_PLAN
+        tmp = root / f".{MODE5_PLAN}.tmp"
+        body = json.dumps(plan, ensure_ascii=False, indent=2)
+        tmp.write_text(body, encoding="utf-8")
+        tmp.replace(dst)
+
+
+def _checkpoint_stage(plan: dict[str, Any]) -> str | None:
+    ck = plan.get("pipeline_checkpoint")
+    if not isinstance(ck, dict):
+        return None
+    st = ck.get("stage")
+    return str(st).strip() if st is not None else None
+
+
+def _mode5_chunk_images_complete(session_root: Path, ch: dict[str, Any]) -> bool:
+    for seg in ch.get("segments") or []:
+        rel = str(seg.get("image") or "").strip()
+        if not rel:
+            return False
+        if not (session_root / rel).is_file():
+            return False
+    return True
+
+
+def _mode5_chunk_slices_complete(session_root: Path, ch: dict[str, Any]) -> bool:
+    for seg in ch.get("segments") or []:
+        rel = str(seg.get("audio") or "").strip()
+        if not rel:
+            continue
+        if not (session_root / rel).is_file():
+            return False
+    return True
+
+
+def _all_chunk_previews_on_disk(session_root: Path, chunks: list[dict[str, Any]]) -> bool:
+    if not chunks:
+        return False
+    for ch in chunks:
+        rel = str(ch.get("preview_relpath") or "").strip()
+        if not rel or not (session_root / rel).is_file():
+            return False
+    return True
+
+
+def _mode5_segment_image_counts(
+    session_root: Path, plan: dict[str, Any]
+) -> tuple[int, int, int, int]:
+    """
+    Returns (segments_with_image_file, segments_total, chunks_fully_imaged, chunks_with_any_segment).
+    """
+    chunks = list(plan.get("chunks") or [])
+    seg_done = 0
+    seg_total = 0
+    chunks_with_segs = 0
+    chunks_fully_imaged = 0
+    for ch in chunks:
+        segs = list(ch.get("segments") or [])
+        if not segs:
+            continue
+        chunks_with_segs += 1
+        ok = True
+        for seg in segs:
+            seg_total += 1
+            img = str(seg.get("image") or "").strip()
+            if img and (session_root / img).is_file():
+                seg_done += 1
+            else:
+                ok = False
+        if ok:
+            chunks_fully_imaged += 1
+    return seg_done, seg_total, chunks_fully_imaged, chunks_with_segs
+
+
+def _mode5_previews_on_disk_count(session_root: Path, chunks: list[dict[str, Any]]) -> int:
+    n = 0
+    for ch in chunks:
+        rel = str(ch.get("preview_relpath") or "").strip()
+        if rel and (session_root / rel).is_file():
+            n += 1
+    return n
+
+
+def _mode5_progress_hint_payload(session_root: Path, plan: dict[str, Any]) -> dict[str, Any]:
+    """Human-readable progress for /review-state while previews or final video are not done."""
+    final_mp4 = session_root / "video_mode5.mp4"
+    if final_mp4.is_file():
+        return {
+            "mode5_progress_hint": None,
+            "mode5_segments_imaged": None,
+            "mode5_segments_total": None,
+            "mode5_chunks_imaged": None,
+            "mode5_chunks_with_segments": None,
+            "mode5_previews_on_disk": None,
+        }
+    chunks = list(plan.get("chunks") or [])
+    n_ch = len(chunks)
+    seg_done, seg_total, ch_img, ch_w_seg = _mode5_segment_image_counts(session_root, plan)
+    prev_done = _mode5_previews_on_disk_count(session_root, chunks)
+    ck = plan.get("pipeline_checkpoint")
+    stage = (ck.get("stage") or "").strip() if isinstance(ck, dict) else ""
+
+    hint: str | None = None
+    if seg_total == 0:
+        if stage == MODE5_CKPT_STUB:
+            hint = "Параллельная озвучка чанков (TTS)…"
+        elif stage == MODE5_CKPT_AFTER_TTS:
+            hint = "Озвучка на диске, готовятся сегменты и картинки…"
+        elif n_ch > 0:
+            hint = "Готовится разметка и иллюстрации…"
+    elif seg_done < seg_total:
+        hint = (
+            f"Идёт генерация картинок: {seg_done} из {seg_total} кадров "
+            f"(частей с полным набором кадров: {ch_img} из {ch_w_seg})…"
+        )
+    elif n_ch > 0 and prev_done < n_ch:
+        hint = "Сборка превью по частям (короткие mp4 для проверки)…"
+
+    return {
+        "mode5_progress_hint": hint,
+        "mode5_segments_imaged": seg_done,
+        "mode5_segments_total": seg_total,
+        "mode5_chunks_imaged": ch_img,
+        "mode5_chunks_with_segments": ch_w_seg,
+        "mode5_previews_on_disk": prev_done,
+    }
+
+
+def mode5_resume_snapshot_for_plan(session_id: str, plan: dict[str, Any]) -> dict[str, Any]:
+    """Whether POST continue-generation can proceed (facts50, TTS on disk, work left before review-ready files)."""
+    sm = (plan.get("sub_mode") or "").strip().lower()
+    stage = _checkpoint_stage(plan)
+    if sm != "facts50":
+        return {"can_resume": False, "stage": stage, "reason": "not_facts50"}
+    root = _session_dir(session_id)
+    final_mp4 = root / "video_mode5.mp4"
+    if final_mp4.is_file():
+        return {"can_resume": False, "stage": stage, "reason": "final_video_exists"}
+    chunks = list(plan.get("chunks") or [])
+    if not chunks:
+        return {"can_resume": False, "stage": stage, "reason": "no_chunks"}
+    for ch in chunks:
+        wav = str(ch.get("chunk_audio_wav") or "").strip()
+        if not wav or not (root / wav).is_file():
+            return {"can_resume": False, "stage": stage, "reason": "missing_chunk_wav"}
+    if _all_chunk_previews_on_disk(root, chunks):
+        return {"can_resume": False, "stage": stage or MODE5_CKPT_COMPLETED, "reason": "previews_complete"}
+    if stage == MODE5_CKPT_STUB:
+        return {"can_resume": False, "stage": stage, "reason": "stub_only_wait_for_tts"}
+    return {"can_resume": True, "stage": stage, "reason": ""}
+
+
+def mode5_resume_snapshot(session_id: str) -> dict[str, Any]:
+    try:
+        plan = load_mode5_plan(session_id)
+    except FileNotFoundError:
+        return {"can_resume": False, "stage": None, "reason": "plan_not_found"}
+    return mode5_resume_snapshot_for_plan(session_id, plan)
+
+
+def _attach_mode5_resume_flags_from_plan(
+    session_id: str, plan: dict[str, Any], payload: dict[str, Any]
+) -> dict[str, Any]:
+    snap = mode5_resume_snapshot_for_plan(session_id, plan)
+    out = {**payload}
+    out["mode5_can_resume"] = bool(snap.get("can_resume"))
+    out["mode5_checkpoint_stage"] = snap.get("stage")
+    out["mode5_resume_reason"] = snap.get("reason") or None
+    return out
+
+
+def _attach_mode5_resume_flags(session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    plan = load_mode5_plan(session_id)
+    return _attach_mode5_resume_flags_from_plan(session_id, plan, payload)
+
+
+def _wav_duration_sec(path: Path) -> float:
+    with wave.open(str(path), "rb") as wf:
+        frames = wf.getnframes()
+        rate = wf.getframerate()
+    if rate <= 0:
+        raise ValueError(f"Invalid WAV framerate: {path}")
+    return frames / float(rate)
+
+
+def _convert_audio_to_wav(src: Path, dst: Path) -> None:
+    ff = resolve_ffmpeg_executable()
+    if not ff:
+        raise RuntimeError("ffmpeg not found for mode 5 audio conversion")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        ff,
+        "-y",
+        "-i",
+        str(src),
+        "-ac",
+        "1",
+        "-ar",
+        "22050",
+        "-f",
+        "wav",
+        str(dst),
+    ]
+    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=3600)
+
+
+def _split_into_sentences(text: str) -> list[str]:
+    compact = re.sub(r"\r\n?", "\n", text or "").strip()
+    if not compact:
+        return []
+    blocks = [b.strip() for b in re.split(r"\n{2,}", compact) if b.strip()]
+    out: list[str] = []
+    for block in blocks:
+        parts = re.split(r"(?<=[.!?…])\s+(?=[A-ZА-ЯЁ0-9\"'«(])", block)
+        for part in parts:
+            p = re.sub(r"\s+", " ", part).strip()
+            if p:
+                out.append(p)
+    return out
+
+
+def _fallback_word_chunks(text: str, approx_words: int) -> list[str]:
+    words = [w for w in re.split(r"\s+", text.strip()) if w]
+    if not words:
+        return []
+    chunk_words = max(80, approx_words)
+    out: list[str] = []
+    i = 0
+    while i < len(words):
+        part = words[i : i + chunk_words]
+        out.append(" ".join(part).strip())
+        i += chunk_words
+    return out
+
+
+def _estimate_chunks_from_script(text: str, *, language: str, chunk_seconds: int) -> list[str]:
+    sents = _split_into_sentences(text)
+    wpm = _WORDS_PER_MIN.get((language or "ru").strip().lower(), 140.0)
+    approx_words = max(120, int(round(chunk_seconds * wpm / 60.0)))
+    if not sents:
+        return _fallback_word_chunks(text, approx_words)
+    chunks: list[str] = []
+    cur: list[str] = []
+    cur_words = 0
+    for sent in sents:
+        words_n = len(sent.split())
+        if cur and cur_words + words_n > approx_words:
+            chunks.append(" ".join(cur).strip())
+            cur = [sent]
+            cur_words = words_n
+        else:
+            cur.append(sent)
+            cur_words += words_n
+    if cur:
+        chunks.append(" ".join(cur).strip())
+    merged: list[str] = []
+    for chunk in chunks:
+        if merged and len(chunk) < _MIN_CHUNK_TEXT_LEN:
+            merged[-1] = f"{merged[-1]} {chunk}".strip()
+        else:
+            merged.append(chunk)
+    return merged or [text.strip()]
+
+
+def _fallback_window_texts(text: str, windows: list[tuple[float, float]]) -> list[str]:
+    words = [w for w in re.split(r"\s+", text.strip()) if w]
+    if not windows:
+        return []
+    if not words:
+        return [""] * len(windows)
+    per = max(1, len(words) // len(windows))
+    out: list[str] = []
+    pos = 0
+    for i in range(len(windows)):
+        if i == len(windows) - 1:
+            block = words[pos:]
+        else:
+            block = words[pos : pos + per]
+        pos += per
+        out.append(" ".join(block).strip())
+    return out
+
+
+def _segments_for_chunk(
+    chunk_text: str,
+    duration_sec: float,
+    seg_sec: int,
+    wts: list[tuple[float, float]] | None,
+    words: list[str] | None,
+) -> list[dict[str, Any]]:
+    windows = _windows_for_duration(duration_sec, float(seg_sec))
+    if not windows:
+        return []
+    texts: list[str] = []
+    if wts and words:
+        texts = [_text_for_window(wts, words, t0, t1) for t0, t1 in windows]
+    if not any(t.strip() for t in texts):
+        texts = _fallback_window_texts(chunk_text, windows)
+    out: list[dict[str, Any]] = []
+    for si, ((t0, t1), txt) in enumerate(zip(windows, texts)):
+        out.append({"s": si, "t0": t0, "t1": t1, "text": txt.strip()})
+    return out
+
+
+def _segments_for_facts50_chunk(
+    fact_hint: str,
+    chunk_text: str,
+    duration_sec: float,
+    *,
+    overlay_title: str,
+) -> list[dict[str, Any]]:
+    t1 = max(0.05, float(duration_sec))
+    text = (fact_hint or "").strip() or (chunk_text or "").strip()
+    return [{"s": 0, "t0": 0.0, "t1": t1, "text": text, "overlay_title": overlay_title}]
+
+
+def _fact_overlay_title(index: int) -> str:
+    """Подпись на кадре: всегда латиница Fact 1, Fact 2, … (независимо от языка озвучки)."""
+    return f"Fact {index + 1}"
+
+
+def _fact_spoken_prefix(index: int, language: str) -> str:
+    n = index + 1
+    if (language or "").strip().lower() == "ru":
+        return f"Факт {n}."
+    return f"Fact {n}."
+
+
+def _ensure_fact_spoken_prefix(index: int, text: str, language: str) -> str:
+    clean = re.sub(r"\s+", " ", (text or "").strip())
+    prefix = _fact_spoken_prefix(index, language)
+    if not clean:
+        return prefix
+    low = clean.lower()
+    if low.startswith(f"fact {index + 1}".lower()) or low.startswith(f"факт {index + 1}".lower()):
+        return clean
+    return f"{prefix} {clean}".strip()
+
+
+def _facts50_intro_text(topic: str, language: str) -> str:
+    """
+    Короткое настроение + тема. Без формулы «N фактов о …» — её дублирует финал и озвучка фактов.
+    """
+    clean_topic = re.sub(r"\s+", " ", (topic or "").strip())
+    if (language or "").strip().lower() == "ru":
+        return (
+            "Устройтесь поудобнее. Дальше — спокойный рассказ: один факт за другим, без суеты, в темпе для фона и сна. "
+            f"Тема этого выпуска — «{clean_topic}»."
+        )
+    return (
+        "Settle in. What follows is a calm voiceover—one fact after another, unhurried, meant as gentle background. "
+        f"Tonight's thread is: {clean_topic}."
+    )
+
+
+def _facts50_outro_text(_topic: str, language: str) -> str:
+    """
+    Мягкое завершение без повторения той же формулы, что была во вступлении (без «N фактов по теме …»).
+    Тему намеренно не произносим снова — она уже в интро и в теле фактов.
+    """
+    if (language or "").strip().lower() == "ru":
+        variants = [
+            "Спасибо, что были со мной до конца. Пусть останется лёгкое настроение — и спокойной ночи.",
+            "На сегодня у меня всё. Дышите ровно; если захотите продолжения — задайте новую тему, сделаем ещё один выпуск.",
+            "Я поблагодарю за внимание и отпущу вас отдыхать. До встречи в следующем спокойном выпуске.",
+        ]
+        return random.choice(variants)
+    variants = [
+        "Thank you for listening all the way through. Wishing you a quiet night.",
+        "That's all from me for now. Breathe easy—when you want more, pick a new topic and we'll make another episode.",
+        "I'll leave you here. Rest well, and I'll see you in the next calm installment.",
+    ]
+    return random.choice(variants)
+
+
+def _facts50_fact_index_for_chunk(chunks: list[dict[str, Any]], chunk_index: int) -> int:
+    fact_pos = 0
+    for i, ch in enumerate(chunks):
+        if i == chunk_index:
+            return fact_pos
+        if not bool(ch.get("is_intro")) and not bool(ch.get("is_outro")):
+            fact_pos += 1
+    return fact_pos
+
+
+def _chunk_meta_public(ch: dict[str, Any]) -> dict[str, Any]:
+    meta: dict[str, Any] = {
+        "index": ch["index"],
+        "duration_sec": ch["duration_sec"],
+        "num_segments": len(ch.get("segments") or []),
+        "text": ch.get("text", ""),
+        "segments": [
+            {
+                "index": seg.get("s"),
+                "text": seg.get("text", ""),
+                "t0": seg.get("t0"),
+                "t1": seg.get("t1"),
+            }
+            for seg in (ch.get("segments") or [])
+        ],
+    }
+    ct = ch.get("chapter_title")
+    st = ch.get("subchapter_title")
+    if isinstance(ct, str) and ct.strip():
+        meta["chapter_title"] = ct.strip()
+    if isinstance(st, str) and st.strip():
+        meta["subchapter_title"] = st.strip()
+    return meta
+
+
+def _result_payload(
+    session_id: str,
+    plan: dict[str, Any],
+    *,
+    review_ready: bool,
+    final_video: str | None = None,
+) -> dict[str, Any]:
+    chunks = plan.get("chunks") or []
+    preview_filenames = [ch.get("preview_relpath") for ch in chunks if ch.get("preview_relpath")]
+    label = (plan.get("header_title") or "").strip() or f"Ручной long-form ({len(chunks)} частей)"
+    return {
+        "session_id": session_id,
+        "video_path": final_video,
+        "video_paths": [final_video] if final_video else [],
+        "topic": label,
+        "quote_caption": label,
+        "quote_caption_ru": label[:220],
+        "quote_caption_en": None,
+        "trend": None,
+        "report": None,
+        "publishing": None,
+        "mode5_review_ready": review_ready,
+        "mode5_clip_filenames": preview_filenames if review_ready else [],
+        "mode5_chunks_meta": [_chunk_meta_public(ch) for ch in chunks] if review_ready else [],
+        "mode5_sub_mode": plan.get("sub_mode") or "manual",
+    }
+
+
+def _mode5_review_pending_snapshot(session_id: str) -> dict[str, Any]:
+    """Stable JSON when mode5_plan.json is not on disk yet (e.g. before first save)."""
+    plan_shell: dict[str, Any] = {"chunks": [], "sub_mode": None}
+    payload = _result_payload(session_id, plan_shell, review_ready=False)
+    payload["mode5_total_chunks"] = 0
+    payload["mode5_ready_chunks"] = 0
+    payload["mode5_partial"] = True
+    payload["mode5_plan_pending"] = True
+    payload["mode5_progress_hint"] = "Старт конвейера: первый план появится через несколько секунд…"
+    payload["mode5_segments_imaged"] = None
+    payload["mode5_segments_total"] = None
+    payload["mode5_chunks_imaged"] = None
+    payload["mode5_chunks_with_segments"] = None
+    payload["mode5_previews_on_disk"] = None
+    return payload
+
+
+async def _generate_chunk_images(
+    session_id: str,
+    chunk: dict[str, Any],
+    style_suffix: str,
+    *,
+    max_parallel_images: int,
+    refresh_all: bool = False,
+    visual_policy: str = "default",
+    visual_bible: dict[str, Any] | None = None,
+) -> None:
+    session_root = _session_dir(session_id)
+    cap = _mode5_parallel_images_cap()
+    sem = asyncio.Semaphore(max(1, min(cap, int(max_parallel_images or cap))))
+    chunk_index = int(chunk.get("index", -1))
+
+    async def _one(seg: dict[str, Any]) -> tuple[dict[str, Any], BaseException | None]:
+        prompt = await _build_image_prompt_async(
+            seg.get("text", ""),
+            style_suffix,
+            output_format=_MODE5_OUTPUT_FORMAT,
+            extra_suffix="Fresh alternative composition, same art direction." if refresh_all else "",
+            visual_policy=visual_policy,
+            visual_bible=visual_bible,
+        )
+        seg["image_prompt"] = prompt
+        img_path = session_root / seg["image"]
+        async with sem:
+            try:
+                await _generate_one_image(prompt, img_path, aspect_ratio=_MODE5_IMAGE_ASPECT_RATIO)
+                seg["image_fallback"] = False
+                seg.pop("image_fallback_reason", None)
+                return seg, None
+            except Exception as e:
+                return seg, e
+
+    tasks = []
+    for seg in chunk.get("segments") or []:
+        if not seg.get("image"):
+            continue
+        img_path = session_root / seg["image"]
+        if refresh_all or not img_path.is_file():
+            tasks.append(_one(seg))
+    if not tasks:
+        return
+    results = await asyncio.gather(*tasks)
+    failures = [(seg, err) for seg, err in results if err is not None]
+    if not failures:
+        return
+
+    # Try to reuse any already existing image from this chunk/session before hard-failing.
+    session_existing = [
+        p for p in (session_root / "clips" / "mode5").glob("img_c*_s*.jpg") if p.is_file()
+    ]
+    for seg, err in failures:
+        target = session_root / seg["image"]
+        fallback_src: Path | None = None
+        for other in chunk.get("segments") or []:
+            if other is seg or not other.get("image"):
+                continue
+            candidate = session_root / other["image"]
+            if candidate.is_file():
+                fallback_src = candidate
+                break
+        if fallback_src is None and session_existing:
+            fallback_src = session_existing[0]
+        try:
+            if fallback_src is not None:
+                shutil.copy2(fallback_src, target)
+                seg["image_fallback_reason"] = f"copied fallback: {type(err).__name__}"
+            else:
+                _write_mode5_placeholder_image(target, aspect_ratio=_MODE5_IMAGE_ASPECT_RATIO)
+                seg["image_fallback_reason"] = f"placeholder fallback: {type(err).__name__}"
+            seg["image_fallback"] = True
+            logger.warning(
+                f"[Mode5] Image fallback used for chunk={chunk_index} seg={seg.get('s')}: {err}"
+            )
+        except Exception as fallback_err:
+            raise RuntimeError(
+                f"[Mode5] Failed image generation and fallback for chunk={chunk_index} seg={seg.get('s')}: "
+                f"{err}; fallback_error={fallback_err}"
+            ) from fallback_err
+
+
+def _render_chunk_audio_slices(session_id: str, chunk: dict[str, Any]) -> None:
+    session_root = _session_dir(session_id)
+    chunk_wav = session_root / chunk["chunk_audio_wav"]
+    for seg in chunk.get("segments") or []:
+        out_wav = session_root / seg["audio"]
+        slice_wav_time_range(chunk_wav, float(seg["t0"]), float(seg["t1"]), out_wav)
+
+
+def _build_chunk_preview_sync(session_id: str, chunk_index: int, plan: dict[str, Any]) -> Path:
+    session_root = _session_dir(session_id)
+    ch = plan["chunks"][chunk_index]
+    show_sub = bool(plan.get("show_subtitles", True))
+    sm = (plan.get("sub_mode") or "").strip().lower()
+    ci = int(ch.get("index", chunk_index))
+    segment_data: list[tuple[Path, Path]] = []
+    subtitle_texts: list[str] = []
+    top_labels: list[str] = []
+    for seg in ch.get("segments") or []:
+        img = session_root / seg["image"]
+        aud = session_root / seg["audio"]
+        if not img.is_file():
+            raise FileNotFoundError(f"Missing image: {img}")
+        if not aud.is_file():
+            raise FileNotFoundError(f"Missing audio: {aud}")
+        segment_data.append((img, aud))
+        subtitle_texts.append(seg.get("text", "") if show_sub else "")
+        if sm == "facts50" and (bool(ch.get("is_intro")) or bool(ch.get("is_outro"))):
+            label = ""
+        else:
+            label = (seg.get("overlay_title") or "").strip()
+            if sm == "facts50" and not label:
+                fact_idx = _facts50_fact_index_for_chunk(plan.get("chunks") or [], int(ch.get("index", ci)))
+                label = _fact_overlay_title(fact_idx)
+        top_labels.append(label)
+    out_mp4 = session_root / ch["preview_relpath"]
+    out_mp4.parent.mkdir(parents=True, exist_ok=True)
+    use_static = sm == "facts50" and bool(getattr(settings, "mode5_facts50_static_still", True))
+    assemble_mode5_video(
+        segment_data,
+        out_mp4,
+        subtitle_texts=subtitle_texts,
+        top_labels=top_labels,
+        facts50_static_still=use_static,
+    )
+    return out_mp4
+
+
+def _build_all_chunk_previews_parallel(session_id: str, plan: dict[str, Any]) -> None:
+    chunks = plan.get("chunks") or []
+    if not chunks:
+        return
+    workers = max(1, min(8, int(getattr(settings, "mode13_preview_mp4_workers", 4) or 4)))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futs = {
+            executor.submit(_build_chunk_preview_sync, session_id, idx, plan): idx
+            for idx in range(len(chunks))
+        }
+        for fut in as_completed(futs):
+            idx = futs[fut]
+            fut.result()
+            if 0 <= idx < len(chunks):
+                chunks[idx]["preview_ready"] = True
+                # Persist incremental progress so UI can show ready clips while pipeline is still running.
+                _save_mode5_plan(session_id, plan)
+
+
+def _rebuild_mode5_missing_previews(session_id: str, plan: dict[str, Any]) -> int:
+    """
+    Пересобрать только отсутствующие mode5_preview_*.mp4 из уже сохранённых картинок и аудио-слайсов.
+    Нужно после ручного удаления файлов, сбоя диска или прерванной параллельной сборки превью.
+    """
+    session_root = _session_dir(session_id)
+    chunks = plan.get("chunks") or []
+    rebuilt = 0
+    for ci, ch in enumerate(chunks):
+        rel = str(ch.get("preview_relpath") or "").strip()
+        if not rel:
+            continue
+        p = session_root / rel
+        if p.is_file():
+            continue
+        logger.warning("[Mode5] Preview missing for chunk {} — rebuilding {}", ci, p)
+        _build_chunk_preview_sync(session_id, ci, plan)
+        ch["preview_ready"] = True
+        rebuilt += 1
+    if rebuilt:
+        _save_mode5_plan(session_id, plan)
+        logger.info("[Mode5] Rebuilt {} missing chunk preview(s)", rebuilt)
+    return rebuilt
+
+
+async def _generate_mode5_sleep_tail_theme_images(
+    session_id: str,
+    plan: dict[str, Any],
+    topic: str,
+    n: int,
+    fallback_still: Path,
+) -> list[Path]:
+    """One thematic still per sleep-tail segment; fail-soft copies previous or fallback."""
+    style = (plan.get("style_suffix") or "").strip()
+    m5 = _mode5_dir(session_id)
+    out: list[Path] = []
+    prev_ok: Path | None = fallback_still if fallback_still.is_file() else None
+
+    for i in range(n):
+        idx = i + 1
+        dest = m5 / f"sleep_tail_theme_{idx:03d}.jpg"
+        scene_hint = (
+            f"Thematic calm still for background viewing while listening to ambient music. Topic: {topic}. "
+            f"Visual {idx} of {n}: distinct composition, same soft semi-cartoon documentary mood. "
+            "No text, no letters, no subtitles."
+        )
+        try:
+            prompt = await _build_image_prompt_async(
+                scene_hint,
+                style,
+                output_format=_MODE5_OUTPUT_FORMAT,
+                extra_suffix="Gentle atmosphere for long rest viewing; avoid harsh contrast.",
+                visual_policy="facts50",
+            )
+            await _generate_one_image(prompt, dest, aspect_ratio=_MODE5_IMAGE_ASPECT_RATIO)
+        except Exception as e:
+            logger.warning(f"[Mode5] sleep tail theme image {idx} failed: {e}")
+        if dest.is_file():
+            out.append(dest)
+            prev_ok = dest
+        elif prev_ok is not None:
+            shutil.copy2(prev_ok, dest)
+            out.append(dest)
+        else:
+            if not fallback_still.is_file():
+                raise FileNotFoundError("sleep tail fallback still missing")
+            shutil.copy2(fallback_still, dest)
+            out.append(dest)
+            prev_ok = dest
+    return out
+
+
+def _append_mode5_sleep_tail(session_id: str, plan: dict[str, Any], final_path: Path) -> Path:
+    """
+    For facts50 and book_night: append long sleep-oriented thematic music tail after spoken audio
+    (same env MODE5_FACTS50_SLEEP_TAIL_SEC — «хвост» как у 77 фактов по длительности файла).
+    Fail-soft: on any error returns original final_path unchanged.
+    """
+    sm5 = (plan.get("sub_mode") or "").strip().lower()
+    if sm5 not in ("facts50", "book_night"):
+        return final_path
+    tail_sec = max(0, int(getattr(settings, "mode5_facts50_sleep_tail_sec", 0) or 0))
+    if tail_sec <= 0:
+        return final_path
+    if not final_path.is_file():
+        return final_path
+
+    try:
+        session_root = _session_dir(session_id)
+        ff = resolve_ffmpeg_executable()
+        if not ff:
+            logger.warning("[Mode5] Sleep tail skipped: ffmpeg not found")
+            return final_path
+
+        topic = (
+            str(plan.get("facts_topic") or "").strip()
+            or str(plan.get("header_title") or "").strip()
+            or str(plan.get("script_text") or "").strip()[:240]
+            or "sleep ambient"
+        )
+        base_music_sec = max(60, min(300, int(getattr(settings, "ai_music_base_duration_sec", 180) or 180)))
+        music_path = generate_background_music(
+            topic=topic,
+            duration=base_music_sec,
+            base_duration=base_music_sec,
+            cache_dir=settings.music_cache_dir,
+        )
+        if music_path is None or not Path(music_path).is_file():
+            logger.warning("[Mode5] Sleep tail skipped: music generation unavailable")
+            return final_path
+
+        still_path: Path | None = None
+        for ch in reversed(list(plan.get("chunks") or [])):
+            for seg in reversed(list(ch.get("segments") or [])):
+                rel = str(seg.get("image") or "").strip()
+                if not rel:
+                    continue
+                p = session_root / rel
+                if p.is_file():
+                    still_path = p
+                    break
+            if still_path is not None:
+                break
+        if still_path is None:
+            still_path = session_root / "mode5_sleep_tail_still.jpg"
+            # Fallback: grab near-last frame from final video.
+            subprocess.run(
+                [
+                    ff,
+                    "-y",
+                    "-sseof",
+                    "-1",
+                    "-i",
+                    str(final_path),
+                    "-frames:v",
+                    "1",
+                    str(still_path),
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        target_w, target_h = settings.mode5_video_resolution
+        fps = max(24, min(60, int(settings.video_fps or 24)))
+        volume = max(0.0, min(1.0, float(getattr(settings, "mode5_facts50_sleep_tail_volume", 0.34) or 0.34)))
+        tail_path = session_root / "mode5_sleep_tail.mp4"
+        fade_out_start = max(0.0, float(tail_sec) - 6.0)
+        vf = (
+            f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease:flags=lanczos,"
+            f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p"
+        )
+        af = (
+            f"volume={volume},"
+            "afade=t=in:st=0:d=2.5,"
+            f"afade=t=out:st={fade_out_start:.2f}:d=6"
+        )
+
+        interval = max(60, int(getattr(settings, "mode5_facts50_sleep_tail_image_interval_sec", 300) or 300))
+        segment_durs: list[float] = []
+        rem = float(tail_sec)
+        while rem > 0:
+            segment_durs.append(min(float(interval), rem))
+            rem -= segment_durs[-1]
+        n_seg = len(segment_durs)
+
+        def _mux_still_tail(still: Path) -> None:
+            subprocess.run(
+                [
+                    ff,
+                    "-y",
+                    "-loop",
+                    "1",
+                    "-i",
+                    str(still),
+                    "-stream_loop",
+                    "-1",
+                    "-i",
+                    str(music_path),
+                    "-t",
+                    str(tail_sec),
+                    "-vf",
+                    vf,
+                    "-r",
+                    str(fps),
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "medium",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "160k",
+                    "-af",
+                    af,
+                    "-shortest",
+                    str(tail_path),
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        try:
+            theme_paths = asyncio.run(
+                _generate_mode5_sleep_tail_theme_images(
+                    session_id, plan, topic, n_seg, still_path
+                )
+            )
+            if len(theme_paths) != n_seg:
+                raise RuntimeError("sleep tail theme image count mismatch")
+        except Exception as e:
+            logger.warning(f"[Mode5] Sleep tail thematic images failed, using single still: {e}")
+            _mux_still_tail(still_path)
+        else:
+            seg_mp4s: list[Path] = []
+            try:
+                for i, dur in enumerate(segment_durs):
+                    seg_out = session_root / f"mode5_sleep_tail_seg_{i:03d}.mp4"
+                    subprocess.run(
+                        [
+                            ff,
+                            "-y",
+                            "-loop",
+                            "1",
+                            "-i",
+                            str(theme_paths[i]),
+                            "-t",
+                            str(dur),
+                            "-vf",
+                            vf,
+                            "-r",
+                            str(fps),
+                            "-c:v",
+                            "libx264",
+                            "-preset",
+                            "medium",
+                            "-pix_fmt",
+                            "yuv420p",
+                            "-an",
+                            str(seg_out),
+                        ],
+                        check=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    seg_mp4s.append(seg_out)
+
+                concat_list = session_root / "mode5_sleep_tail_concat.txt"
+                concat_list.write_text(
+                    "\n".join(f"file '{p.resolve()}'" for p in seg_mp4s) + "\n",
+                    encoding="utf-8",
+                )
+                video_only = session_root / "mode5_sleep_tail_video_concat.mp4"
+                subprocess.run(
+                    [
+                        ff,
+                        "-y",
+                        "-f",
+                        "concat",
+                        "-safe",
+                        "0",
+                        "-i",
+                        str(concat_list),
+                        "-c",
+                        "copy",
+                        str(video_only),
+                    ],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                subprocess.run(
+                    [
+                        ff,
+                        "-y",
+                        "-i",
+                        str(video_only),
+                        "-stream_loop",
+                        "-1",
+                        "-i",
+                        str(music_path),
+                        "-t",
+                        str(tail_sec),
+                        "-map",
+                        "0:v:0",
+                        "-map",
+                        "1:a:0",
+                        "-c:v",
+                        "copy",
+                        "-c:a",
+                        "aac",
+                        "-b:a",
+                        "160k",
+                        "-af",
+                        af,
+                        str(tail_path),
+                    ],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception as e:
+                logger.warning(f"[Mode5] Sleep tail segment mux failed, using single still: {e}")
+                _mux_still_tail(still_path)
+            finally:
+                for p in seg_mp4s:
+                    try:
+                        p.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                for tmp in (
+                    session_root / "mode5_sleep_tail_concat.txt",
+                    session_root / "mode5_sleep_tail_video_concat.mp4",
+                ):
+                    try:
+                        tmp.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+
+        out = session_root / "video_mode5_with_sleep_tail.mp4"
+        _ffmpeg_concat([final_path, tail_path], out)
+        shutil.move(str(out), str(final_path))
+        logger.success(f"[Mode5] Added sleep tail ({tail_sec}s) after facts")
+        return final_path
+    except Exception as e:
+        logger.warning(f"[Mode5] Sleep tail skipped due to error: {e}")
+        return final_path
+
+
+async def _synthesize_chunk(
+    session_id: str,
+    chunk_index: int,
+    text: str,
+    *,
+    language: str,
+) -> tuple[Path, Path, float, list[tuple[float, float]] | None, list[str] | None, str]:
+    session_root = _session_dir(session_id)
+    m5 = _mode5_dir(session_id)
+    mp3_path = m5 / f"chunk_{chunk_index:03d}.mp3"
+    wav_path = m5 / f"chunk_{chunk_index:03d}.wav"
+    # VoiceAPI: минимум ~500 символов; Whisper и сегменты — тот же текст, что ушёл в TTS (без двойной подготовки).
+    tts_plain = plain_text_for_voiceapi_tts(text, language=language, pad_salt=chunk_index)
+    await synthesize(text, mp3_path, language=language, voiceapi_plain=tts_plain)
+    await asyncio.to_thread(_convert_audio_to_wav, mp3_path, wav_path)
+    dur = await asyncio.to_thread(_wav_duration_sec, wav_path)
+    wts, words = await asyncio.to_thread(
+        get_word_timestamps_from_audio_path,
+        wav_path,
+        script=tts_plain,
+        language=language,
+        vad_filter=False,
+    )
+    return mp3_path, wav_path, dur, wts, words, tts_plain
+
+
+def _rebuild_chunk_segment_paths(session_id: str, chunk: dict[str, Any]) -> None:
+    session_root = _session_dir(session_id)
+    m5 = _mode5_dir(session_id)
+    for seg in chunk.get("segments") or []:
+        si = int(seg["s"])
+        img_path = m5 / f"img_c{chunk['index']}_s{si}.jpg"
+        aud_path = m5 / f"seg_c{chunk['index']}_s{si}.wav"
+        seg["image"] = _rel_session(session_root, img_path)
+        seg["audio"] = _rel_session(session_root, aud_path)
+
+
+async def _revoice_chunk(
+    session_id: str,
+    plan: dict[str, Any],
+    chunk_index: int,
+    text: str,
+    *,
+    language: str,
+    segment_seconds: int,
+    max_parallel_images: int,
+) -> dict[str, Any]:
+    session_root = _session_dir(session_id)
+    chunk = plan["chunks"][chunk_index]
+    clean_text = re.sub(r"\s+", " ", (text or "").strip())
+    min_len = (
+        _MIN_CHUNK_TEXT_LEN_FACTS50 if (plan.get("sub_mode") or "").strip().lower() == "facts50" else _MIN_CHUNK_TEXT_LEN
+    )
+    if len(clean_text) < min_len:
+        raise ValueError("Mode 5: текст чанка слишком короткий для переозвучки")
+    if (plan.get("sub_mode") or "").strip().lower() == "facts50":
+        chunks = plan.get("chunks") or []
+        if not bool(chunk.get("is_intro")) and not bool(chunk.get("is_outro")):
+            fact_idx = _facts50_fact_index_for_chunk(chunks, chunk_index)
+            clean_text = _ensure_fact_spoken_prefix(fact_idx, clean_text, language)
+    mp3_path, wav_path, dur, wts, words, tts_plain = await _synthesize_chunk(
+        session_id,
+        chunk_index,
+        clean_text,
+        language=language,
+    )
+    chunk["text"] = tts_plain
+    chunk["chunk_audio"] = _rel_session(session_root, mp3_path)
+    chunk["chunk_audio_wav"] = _rel_session(session_root, wav_path)
+    chunk["duration_sec"] = dur
+    if (plan.get("sub_mode") or "").strip().lower() == "facts50":
+        chunks = plan.get("chunks") or []
+        if bool(chunk.get("is_intro")) or bool(chunk.get("is_outro")):
+            overlay_title = ""
+        else:
+            fact_idx = _facts50_fact_index_for_chunk(chunks, chunk_index)
+            overlay_title = _fact_overlay_title(fact_idx)
+        chunk["segments"] = _segments_for_facts50_chunk(
+            str(chunk.get("fact_hint") or ""),
+            tts_plain,
+            dur,
+            overlay_title=overlay_title,
+        )
+    else:
+        chunk["segments"] = _segments_for_chunk(tts_plain, dur, segment_seconds, wts, words)
+    _rebuild_chunk_segment_paths(session_id, chunk)
+    await _generate_chunk_images(
+        session_id,
+        chunk,
+        plan.get("style_suffix") or "",
+        max_parallel_images=max_parallel_images,
+        refresh_all=True,
+        visual_policy=_mode5_visual_policy(str(plan.get("sub_mode"))),
+        visual_bible=plan.get("visual_bible") if isinstance(plan.get("visual_bible"), dict) else None,
+    )
+    _render_chunk_audio_slices(session_id, chunk)
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, lambda: _build_chunk_preview_sync(session_id, chunk_index, plan))
+    _save_mode5_plan(session_id, plan)
+    return {
+        "ok": True,
+        "chunk_index": chunk_index,
+        "preview_relpath": chunk["preview_relpath"],
+        "chunk_meta": _chunk_meta_public(chunk),
+    }
 
 
 async def run_mode5_pipeline(
-    topic: str,
-    session_id: str | None = None,
-    local_only: bool = True,
+    script_text: str,
+    *,
+    session_id: str,
     language: str = "ru",
+    skip_final_assembly: bool = True,
+    chunk_seconds: int = CHUNK_SEC_DEFAULT,
+    segment_seconds: int = SEG_SEC_DEFAULT,
+    max_parallel_images: int | None = None,
+    video_header_title: str | None = None,
+    bible_mode: bool = False,
+    sub_mode: str = "manual",
     control: dict | None = None,
 ) -> dict[str, Any]:
-    """
-    Запуск пайплайна «Длинные видео».
+    from pipeline_control import checkpoint
 
-    Args:
-        topic: тема видео
-        session_id: уникальный ID
-        language: "ru" | "en"
-        control: для pause/cancel
+    require_ffmpeg_or_raise()
+    if not (getattr(settings, "voiceapi_api_key", "") or "").strip():
+        raise ValueError("Mode 5: пустой VOICEAPI_API_KEY в .env")
+    if not (getattr(settings, "voiceapi_template_uuid", "") or "").strip():
+        raise ValueError("Mode 5: пустой VOICEAPI_TEMPLATE_UUID в .env (голос настраивается только через шаблон)")
 
-    Returns:
-        dict с video_path, session_id
-    """
-    from pipeline_control import checkpoint, fastgen_cancel_event
+    sm = (sub_mode or "manual").strip().lower()
+    if sm not in ("manual", "bible", "facts50", "outline", "book_night"):
+        sm = "manual"
+    if sm == "manual" and bible_mode:
+        sm = "bible"
 
-    session_id = session_id or str(int(time.time() * 1000))
-    output_dir = settings.output_dir / session_id
-    images_dir = output_dir / "images"
-    audio_dir = settings.audio_dir / session_id
-    videos_dir = settings.videos_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
-    images_dir.mkdir(parents=True, exist_ok=True)
-    audio_dir.mkdir(parents=True, exist_ok=True)
+    topic_input = re.sub(r"\s+", " ", (script_text or "").strip())
+    facts_outline: list[str] | None = None
+    outline_doc: dict[str, Any] | None = None
+    chunk_texts: list[str] = []
 
-    logger.info(f"=== Mode 5 Pipeline | Long-form | topic={topic!r} | session={session_id} ===")
+    if sm == "facts50":
+        if len(topic_input) < 8:
+            raise ValueError("Mode 5 (77 фактов): введите тему или заголовок (например: 77 фактов о Франции)")
+        language = detect_mode5_language(
+            f"{topic_input} {(video_header_title or '').strip()}",
+            language,
+        )
+        from modes.mode5.facts50_generator import generate_facts50_script
 
+        facts_outline, narrations = await generate_facts50_script(topic_input, language, control=control)
+        intro_text = _facts50_intro_text(topic_input, language)
+        outro_text = _facts50_outro_text(topic_input, language)
+        chunk_texts = [intro_text] + list(narrations) + [outro_text]
+        script_clean = "\n\n".join(narrations)
+        logger.info(f"[Mode5] facts50: {len(chunk_texts)} narration chunk(s) including intro/outro")
+    elif sm == "outline":
+        from modes.mode5.outline_generator import MIN_OUTLINE_BRIEF_CHARS
+
+        if len(topic_input) < MIN_OUTLINE_BRIEF_CHARS:
+            raise ValueError(
+                f"Mode 5 (план из описания): введите краткое описание сюжета (от {MIN_OUTLINE_BRIEF_CHARS} символов): "
+                "место, настроение, герой или ситуация, куда может завести история — модель развернёт план и текст от этого."
+            )
+        language = detect_mode5_language(
+            f"{topic_input} {(video_header_title or '').strip()}",
+            language,
+        )
+        from modes.mode5.outline_generator import generate_outline_longform_script
+
+        outline_doc, chunk_texts, script_clean = await generate_outline_longform_script(
+            topic_input, language, control=control
+        )
+        logger.info(
+            f"[Mode5] outline: {len(outline_doc.get('chapters') or [])} chapter(s), "
+            f"{len(chunk_texts)} narration chunk(s) from subchapters"
+        )
+    elif sm == "book_night":
+        if len(topic_input) < 8:
+            raise ValueError(
+                "Mode 5 (книга на ночь): введите название книги (от 8 символов), например «7 навыков высокоэффективных людей, Стивен Кови»"
+            )
+        language = detect_mode5_language(
+            f"{topic_input} {(video_header_title or '').strip()}",
+            language,
+        )
+        from modes.mode5.book_night_generator import generate_book_night_script
+
+        outline_doc, chunk_texts, script_clean = await generate_book_night_script(
+            topic_input, language, control=control
+        )
+        logger.info(
+            f"[Mode5] book_night: {len(outline_doc.get('chapters') or [])} book chapter(s), "
+            f"{len(chunk_texts)} subsection narration(s)"
+        )
+    else:
+        script_clean = topic_input
+        if len(script_clean) < _MIN_CHUNK_TEXT_LEN:
+            raise ValueError("Mode 5: вставьте полноценный текст для озвучки")
+        language = detect_mode5_language(script_clean, language)
+
+    chunk_sec = max(120, min(900, int(chunk_seconds or CHUNK_SEC_DEFAULT)))
+    seg_sec = max(10, min(90, int(segment_seconds or SEG_SEC_DEFAULT)))
+    # book_night with 15s windows explodes image count and can run for many hours on long scripts.
+    # Keep a practical floor unless user explicitly chooses larger values.
+    if sm == "book_night" and seg_sec < 30:
+        logger.info(
+            f"[Mode5] book_night: segment_seconds={seg_sec} too small, using 30 to reduce image workload"
+        )
+        seg_sec = 30
+    header_stripped = (video_header_title or "").strip() or None
+
+    session_root = _session_dir(session_id)
+    session_root.mkdir(parents=True, exist_ok=True)
+    _mode5_dir(session_id)
+    mpi = _clamp_mode5_parallel_images(max_parallel_images)
+
+    logger.info(f"=== Mode 5 Pipeline | sub_mode={sm} | session={session_id} ===")
     await checkpoint(control)
 
-    # Step 1: Long-form scenario (multi-agent: Structure → Content per subchapter → Coherence)
-    logger.info("Step 1/4 - Mode5 Scenario Writer (multi-agent: structure + content + coherence)")
-    scenario = await run_long_form_scenario_writer(topic, language=language, control=control)
-    segments = scenario["segments"]
-    title = scenario.get("title") or topic
+    if sm not in ("facts50", "outline", "book_night"):
+        chunk_texts = _estimate_chunks_from_script(script_clean, language=language, chunk_seconds=chunk_sec)
+        if not chunk_texts:
+            raise ValueError(
+                "Mode 5 (ручной текст): не удалось разбить сценарий на чанки для озвучки. "
+                "Убедитесь, что в тексте есть обычные слова (не один набор символов без пробелов), "
+                "или добавьте абзацы — и попробуйте снова."
+            )
+        logger.info(f"[Mode5] Planned {len(chunk_texts)} chunk(s) from manual script")
 
+    visual_bible: dict[str, Any] | None = None
+    if sm == "facts50":
+        style_suffix = await derive_facts50_unified_style_suffix(
+            topic_input,
+            list(facts_outline or []),
+            script_clean,
+            output_format=_MODE5_OUTPUT_FORMAT,
+            control=control,
+        )
+        visual_bible = await derive_mode5_visual_bible(
+            narration_sample=(script_clean[:12000] if script_clean else topic_input),
+            sub_mode=sm,
+            topic_or_title=topic_input,
+            locked_series_style=style_suffix,
+        )
+    else:
+        style_sample = script_clean[:12000] if len(script_clean) > 12000 else script_clean
+        topic_line = (topic_input or (video_header_title or "") or "").strip()
+        visual_bible = await derive_mode5_visual_bible(
+            narration_sample=style_sample,
+            sub_mode=sm,
+            topic_or_title=topic_line,
+            locked_series_style=None,
+        )
+        if visual_bible and (str(visual_bible.get("series_style") or "").strip()):
+            style_suffix = str(visual_bible["series_style"]).strip() + mode5_art_direction_tail_horizontal()
+        else:
+            style_suffix = await _derive_style_suffix(
+                style_sample,
+                output_format=_MODE5_OUTPUT_FORMAT,
+                visual_policy=_mode5_visual_policy(sm),
+            )
+            if not visual_bible or not str(visual_bible.get("frame_rules") or "").strip():
+                visual_bible = None
+        if sm == "bible":
+            style_suffix = (
+                f"{style_suffix}. "
+                "Prioritize Biblical context for visual prompts: scripture-grounded settings, "
+                "ancient Judea and Near East environments, modest historically plausible clothing, "
+                "sacred atmosphere, symbolic but respectful Christian iconography, and avoid modern artifacts."
+            )
     await checkpoint(control)
 
-    # Step 2: Generate images only for segments with image_prompt
-    prompts_with_idx: list[tuple[int, str]] = [
-        (i, s["image_prompt"])
-        for i, s in enumerate(segments)
-        if s.get("image_prompt")
-    ]
-    if not prompts_with_idx:
-        raise RuntimeError("[Mode5] No image prompts in scenario")
+    outline_labels: list[tuple[str, str]] = []
+    if sm in ("outline", "book_night") and isinstance(outline_doc, dict):
+        from modes.mode5.outline_generator import get_chunk_outline_labels
 
-    logger.info(f"Step 2/4 - Image Generator ({len(prompts_with_idx)} images)")
-    image_prompts = [p for _, p in prompts_with_idx]
-    image_paths = await generate_images_fastgen(
-        image_prompts, images_dir, parallel=False, cancel_event=fastgen_cancel_event(control)
-    )
-    if len(image_paths) < len(prompts_with_idx):
-        raise RuntimeError(f"[Mode5] Expected {len(prompts_with_idx)} images, got {len(image_paths)}")
+        outline_labels = get_chunk_outline_labels(outline_doc)
 
-    # Map segment index -> image path (reuse previous when no new image)
-    idx_to_img: dict[int, Path] = {}
-    for k, (seg_idx, _) in enumerate(prompts_with_idx):
-        if k < len(image_paths) and image_paths[k]:
-            idx_to_img[seg_idx] = Path(image_paths[k])
-    current_img: Path | None = None
-    for i in range(len(segments)):
-        if i in idx_to_img:
-            current_img = idx_to_img[i]
-        if current_img is None:
-            raise RuntimeError(f"[Mode5] Segment {i} has no image (first segment must have image_prompt)")
-        idx_to_img[i] = current_img
+    # Persist stub plan before long parallel TTS so /review-state does not 404 while audio generates.
+    if sm == "facts50" and chunk_texts:
+        stub_chunks: list[dict[str, Any]] = []
+        for i, ct in enumerate(chunk_texts):
+            is_intro = i == 0
+            is_outro = i == (len(chunk_texts) - 1)
+            fh = ct if (is_intro or is_outro) else ""
+            if (not is_intro) and (not is_outro) and isinstance(facts_outline, list) and (i - 1) < len(facts_outline):
+                fh = str(facts_outline[i - 1] or "").strip()
+            preview_path = session_root / f"mode5_preview_{i:03d}.mp4"
+            stub_chunks.append(
+                {
+                    "index": i,
+                    "text": ct,
+                    "fact_hint": fh or None,
+                    "is_intro": is_intro,
+                    "is_outro": is_outro,
+                    "preview_relpath": _rel_session(session_root, preview_path),
+                    "preview_ready": False,
+                    "segments": [],
+                }
+            )
+        stub_plan: dict[str, Any] = {
+            "version": 1,
+            "session_id": session_id,
+            "script_text": script_clean,
+            "language": language,
+            "show_subtitles": False,
+            "chunk_seconds": chunk_sec,
+            "segment_seconds": seg_sec,
+            "max_parallel_images": mpi,
+            "header_title": header_stripped,
+            "bible_mode": False,
+            "sub_mode": sm,
+            "facts_topic": topic_input,
+            "facts_outline": facts_outline,
+            "style_suffix": style_suffix,
+            "visual_bible": visual_bible,
+            "chunks": stub_chunks,
+        }
+        _save_mode5_plan(session_id, stub_plan, checkpoint=MODE5_CKPT_STUB)
+    elif chunk_texts and sm != "facts50":
+        stub_chunks_lf: list[dict[str, Any]] = []
+        for i, ct in enumerate(chunk_texts):
+            preview_path = session_root / f"mode5_preview_{i:03d}.mp4"
+            row: dict[str, Any] = {
+                "index": i,
+                "text": ct,
+                "fact_hint": None,
+                "preview_relpath": _rel_session(session_root, preview_path),
+                "preview_ready": False,
+                "segments": [],
+            }
+            if sm in ("outline", "book_night") and i < len(outline_labels):
+                row["chapter_title"] = outline_labels[i][0]
+                row["subchapter_title"] = outline_labels[i][1]
+            stub_chunks_lf.append(row)
+        stub_plan_lf: dict[str, Any] = {
+            "version": 1,
+            "session_id": session_id,
+            "script_text": script_clean,
+            "language": language,
+            "show_subtitles": False,
+            "chunk_seconds": chunk_sec,
+            "segment_seconds": seg_sec,
+            "max_parallel_images": mpi,
+            "header_title": header_stripped,
+            "bible_mode": sm == "bible",
+            "sub_mode": sm,
+            "facts_topic": (topic_input.strip() if sm == "book_night" and topic_input else None),
+            "facts_outline": None,
+            "outline_structure": outline_doc if sm in ("outline", "book_night") else None,
+            "style_suffix": style_suffix,
+            "visual_bible": visual_bible,
+            "chunks": stub_chunks_lf,
+        }
+        _save_mode5_plan(session_id, stub_plan_lf, checkpoint=MODE5_CKPT_STUB)
 
-    await checkpoint(control)
+    chunks_plan: list[dict[str, Any]] = []
 
-    # Step 3: TTS for each segment (slow rate for sleep story)
-    logger.info(f"Step 3/4 - TTS ({len(segments)} segments, slow sleep-story voice)")
-    narration_texts = [s["narration_text"] for s in segments]
-    tts_rate = getattr(settings, "mode5_tts_rate", "-35%")
-    audio_paths, _, _ = await synthesize_all(
-        narration_texts, audio_dir, language=language, rate=tts_rate
-    )
+    if sm == "facts50":
+        # Параллельно до N фактов: TTS и затем картинки (типичный паттерн — asyncio + семафор под лимиты API).
+        par = max(1, min(32, int(getattr(settings, "mode5_facts50_parallel", 10))))
+        sem_tts = asyncio.Semaphore(par)
 
-    await checkpoint(control)
+        async def _facts50_tts(ci: int, chunk_text: str):
+            async with sem_tts:
+                is_intro = ci == 0
+                is_outro = ci == (len(chunk_texts) - 1)
+                if is_intro or is_outro:
+                    source_text = chunk_text
+                else:
+                    source_text = _ensure_fact_spoken_prefix(ci - 1, chunk_text, language)
+                pack = await _synthesize_chunk(session_id, ci, source_text, language=language)
+                return ci, pack
 
-    # Step 4: Assemble
-    logger.info("Step 4/4 - Mode5 Video Assembler")
-    segment_data: list[tuple[Path, Path]] = []
-    for i, s in enumerate(segments):
-        img_path = idx_to_img.get(i)
-        audio_path = audio_paths[i] if i < len(audio_paths) else None
-        if img_path and audio_path and Path(audio_path).exists():
-            segment_data.append((img_path, Path(audio_path)))
+        logger.info(f"[Mode5 facts50] TTS parallel workers={par} ({len(chunk_texts)} facts)")
+        tts_pairs = await asyncio.gather(
+            *[_facts50_tts(ci, ct) for ci, ct in enumerate(chunk_texts)]
+        )
+        await checkpoint(control)
+        tts_by_ci = {p[0]: p[1] for p in tts_pairs}
 
-    if not segment_data:
-        raise RuntimeError("[Mode5] No valid segment data for assembly")
+        for ci in range(len(chunk_texts)):
+            mp3_path, wav_path, dur, wts, words, tts_plain = tts_by_ci[ci]
+            is_intro = ci == 0
+            is_outro = ci == (len(chunk_texts) - 1)
+            fact_hint = tts_plain if (is_intro or is_outro) else ""
+            if (not is_intro) and (not is_outro) and isinstance(facts_outline, list) and (ci - 1) < len(facts_outline):
+                fact_hint = str(facts_outline[ci - 1] or "").strip()
+            overlay_title = "" if (is_intro or is_outro) else _fact_overlay_title(ci - 1)
+            segs = _segments_for_facts50_chunk(
+                fact_hint,
+                tts_plain,
+                dur,
+                overlay_title=overlay_title,
+            )
+            preview_path = session_root / f"mode5_preview_{ci:03d}.mp4"
+            chunks_plan.append(
+                {
+                    "index": ci,
+                    "text": tts_plain,
+                    "fact_hint": fact_hint or None,
+                    "is_intro": is_intro,
+                    "is_outro": is_outro,
+                    "chunk_audio": _rel_session(session_root, mp3_path),
+                    "chunk_audio_wav": _rel_session(session_root, wav_path),
+                    "duration_sec": dur,
+                    "preview_relpath": _rel_session(session_root, preview_path),
+                    "segments": segs,
+                }
+            )
 
-    session_dir = videos_dir / session_id
-    session_dir.mkdir(parents=True, exist_ok=True)
-    output_path = session_dir / "video.mp4"
+        for ch in chunks_plan:
+            _rebuild_chunk_segment_paths(session_id, ch)
+
+        plan = load_mode5_plan(session_id)
+        plan["chunks"] = chunks_plan
+        if visual_bible is not None:
+            plan["visual_bible"] = visual_bible
+        _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_TTS)
+
+        sem_img = asyncio.Semaphore(par)
+
+        async def _facts50_images(ch: dict[str, Any]) -> None:
+            async with sem_img:
+                idx = int(ch["index"])
+                logger.info(
+                    f"[Mode5 facts50] Images chunk {idx + 1}/{len(chunks_plan)} "
+                    f"({len(ch.get('segments') or [])} window(s))"
+                )
+                await _generate_chunk_images(
+                    session_id,
+                    ch,
+                    style_suffix,
+                    max_parallel_images=mpi,
+                    refresh_all=True,
+                    visual_policy=_mode5_visual_policy(sm),
+                    visual_bible=visual_bible,
+                )
+                _save_mode5_plan(
+                    session_id, plan, checkpoint=MODE5_CKPT_AFTER_IMAGES, chunk_index=idx
+                )
+
+        await asyncio.gather(*[_facts50_images(ch) for ch in chunks_plan])
+
+        for ch in chunks_plan:
+            _render_chunk_audio_slices(session_id, ch)
+        _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_SLICES)
+        await checkpoint(control)
+
+    else:
+        # Long-form manual / bible / outline: parallelize TTS per chunk.
+        par = max(1, min(16, int(getattr(settings, "mode5_facts50_parallel", 10) or 10)))
+        sem_tts = asyncio.Semaphore(par)
+
+        async def _longform_tts(ci: int, chunk_text: str):
+            async with sem_tts:
+                logger.info(f"[Mode5] Chunk {ci + 1}/{len(chunk_texts)}: TTS (voiceapi/template) synthesis")
+                await checkpoint(control)
+                pack = await _synthesize_chunk(
+                    session_id,
+                    ci,
+                    chunk_text,
+                    language=language,
+                )
+                return ci, pack
+
+        tts_pairs = await asyncio.gather(
+            *[_longform_tts(ci, ct) for ci, ct in enumerate(chunk_texts)]
+        )
+        await checkpoint(control)
+        tts_by_ci = {p[0]: p[1] for p in tts_pairs}
+
+        for ci in range(len(chunk_texts)):
+            mp3_path, wav_path, dur, wts, words, tts_plain = tts_by_ci[ci]
+            segs = _segments_for_chunk(tts_plain, dur, seg_sec, wts, words)
+            preview_path = session_root / f"mode5_preview_{ci:03d}.mp4"
+            ch_entry: dict[str, Any] = {
+                "index": ci,
+                "text": tts_plain,
+                "fact_hint": None,
+                "chunk_audio": _rel_session(session_root, mp3_path),
+                "chunk_audio_wav": _rel_session(session_root, wav_path),
+                "duration_sec": dur,
+                "preview_relpath": _rel_session(session_root, preview_path),
+                "segments": segs,
+            }
+            if sm in ("outline", "book_night") and ci < len(outline_labels):
+                ch_entry["chapter_title"] = outline_labels[ci][0]
+                ch_entry["subchapter_title"] = outline_labels[ci][1]
+            chunks_plan.append(ch_entry)
+
+        for ch in chunks_plan:
+            _rebuild_chunk_segment_paths(session_id, ch)
+
+        plan = {
+            "version": 1,
+            "session_id": session_id,
+            "script_text": script_clean,
+            "language": language,
+            "show_subtitles": False,
+            "chunk_seconds": chunk_sec,
+            "segment_seconds": seg_sec,
+            "max_parallel_images": mpi,
+            "header_title": header_stripped,
+            "bible_mode": sm == "bible",
+            "sub_mode": sm,
+            "facts_topic": (topic_input.strip() if sm == "book_night" and topic_input else None),
+            "facts_outline": None,
+            "outline_structure": outline_doc if sm in ("outline", "book_night") else None,
+            "style_suffix": style_suffix,
+            "visual_bible": visual_bible,
+            "chunks": chunks_plan,
+        }
+        _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_TTS)
+
+        for ci, ch in enumerate(chunks_plan):
+            logger.info(
+                f"[Mode5] Chunk {ci + 1}/{len(chunks_plan)}: image generation for {len(ch['segments'])} window(s)"
+            )
+            await _generate_chunk_images(
+                session_id,
+                ch,
+                style_suffix,
+                max_parallel_images=mpi,
+                refresh_all=True,
+                visual_policy=_mode5_visual_policy(sm),
+                visual_bible=visual_bible,
+            )
+            _render_chunk_audio_slices(session_id, ch)
+            _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_SLICES, chunk_index=ci)
+            await checkpoint(control)
+
+    for ch in plan.get("chunks") or []:
+        ch["preview_ready"] = False
+    # Save early so the frontend can poll partial progress and already-ready previews.
+    _save_mode5_plan(session_id, plan)
 
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(
         None,
-        functools.partial(assemble_mode5_video, segment_data, output_path),
+        functools.partial(_build_all_chunk_previews_parallel, session_id, plan),
+    )
+    _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_PREVIEWS)
+
+    if skip_final_assembly:
+        _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_COMPLETED)
+        logger.success(f"=== Mode 5 Pipeline REVIEW READY | session={session_id} ===")
+        return _attach_mode5_resume_flags_from_plan(
+            session_id, plan, _result_payload(session_id, plan, review_ready=True)
+        )
+
+    final_path = session_root / "video_mode5.mp4"
+    await loop.run_in_executor(None, functools.partial(_rebuild_mode5_missing_previews, session_id, plan))
+    preview_paths = [session_root / ch["preview_relpath"] for ch in (plan.get("chunks") or [])]
+    await loop.run_in_executor(None, lambda: _ffmpeg_concat(preview_paths, final_path))
+    final_path = await loop.run_in_executor(None, lambda: _append_mode5_sleep_tail(session_id, plan, final_path))
+    rel_final = _rel_session(session_root, final_path)
+    _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_COMPLETED)
+    logger.success(f"=== Mode 5 Pipeline DONE | video={final_path} ===")
+    return _attach_mode5_resume_flags_from_plan(
+        session_id,
+        plan,
+        _result_payload(session_id, plan, review_ready=False, final_video=rel_final),
     )
 
-    video_path = str(output_path.resolve())
-    from agents.topics_history import mark_topic_used
-    mark_topic_used(topic=title[:50], session_id=session_id, video_path=video_path)
 
-    logger.success(f"=== Mode 5 Pipeline DONE | video={output_path} ===")
+async def resume_mode5_pipeline(
+    session_id: str,
+    *,
+    skip_final_assembly: bool = True,
+    control: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Продолжить facts50 после сбоя: на диске уже есть mode5_plan.json с озвучкой и (частично) картинками.
+    Пропускает готовые файлы (refresh_all=False), дорисовывает недостающее, затем превью как в основном пайплайне.
+    """
+    from pipeline_control import checkpoint
+
+    require_ffmpeg_or_raise()
+    if not (getattr(settings, "voiceapi_api_key", "") or "").strip():
+        raise ValueError("Mode 5: пустой VOICEAPI_API_KEY в .env")
+    if not (getattr(settings, "voiceapi_template_uuid", "") or "").strip():
+        raise ValueError("Mode 5: пустой VOICEAPI_TEMPLATE_UUID в .env (голос настраивается только через шаблон)")
+
+    snap0 = mode5_resume_snapshot(session_id)
+    if not snap0.get("can_resume"):
+        reason = str(snap0.get("reason") or "unknown")
+        raise ValueError(f"Продолжение недоступно: {reason}")
+
+    plan = load_mode5_plan(session_id)
+    sm = (plan.get("sub_mode") or "").strip().lower()
+    if sm != "facts50":
+        raise ValueError("Продолжение только для sub_mode=facts50.")
+
+    session_root = _session_dir(session_id)
+    chunks = list(plan.get("chunks") or [])
+    style_suffix = str(plan.get("style_suffix") or "")
+    mpi = _clamp_mode5_parallel_images(plan.get("max_parallel_images"))
+
+    for ch in chunks:
+        wav = str(ch.get("chunk_audio_wav") or "").strip()
+        if not wav or not (session_root / wav).is_file():
+            raise FileNotFoundError(f"Нет WAV для части {ch.get('index')}: {wav}")
+
+    par = max(1, min(32, int(getattr(settings, "mode5_facts50_parallel", 10))))
+    sem_img = asyncio.Semaphore(par)
+
+    if not all(_mode5_chunk_images_complete(session_root, ch) for ch in chunks):
+
+        async def _resume_one_images(ch: dict[str, Any]) -> None:
+            async with sem_img:
+                idx = int(ch["index"])
+                logger.info(
+                    f"[Mode5 facts50 resume] Images chunk {idx + 1}/{len(chunks)} "
+                    f"({len(ch.get('segments') or [])} window(s))"
+                )
+                await _generate_chunk_images(
+                    session_id,
+                    ch,
+                    style_suffix,
+                    max_parallel_images=mpi,
+                    refresh_all=False,
+                    visual_policy=_mode5_visual_policy(sm),
+                    visual_bible=plan.get("visual_bible") if isinstance(plan.get("visual_bible"), dict) else None,
+                )
+                _save_mode5_plan(
+                    session_id, plan, checkpoint=MODE5_CKPT_AFTER_IMAGES, chunk_index=idx
+                )
+
+        await asyncio.gather(*[_resume_one_images(ch) for ch in chunks])
+        await checkpoint(control)
+
+    for ch in chunks:
+        if not _mode5_chunk_slices_complete(session_root, ch):
+            _render_chunk_audio_slices(session_id, ch)
+    _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_SLICES)
+    await checkpoint(control)
+
+    for ch in plan.get("chunks") or []:
+        ch["preview_ready"] = False
+    _save_mode5_plan(session_id, plan)
+
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(
+        None,
+        functools.partial(_build_all_chunk_previews_parallel, session_id, plan),
+    )
+    _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_PREVIEWS)
+
+    if skip_final_assembly:
+        _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_COMPLETED)
+        logger.success(f"=== Mode 5 RESUME REVIEW READY | session={session_id} ===")
+        return _attach_mode5_resume_flags_from_plan(
+            session_id, plan, _result_payload(session_id, plan, review_ready=True)
+        )
+
+    final_path = session_root / "video_mode5.mp4"
+    await loop.run_in_executor(None, functools.partial(_rebuild_mode5_missing_previews, session_id, plan))
+    preview_paths = [session_root / ch["preview_relpath"] for ch in (plan.get("chunks") or [])]
+    await loop.run_in_executor(None, lambda: _ffmpeg_concat(preview_paths, final_path))
+    final_path = await loop.run_in_executor(None, lambda: _append_mode5_sleep_tail(session_id, plan, final_path))
+    rel_final = _rel_session(session_root, final_path)
+    _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_COMPLETED)
+    logger.success(f"=== Mode 5 RESUME DONE | video={final_path} ===")
+    return _attach_mode5_resume_flags_from_plan(
+        session_id,
+        plan,
+        _result_payload(session_id, plan, review_ready=False, final_video=rel_final),
+    )
+
+
+async def regenerate_mode5_image(
+    session_id: str,
+    chunk_index: int,
+    segment_index: int,
+) -> dict[str, Any]:
+    plan = load_mode5_plan(session_id)
+    chunks = plan.get("chunks") or []
+    if chunk_index < 0 or chunk_index >= len(chunks):
+        raise ValueError("Invalid chunk_index")
+    chunk = chunks[chunk_index]
+    segs = chunk.get("segments") or []
+    if segment_index < 0 or segment_index >= len(segs):
+        raise ValueError("Invalid segment_index")
+    seg = segs[segment_index]
+    prompt = await _build_image_prompt_async(
+        seg.get("text", ""),
+        plan.get("style_suffix") or "",
+        output_format=_MODE5_OUTPUT_FORMAT,
+        extra_suffix="Fresh alternative composition, same art direction.",
+        visual_policy=_mode5_visual_policy(str(plan.get("sub_mode"))),
+        visual_bible=plan.get("visual_bible") if isinstance(plan.get("visual_bible"), dict) else None,
+    )
+    seg["image_prompt"] = prompt
+    session_root = _session_dir(session_id)
+    img_path = session_root / seg["image"]
+    await _generate_one_image(prompt, img_path, aspect_ratio=_MODE5_IMAGE_ASPECT_RATIO)
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, lambda: _build_chunk_preview_sync(session_id, chunk_index, plan))
+    _save_mode5_plan(session_id, plan)
     return {
-        "session_id": session_id,
-        "video_path": video_path,
-        "topic": title,
-        "trend": None,
-        "report": None,
+        "ok": True,
+        "chunk_index": chunk_index,
+        "segment_index": segment_index,
+        "preview_relpath": chunk["preview_relpath"],
     }
+
+
+async def regenerate_mode5_chunk(
+    session_id: str,
+    chunk_index: int,
+    text: str,
+) -> dict[str, Any]:
+    plan = load_mode5_plan(session_id)
+    chunks = plan.get("chunks") or []
+    if chunk_index < 0 or chunk_index >= len(chunks):
+        raise ValueError("Invalid chunk_index")
+    return await _revoice_chunk(
+        session_id,
+        plan,
+        chunk_index,
+        text,
+        language=(plan.get("language") or "ru"),
+        segment_seconds=int(plan.get("segment_seconds") or SEG_SEC_DEFAULT),
+        max_parallel_images=_clamp_mode5_parallel_images(
+            int(raw) if (raw := plan.get("max_parallel_images")) is not None else None
+        ),
+    )
+
+
+def assemble_mode5_final_sync(session_id: str) -> dict[str, Any]:
+    plan = load_mode5_plan(session_id)
+    session_root = _session_dir(session_id)
+    _rebuild_mode5_missing_previews(session_id, plan)
+    previews = [session_root / ch["preview_relpath"] for ch in (plan.get("chunks") or [])]
+    for p in previews:
+        if not p.is_file():
+            raise FileNotFoundError(
+                f"Missing preview after rebuild attempt: {p}. "
+                "Check that segment images and audio exist for this chunk (regenerate images or re-voice the chunk)."
+            )
+    final_path = session_root / "video_mode5.mp4"
+    _ffmpeg_concat(previews, final_path)
+    final_path = _append_mode5_sleep_tail(session_id, plan, final_path)
+    rel = _rel_session(session_root, final_path)
+    return _result_payload(session_id, plan, review_ready=False, final_video=rel)
+
+
+def mode5_status_from_plan(session_id: str) -> dict[str, Any]:
+    """
+    Rebuild Mode 5 status payload from persisted plan when in-memory session is missing.
+    Used by /api/pipeline/{sid}/status for History -> Progress navigation after restart.
+    """
+    plan = load_mode5_plan(session_id)
+    session_root = _session_dir(session_id)
+    final_path = session_root / "video_mode5.mp4"
+    if final_path.is_file():
+        rel = _rel_session(session_root, final_path)
+        return _attach_mode5_resume_flags_from_plan(
+            session_id, plan, _result_payload(session_id, plan, review_ready=False, final_video=rel)
+        )
+    return _attach_mode5_resume_flags_from_plan(
+        session_id, plan, _result_payload(session_id, plan, review_ready=True)
+    )
+
+
+def mode5_review_snapshot(session_id: str) -> dict[str, Any]:
+    """
+    Return currently ready Mode 5 previews from persisted plan, even before pipeline completion.
+    """
+    try:
+        plan = load_mode5_plan(session_id)
+    except FileNotFoundError:
+        return _mode5_review_pending_snapshot(session_id)
+    session_root = _session_dir(session_id)
+    chunks = list(plan.get("chunks") or [])
+    ready_chunks: list[dict[str, Any]] = []
+    for ch in chunks:
+        rel = str(ch.get("preview_relpath") or "").strip()
+        if not rel:
+            continue
+        p = session_root / rel
+        if p.is_file() or bool(ch.get("preview_ready")):
+            ready_chunks.append(ch)
+    payload = _result_payload(session_id, {**plan, "chunks": ready_chunks}, review_ready=bool(ready_chunks))
+    payload["mode5_total_chunks"] = len(chunks)
+    payload["mode5_ready_chunks"] = len(ready_chunks)
+    payload["mode5_partial"] = True
+    snap = mode5_resume_snapshot_for_plan(session_id, plan)
+    payload["mode5_can_resume"] = bool(snap.get("can_resume"))
+    payload["mode5_checkpoint_stage"] = snap.get("stage")
+    payload["mode5_resume_reason"] = snap.get("reason") or None
+    prog = _mode5_progress_hint_payload(session_root, plan)
+    payload.update(prog)
+    return payload

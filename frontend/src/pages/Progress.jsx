@@ -18,7 +18,20 @@ import { subscribeToStream, api } from '../services/api';
 import LogConsole from '../components/LogConsole';
 import StepIndicator from '../components/StepIndicator';
 
-const MODE_LABELS = { 1: '5 фактов', 2: 'Почему X?', 3: 'Реставрация', 4: 'Цитата', 5: 'Длинные', 6: 'Релакс', 7: '2 клипа', 8: 'Было→стало' };
+const MAX_LOG_LINES = 1200;
+
+const MODE_LABELS = {
+  1: '5 фактов',
+  2: 'Почему X?',
+  3: 'Реставрация',
+  4: 'Цитата',
+  5: 'Long-form',
+  6: 'Релакс',
+  7: '2 клипа',
+  8: 'Было→стало',
+  12: 'Цитата',
+  13: 'Аудио→слайды',
+};
 
 /** RU/EN вложенно или плоский объект (title/description/tags) */
 function resolvePublishingMeta(p) {
@@ -27,6 +40,14 @@ function resolvePublishingMeta(p) {
   if (p.ru && typeof p.ru === 'object') return p.ru;
   if (p.en && typeof p.en === 'object') return p.en;
   return null;
+}
+
+function publicVideoPath(p) {
+  const norm = String(p || '').replace(/\\/g, '/').trim();
+  if (!norm) return '';
+  const clipMatch = norm.match(/(?:^|\/)(clips\/[^/]+\.mp4)$/i);
+  const publicPath = clipMatch?.[1] || norm.split('/').filter(Boolean).pop() || '';
+  return publicPath.split('/').filter(Boolean).map(encodeURIComponent).join('/');
 }
 
 function downloadTextFile(filename, text) {
@@ -54,16 +75,52 @@ export default function Progress() {
   const [sessionTopic, setSessionTopic] = useState('');
   const [sessionMode, setSessionMode] = useState(1);
   const [copied, setCopied] = useState('');
+  const [clipVersion, setClipVersion] = useState(0);
+  const [mode4AssemblyBusy, setMode4AssemblyBusy] = useState(false);
+  const [mode4AssemblySubs, setMode4AssemblySubs] = useState(true);
+  const [mode4RegenIdx, setMode4RegenIdx] = useState(null);
+  const [mode13AssemblyBusy, setMode13AssemblyBusy] = useState(false);
+  const [mode13AssemblySubs, setMode13AssemblySubs] = useState(true);
+  const [mode13RegenKey, setMode13RegenKey] = useState(null);
+  const [mode5AssemblyBusy, setMode5AssemblyBusy] = useState(false);
+  const [mode5RegenImageKey, setMode5RegenImageKey] = useState(null);
+  const [mode5RegenChunkIdx, setMode5RegenChunkIdx] = useState(null);
+  const [mode5ChunkDrafts, setMode5ChunkDrafts] = useState({});
+  const [mode5Live, setMode5Live] = useState(null);
+  const [mode5WaitUi, setMode5WaitUi] = useState(null);
+  const [mode5ContinueBusy, setMode5ContinueBusy] = useState(false);
+  const [streamNonce, setStreamNonce] = useState(0);
 
   useEffect(() => {
-    setLogs([]);
-    setDone(null);
-    setError('');
-    setStatus('running');
-    setBusy(false);
-    setSessionTopic('');
-    setSessionMode(1);
-    setCopied('');
+    setStreamNonce(0);
+  }, [sid]);
+
+  useEffect(() => {
+    const fullSessionReset = streamNonce === 0;
+    if (fullSessionReset) {
+      setLogs([]);
+      setDone(null);
+      setError('');
+      setStatus('running');
+      setBusy(false);
+      setSessionTopic('');
+      setSessionMode(1);
+      setCopied('');
+      setClipVersion(0);
+      setMode4AssemblyBusy(false);
+      setMode4RegenIdx(null);
+      setMode4AssemblySubs(true);
+      setMode13AssemblyBusy(false);
+      setMode13AssemblySubs(true);
+      setMode13RegenKey(null);
+      setMode5AssemblyBusy(false);
+      setMode5RegenImageKey(null);
+      setMode5RegenChunkIdx(null);
+      setMode5ChunkDrafts({});
+      setMode5Live(null);
+      setMode5WaitUi(null);
+      setMode5ContinueBusy(false);
+    }
 
     let cancelled = false;
 
@@ -78,9 +135,15 @@ export default function Progress() {
           setDone({ ...r.result, session_id: r.result.session_id || sid });
         } else if (r.status === 'error' && r.error) {
           setError(r.error);
+          if (r.result && typeof r.result === 'object') {
+            setDone({ ...r.result, session_id: r.result.session_id || sid });
+          }
         } else if (r.status === 'cancelled') {
           setStatus('cancelled');
           setError(r.error || 'Генерация отменена');
+          if (r.result && typeof r.result === 'object') {
+            setDone({ ...r.result, session_id: r.result.session_id || sid });
+          }
         }
       } catch (e) {
         if (!cancelled) {
@@ -93,7 +156,12 @@ export default function Progress() {
     const cleanup = subscribeToStream(
       sid,
       (entry) => {
-        if (!cancelled) setLogs((prev) => [...prev, entry]);
+        if (!cancelled) {
+          setLogs((prev) => {
+            const next = [...prev, entry];
+            return next.length > MAX_LOG_LINES ? next.slice(-MAX_LOG_LINES) : next;
+          });
+        }
       },
       (result) => {
         if (!cancelled) {
@@ -112,41 +180,148 @@ export default function Progress() {
       cancelled = true;
       cleanup();
     };
-  }, [sid]);
+  }, [sid, streamNonce]);
+
+  useEffect(() => {
+    if (done?.mode5_review_ready) setMode5Live(null);
+  }, [done?.mode5_review_ready]);
+
+  useEffect(() => {
+    if (done?.mode5_review_ready || done?.video_path) setMode5WaitUi(null);
+  }, [done?.mode5_review_ready, done?.video_path]);
+
+  // Live incremental Mode 5 review: show new previews while generation is still running.
+  useEffect(() => {
+    if (done?.mode5_review_ready) return;
+    const pollMode5Partial =
+      status === 'running' ||
+      status === 'paused' ||
+      ((status === 'error' || status === 'cancelled') && done?.mode5_can_resume === true);
+    if (!pollMode5Partial) return;
+    let cancelled = false;
+    let timer = null;
+    const tick = async () => {
+      try {
+        const snap = await api.mode5ReviewState(sid);
+        if (cancelled) return;
+        const hintRaw = snap?.mode5_progress_hint;
+        const hint = typeof hintRaw === 'string' ? hintRaw.trim() : '';
+        if (hint) {
+          setMode5WaitUi({
+            hint,
+            segmentsImaged: snap?.mode5_segments_imaged,
+            segmentsTotal: snap?.mode5_segments_total,
+            chunksImaged: snap?.mode5_chunks_imaged,
+            chunksWithSegs: snap?.mode5_chunks_with_segments,
+          });
+        } else if (!snap?.mode5_plan_pending) {
+          setMode5WaitUi(null);
+        }
+        if (Array.isArray(snap?.mode5_clip_filenames) && snap.mode5_clip_filenames.length > 0) {
+          setMode5Live({ ...snap, session_id: snap.session_id || sid });
+          setSessionMode(5);
+          if (snap?.topic) {
+            setSessionTopic((prev) => prev || String(snap.topic));
+          }
+        }
+      } catch (_e) {
+        // no-op: endpoint may be unavailable before plan is created
+      } finally {
+        if (
+          !cancelled &&
+          (status === 'running' ||
+            status === 'paused' ||
+            ((status === 'error' || status === 'cancelled') && done?.mode5_can_resume === true))
+        ) {
+          timer = setTimeout(tick, 2500);
+        }
+      }
+    };
+    tick();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [sid, status, done?.mode5_review_ready, done?.mode5_can_resume]);
 
   // Video URL(s) from result — один файл или несколько (Mode 4 bilingual)
   const videoUrls = useMemo(() => {
     if (!done) return [];
     
-    // Debug logging for troubleshooting
-    console.log('[Progress] done result:', {
-      video_path: done.video_path,
-      video_paths: done.video_paths,
-      session_id: done.session_id,
-      publishing: done.publishing,
-    });
-    
     const base = done.session_id || sid;
-    const paths = done.video_paths && done.video_paths.length > 0
-      ? done.video_paths
-      : done.video_path
-        ? [done.video_path]
-        : [];
-    
-    if (paths.length === 0) {
+    let paths =
+      done.video_paths && done.video_paths.length > 0
+        ? done.video_paths
+        : done.video_path
+          ? [done.video_path]
+          : [];
+    if (done.mode13_review_ready && Array.isArray(done.mode13_clip_filenames) && done.mode13_clip_filenames.length > 0) {
+      paths = done.mode13_clip_filenames;
+    }
+    if (done.mode5_review_ready && Array.isArray(done.mode5_clip_filenames) && done.mode5_clip_filenames.length > 0) {
+      paths = done.mode5_clip_filenames;
+    }
+
+    if (paths.length === 0 && !done.mode4_multiclip_ready && !done.mode13_review_ready && !done.mode5_review_ready) {
       console.warn('[Progress] No video paths found in result:', done);
     }
-    
+
     const prefix = import.meta.env.VITE_API_URL || '';
-    return paths.map(p => {
-      const fname = (p || "").split(/[/\\]/).pop();
+    return paths.map((p, idx) => {
+      const urlPath = publicVideoPath(p);
+      const label =
+        (p || '').includes('video_ru') ? 'RU' : (p || '').includes('video_en') ? 'EN'
+        : (p || '').includes('mode13_preview_') || (p || '').includes('mode5_preview_')
+          ? done.mode5_sub_mode === 'facts50'
+            ? `Fact ${idx + 1}`
+            : done.mode5_sub_mode === 'outline' || done.mode5_sub_mode === 'book_night'
+              ? `Подглава ${idx + 1}`
+              : `Часть ${idx + 1}`
+          : null;
       return {
-        url: `${prefix}/api/video/${base}/${fname}`,
-        label: (p || "").includes("video_ru") ? "RU" : (p || "").includes("video_en") ? "EN" : null,
+        url: `${prefix}/api/video/${base}/${urlPath}`,
+        label,
       };
     });
   }, [done, sid]);
 
+  const mode5ReviewData = done?.mode5_review_ready ? done : mode5Live;
+
+  useEffect(() => {
+    if (done?.mode4_multiclip_ready && typeof done.mode4_show_subtitles === 'boolean') {
+      setMode4AssemblySubs(done.mode4_show_subtitles);
+    }
+  }, [done?.mode4_multiclip_ready, done?.mode4_show_subtitles, done?.session_id]);
+
+  useEffect(() => {
+    if (done?.mode13_review_ready && typeof done.mode13_show_subtitles === 'boolean') {
+      setMode13AssemblySubs(done.mode13_show_subtitles);
+    }
+  }, [done?.mode13_review_ready, done?.mode13_show_subtitles, done?.session_id]);
+
+  useEffect(() => {
+    if (!mode5ReviewData?.mode5_review_ready || !Array.isArray(mode5ReviewData.mode5_chunks_meta)) return;
+    setMode5ChunkDrafts((prev) => {
+      const next = { ...prev };
+      mode5ReviewData.mode5_chunks_meta.forEach((chunk) => {
+        const idx = chunk?.index;
+        if (Number.isInteger(idx) && next[idx] == null) next[idx] = chunk?.text || '';
+      });
+      return next;
+    });
+  }, [mode5ReviewData?.mode5_review_ready, mode5ReviewData?.mode5_chunks_meta, mode5ReviewData?.session_id]);
+
+  const mode4ClipReview = useMemo(() => {
+    if (!done?.mode4_multiclip_ready || !Array.isArray(done.mode4_clip_filenames)) return [];
+    const base = done.session_id || sid;
+    const prefix = import.meta.env.VITE_API_URL || '';
+    return done.mode4_clip_filenames.map((fname, i) => ({
+      fname,
+      index: i,
+      url: `${prefix}/api/video/${base}/${fname}?v=${clipVersion}`,
+      text: Array.isArray(done.mode4_segments) ? done.mode4_segments[i] : '',
+    }));
+  }, [done, sid, clipVersion]);
   const publishMeta = useMemo(() => resolvePublishingMeta(done?.publishing), [done?.publishing]);
 
   // Copy to clipboard helper
@@ -160,6 +335,25 @@ export default function Progress() {
       console.error('Failed to copy:', err);
     }
   };
+
+  const showPublishingMetadata =
+    Boolean(done?.publishing) &&
+    videoUrls.length > 0 &&
+    !done?.mode4_multiclip_ready &&
+    !done?.mode13_review_ready &&
+    !done?.mode5_review_ready;
+
+  const mode5HasAnyClip =
+    (Array.isArray(done?.mode5_clip_filenames) && done.mode5_clip_filenames.length > 0) ||
+    (Array.isArray(mode5Live?.mode5_clip_filenames) && mode5Live.mode5_clip_filenames.length > 0);
+  const showMode5WaitBanner =
+    Boolean(mode5WaitUi?.hint) &&
+    sessionMode === 5 &&
+    !mode5HasAnyClip &&
+    !done?.video_path &&
+    (status === 'running' ||
+      status === 'paused' ||
+      ((status === 'error' || status === 'cancelled') && done?.mode5_can_resume === true));
 
   return (
     <div className="max-w-2xl mx-auto px-6 py-10">
@@ -187,9 +381,29 @@ export default function Progress() {
             <span className="font-mono text-[#52525b]">session …{sid?.slice(-8)}</span>
           </p>
         </div>
+        {showMode5WaitBanner && (
+          <div className="mb-4 p-3 rounded-xl bg-[#1a1810] border border-amber-500/25">
+            <p className="text-sm text-amber-100/95 leading-relaxed">{mode5WaitUi.hint}</p>
+            {Number.isFinite(mode5WaitUi.segmentsTotal) &&
+              mode5WaitUi.segmentsTotal > 0 &&
+              Number.isFinite(mode5WaitUi.segmentsImaged) && (
+                <p className="text-xs text-[#a1a1aa] mt-1.5">
+                  Кадры на диске: {mode5WaitUi.segmentsImaged} / {mode5WaitUi.segmentsTotal}
+                  {Number.isFinite(mode5WaitUi.chunksWithSegs) && mode5WaitUi.chunksWithSegs > 0 ? (
+                    <>
+                      {' '}
+                      · частей полностью: {mode5WaitUi.chunksImaged ?? 0} / {mode5WaitUi.chunksWithSegs}
+                    </>
+                  ) : null}
+                </p>
+              )}
+          </div>
+        )}
         <h1 className="text-xl font-bold text-white">
           {done
-            ? '🎉 Видео готово!'
+            ? done.mode4_multiclip_ready || done.mode5_review_ready
+              ? 'Фрагменты готовы'
+              : '🎉 Видео готово!'
             : status === 'cancelled'
               ? '⏹️ Остановлено'
               : error
@@ -288,32 +502,461 @@ export default function Progress() {
         </motion.div>
       )}
 
-      {/* Restart button — видно при done или error */}
+      {/* Перезапуск / перегенерация — при готовом ролике или ошибке (те же параметры, новая сессия) */}
       {(done || error) && (
-        <div className="mb-4">
-          <button
-            onClick={async () => {
-              setBusy(true);
-              try {
-                const res = await api.restartPipeline(sid);
-                navigate(`/run/${res.session_id}`, { replace: true });
-              } catch (e) {
-                setError(e.message || 'Не удалось перезапустить');
-              } finally {
-                setBusy(false);
-              }
-            }}
-            disabled={busy}
-            className="btn-secondary flex items-center gap-2 text-sm"
-          >
-            <RiRestartLine /> Перезапустить с теми же параметрами
-          </button>
-        </div>
+        <motion.div
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          className={`card p-4 mb-4 ${error ? 'border-amber-800/35 bg-amber-950/10' : ''}`}
+        >
+          {error && (
+            <p className="text-sm text-[#d4d4d8] mb-3 leading-relaxed">
+              Повторите запуск с тем же аудио и настройками — как перегенерация в других режимах. Если файл аудио удалён,
+              загрузите его снова на странице «Создать».
+            </p>
+          )}
+          <div className="flex flex-wrap gap-2">
+            {(error || status === 'cancelled') && done?.mode5_can_resume === true && (
+              <button
+                type="button"
+                onClick={async () => {
+                  setMode5ContinueBusy(true);
+                  try {
+                    await api.mode5ContinueGeneration(sid);
+                    setError('');
+                    setStatus('running');
+                    setStreamNonce((n) => n + 1);
+                  } catch (e) {
+                    setError(e.message || String(e));
+                  } finally {
+                    setMode5ContinueBusy(false);
+                  }
+                }}
+                disabled={mode5ContinueBusy || busy}
+                className="flex items-center gap-2 text-sm px-4 py-2.5 rounded-xl font-medium transition-colors bg-emerald-700 hover:bg-emerald-600 text-white border border-emerald-500/40 disabled:opacity-50"
+              >
+                <RiPlayLine /> Продолжить с сохранённого этапа (77 фактов)
+              </button>
+            )}
+            <button
+              onClick={async () => {
+                setBusy(true);
+                try {
+                  const res = await api.restartPipeline(sid);
+                  navigate(`/run/${res.session_id}`, { replace: true });
+                } catch (e) {
+                  setError(e.message || 'Не удалось перезапустить');
+                } finally {
+                  setBusy(false);
+                }
+              }}
+              disabled={busy}
+              className={`flex items-center gap-2 text-sm px-4 py-2.5 rounded-xl font-medium transition-colors ${
+                error
+                  ? 'bg-brand-600 hover:bg-brand-500 text-white border border-brand-500/40 disabled:opacity-50'
+                  : 'btn-secondary'
+              }`}
+            >
+              <RiRestartLine /> Перезапустить с теми же параметрами
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/history')}
+              className="btn-secondary flex items-center gap-2 text-sm"
+            >
+              <RiVideoLine /> Видео
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/')}
+              className="btn-secondary flex items-center gap-2 text-sm"
+            >
+              + Создать ещё
+            </button>
+          </div>
+        </motion.div>
       )}
+
+      {/* Mode 13 — превью по ~5 мин, перегенерация 30-с сегментов */}
+      <AnimatePresence>
+        {mode5ReviewData && mode5ReviewData.mode5_review_ready && Array.isArray(mode5ReviewData.mode5_clip_filenames) && mode5ReviewData.mode5_clip_filenames.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95, y: 10 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            className="card overflow-hidden mb-4"
+          >
+            <div className="p-4 border-b border-[#27272f] flex items-center gap-2">
+              <RiCheckboxCircleLine className="text-emerald-400 text-xl" />
+              <span className="text-sm font-semibold text-white">
+                {mode5ReviewData.mode5_sub_mode === 'facts50'
+                  ? 'Проверка 77 фактов'
+                  : mode5ReviewData.mode5_sub_mode === 'outline'
+                    ? 'Проверка по плану (от вашего описания)'
+                    : mode5ReviewData.mode5_sub_mode === 'book_night'
+                      ? 'Проверка «книга на ночь»'
+                      : 'Проверка long-form частей'}
+              </span>
+            </div>
+            <p className="px-4 pt-3 text-sm text-[#a1a1aa] leading-relaxed">
+              {mode5ReviewData.mode5_sub_mode === 'facts50'
+                ? 'На каждом клипе сверху — подпись Fact 1, Fact 2, … (латиница). Ниже — превью по одному факту: можно править текст, переозвучить фрагмент или перегенерировать кадр. Финальный ролик — кнопкой «Финальный монтаж» (склейка всех превью по порядку).'
+                : mode5ReviewData.mode5_sub_mode === 'outline'
+                  ? 'Каждое превью — одна подглава плана, собранного из вашего краткого описания (обычно 10–18 частей); внутри блока — длинный текст, в духе истории на ночь. Можно править, переозвучить или перегенерировать кадры. Финальная склейка — кнопкой ниже.'
+                  : mode5ReviewData.mode5_sub_mode === 'book_night'
+                    ? 'Каждое превью — одна подглава по оглавлению выбранной книги. Спокойный ночной текст: чем меньше верхних глав в плане, тем длиннее озвучка на подглаву; при большем числе глав блоки короче (ближе к одному клипу «77 фактов»). Заголовок — глава и подраздел. Можно править, переозвучить или перегенерировать кадры. Финальная склейка — кнопкой ниже.'
+                    : 'Каждое превью — отдельный примерно 5-минутный фрагмент. Можно изменить текст чанка и заново озвучить только его, либо перегенерировать любой отдельный кадр внутри этого чанка. Финальная склейка — кнопкой ниже.'}
+            </p>
+            {Number.isFinite(mode5ReviewData?.mode5_ready_chunks) && Number.isFinite(mode5ReviewData?.mode5_total_chunks) && (
+              <p className="px-4 text-xs text-[#71717a]">
+                Готово фрагментов: {mode5ReviewData.mode5_ready_chunks} из {mode5ReviewData.mode5_total_chunks}
+              </p>
+            )}
+            <div className="px-4 pb-2">
+              <button
+                type="button"
+                disabled={mode5AssemblyBusy}
+                onClick={async () => {
+                  setMode5AssemblyBusy(true);
+                  setError('');
+                  try {
+                    const res = await api.mode5Assemble(sid);
+                    setDone({ ...res, session_id: res.session_id || sid });
+                    setMode5Live(null);
+                    setMode5WaitUi(null);
+                  } catch (e) {
+                    setError(e.message || 'Финальный монтаж не удался');
+                  } finally {
+                    setMode5AssemblyBusy(false);
+                  }
+                }}
+                className="btn-primary flex items-center justify-center gap-2 text-sm font-semibold py-3 w-full"
+              >
+                {mode5AssemblyBusy ? 'Монтаж…' : 'Финальный монтаж (склеить все части)'}
+              </button>
+            </div>
+            <div className="p-4 flex flex-col gap-8">
+              {mode5ReviewData.mode5_clip_filenames.map((rel, idx) => {
+                const base = mode5ReviewData.session_id || sid;
+                const prefix = import.meta.env.VITE_API_URL || '';
+                const urlPath = publicVideoPath(rel);
+                const url = `${prefix}/api/video/${base}/${urlPath}?v=${clipVersion}`;
+                const meta = Array.isArray(mode5ReviewData.mode5_chunks_meta) ? mode5ReviewData.mode5_chunks_meta[idx] : null;
+                const chunkIndex = meta?.index ?? idx;
+                const segments = Array.isArray(meta?.segments) ? meta.segments : [];
+                const draftValue = mode5ChunkDrafts[chunkIndex] ?? meta?.text ?? '';
+                const partLabel = mode5ReviewData.mode5_sub_mode === 'facts50' ? 'Fact' : 'Часть';
+                const outlineHead =
+                  (mode5ReviewData.mode5_sub_mode === 'outline' || mode5ReviewData.mode5_sub_mode === 'book_night') &&
+                  (meta?.chapter_title || meta?.subchapter_title)
+                    ? [meta?.chapter_title, meta?.subchapter_title].filter(Boolean).join(' — ')
+                    : null;
+                return (
+                  <div key={idx} className="border border-[#27272f] rounded-xl p-4 bg-[#14141c]/80">
+                    <p className="text-xs font-semibold text-brand-400/90 uppercase tracking-wider mb-2 line-clamp-3">
+                      {outlineHead || `${partLabel} ${idx + 1}`}
+                      {meta?.duration_sec != null ? ` · ~${Math.round(meta.duration_sec)} с` : ''}
+                      {segments.length > 0 ? ` · ${segments.length} кадров` : ''}
+                    </p>
+                    <div className="flex justify-center bg-black p-3 rounded-lg mb-4">
+                      <video controls className="max-h-[52vh] rounded-lg shadow-xl" style={{ maxWidth: '300px' }} key={url}>
+                        <source src={url} type="video/mp4" />
+                      </video>
+                    </div>
+                    <div className="mb-4">
+                      <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-2">
+                        {mode5ReviewData.mode5_sub_mode === 'facts50'
+                          ? 'Текст озвучки этого факта'
+                          : mode5ReviewData.mode5_sub_mode === 'outline'
+                            ? 'Текст озвучки этой подглавы (развитие от вашего описания)'
+                            : mode5ReviewData.mode5_sub_mode === 'book_night'
+                              ? 'Текст озвучки этой подглавы (по книге)'
+                              : 'Текст этого чанка'}
+                      </label>
+                      <textarea
+                        className="input text-sm min-h-[140px] leading-relaxed"
+                        value={draftValue}
+                        onChange={(e) => setMode5ChunkDrafts((prev) => ({ ...prev, [chunkIndex]: e.target.value }))}
+                      />
+                      <div className="mt-3 flex gap-2">
+                        <button
+                          type="button"
+                          disabled={mode5RegenChunkIdx === chunkIndex || mode5AssemblyBusy}
+                          onClick={async () => {
+                            setMode5RegenChunkIdx(chunkIndex);
+                            setError('');
+                            try {
+                              const res = await api.mode5RegenerateChunk(sid, chunkIndex, mode5ChunkDrafts[chunkIndex] ?? draftValue);
+                              setDone((prev) => {
+                                if (!prev || !Array.isArray(prev.mode5_chunks_meta)) return prev;
+                                const metas = [...prev.mode5_chunks_meta];
+                                if (res?.chunk_meta && chunkIndex >= 0 && chunkIndex < metas.length) metas[chunkIndex] = res.chunk_meta;
+                                return { ...prev, mode5_chunks_meta: metas };
+                              });
+                              setMode5Live((prev) => {
+                                if (!prev || !Array.isArray(prev.mode5_chunks_meta)) return prev;
+                                const metas = [...prev.mode5_chunks_meta];
+                                if (res?.chunk_meta && chunkIndex >= 0 && chunkIndex < metas.length) metas[chunkIndex] = res.chunk_meta;
+                                return { ...prev, mode5_chunks_meta: metas };
+                              });
+                              setClipVersion((v) => v + 1);
+                            } catch (e) {
+                              setError(e.message || 'Переозвучка чанка не удалась');
+                            } finally {
+                              setMode5RegenChunkIdx(null);
+                            }
+                          }}
+                          className="btn-primary text-sm"
+                        >
+                          {mode5RegenChunkIdx === chunkIndex
+                            ? 'Переозвучка…'
+                            : mode5ReviewData.mode5_sub_mode === 'facts50'
+                              ? 'Переозвучить этот факт'
+                              : mode5ReviewData.mode5_sub_mode === 'outline' || mode5ReviewData.mode5_sub_mode === 'book_night'
+                                ? 'Переозвучить эту подглаву'
+                                : 'Переозвучить этот чанк'}
+                        </button>
+                      </div>
+                    </div>
+                    {segments.length > 0 ? (
+                      <div className="flex flex-wrap gap-2">
+                        {segments.map((seg, si) => {
+                          const rk = `${chunkIndex}-${si}`;
+                          return (
+                            <button
+                              key={si}
+                              type="button"
+                              disabled={mode5RegenImageKey === rk || mode5AssemblyBusy}
+                              onClick={async () => {
+                                setMode5RegenImageKey(rk);
+                                setError('');
+                                try {
+                                  await api.mode5RegenerateImage(sid, chunkIndex, si);
+                                  setClipVersion((v) => v + 1);
+                                } catch (e) {
+                                  setError(e.message || 'Перегенерация кадра не удалась');
+                                } finally {
+                                  setMode5RegenImageKey(null);
+                                }
+                              }}
+                              className="btn-secondary text-xs py-1.5 px-2"
+                              title={seg?.text || ''}
+                            >
+                              <RiRestartLine className="inline mr-1" />
+                              Кадр {si + 1}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {done && done.mode13_review_ready && Array.isArray(done.mode13_clip_filenames) && done.mode13_clip_filenames.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95, y: 10 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            className="card overflow-hidden mb-4"
+          >
+            <div className="p-4 border-b border-[#27272f] flex items-center gap-2">
+              <RiCheckboxCircleLine className="text-cyan-400 text-xl" />
+              <span className="text-sm font-semibold text-white">Проверка частей (~5 мин)</span>
+            </div>
+            <p className="px-4 pt-3 text-sm text-[#a1a1aa] leading-relaxed">
+              Каждое видео — фрагмент аудио с картинками, меняющимися каждые ~30 с.
+              «Слайд N» перегенерирует только этот 30-с кадр в данной части и обновляет её превью.
+            </p>
+            <div className="p-4 flex flex-col gap-8">
+              {done.mode13_clip_filenames.map((rel, idx) => {
+                const base = done.session_id || sid;
+                const prefix = import.meta.env.VITE_API_URL || '';
+                const urlPath = publicVideoPath(rel);
+                const url = `${prefix}/api/video/${base}/${urlPath}?v=${clipVersion}`;
+                const meta = Array.isArray(done.mode13_chunks_meta) ? done.mode13_chunks_meta[idx] : null;
+                const chunkIndex = meta?.index ?? idx;
+                const nSeg = meta?.num_segments ?? 0;
+                return (
+                  <div key={idx} className="border border-[#27272f] rounded-xl p-4 bg-[#14141c]/80">
+                    <p className="text-xs font-semibold text-brand-400/90 uppercase tracking-wider mb-2">
+                      Часть {idx + 1}
+                      {meta?.duration_sec != null ? ` · ~${Math.round(meta.duration_sec)} с` : ''}
+                    </p>
+                    <div className="flex justify-center bg-black p-3 rounded-lg mb-3">
+                      <video controls className="max-h-[52vh] rounded-lg shadow-xl" style={{ maxWidth: '300px' }} key={url}>
+                        <source src={url} type="video/mp4" />
+                      </video>
+                    </div>
+                    {nSeg > 0 ? (
+                      <div className="flex flex-wrap gap-2">
+                        {Array.from({ length: nSeg }, (_, si) => {
+                          const rk = `${chunkIndex}-${si}`;
+                          return (
+                            <button
+                              key={si}
+                              type="button"
+                              disabled={mode13RegenKey === rk || mode13AssemblyBusy}
+                              onClick={async () => {
+                                setMode13RegenKey(rk);
+                                setError('');
+                                try {
+                                  await api.mode13RegenerateSegment(sid, chunkIndex, si);
+                                  setClipVersion((v) => v + 1);
+                                } catch (e) {
+                                  setError(e.message || 'Перегенерация не удалась');
+                                } finally {
+                                  setMode13RegenKey(null);
+                                }
+                              }}
+                              className="btn-secondary text-xs py-1.5 px-2"
+                            >
+                              <RiRestartLine className="inline mr-1" />
+                              Слайд {si + 1}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="p-4 border-t border-[#27272f] flex flex-col gap-4">
+              <label className="flex items-center gap-2 text-sm text-[#d4d4d8] cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  className="rounded border-[#3f3f46] bg-[#1a1a24] text-brand-600 focus:ring-brand-500"
+                  checked={mode13AssemblySubs}
+                  onChange={(e) => setMode13AssemblySubs(e.target.checked)}
+                  disabled={mode13AssemblyBusy}
+                />
+                Субтитры на видео (текст сегмента на слайде)
+              </label>
+              <p className="text-xs text-[#71717a] -mt-2">
+                Если выключить или включить с другим состоянием, чем при генерации, превью пересоберутся перед склейкой.
+              </p>
+              <button
+                type="button"
+                disabled={mode13AssemblyBusy}
+                onClick={async () => {
+                  setMode13AssemblyBusy(true);
+                  setError('');
+                  try {
+                    const res = await api.mode13Assemble(sid, mode13AssemblySubs);
+                    setDone({ ...res, session_id: res.session_id || sid });
+                  } catch (e) {
+                    setError(e.message || 'Монтаж не удался');
+                  } finally {
+                    setMode13AssemblyBusy(false);
+                  }
+                }}
+                className="btn-primary flex items-center justify-center gap-2 text-sm font-semibold py-3"
+              >
+                {mode13AssemblyBusy ? 'Монтаж…' : 'Финальный монтаж'}
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Mode 4 multiclip — review + assemble */}
+      <AnimatePresence>
+        {done && done.mode4_multiclip_ready && mode4ClipReview.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95, y: 10 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            className="card overflow-hidden mb-4"
+          >
+            <div className="p-4 border-b border-[#27272f] flex items-center gap-2">
+              <RiCheckboxCircleLine className="text-amber-400 text-xl" />
+              <span className="text-sm font-semibold text-white">Цитата: проверка фрагментов</span>
+            </div>
+            <p className="px-4 pt-3 text-sm text-[#a1a1aa] leading-relaxed">
+              Просмотрите клипы. При необходимости перегенерируйте отдельный фрагмент, затем соберите финальный ролик с субтитрами.
+            </p>
+            <div className="p-4 flex flex-col gap-8">
+              {mode4ClipReview.map((row) => (
+                <div key={row.index} className="border border-[#27272f] rounded-xl p-4 bg-[#14141c]/80">
+                  <p className="text-xs font-semibold text-brand-400/90 uppercase tracking-wider mb-2">
+                    Фрагмент {row.index + 1}
+                  </p>
+                  {row.text ? (
+                    <p className="text-sm text-[#d4d4d8] mb-3 whitespace-pre-wrap leading-relaxed">{row.text}</p>
+                  ) : null}
+                  <div className="flex justify-center bg-black p-3 rounded-lg mb-3">
+                    <video
+                      controls
+                      className="max-h-[52vh] rounded-lg shadow-xl"
+                      style={{ maxWidth: '300px' }}
+                      key={row.url}
+                    >
+                      <source src={row.url} type="video/mp4" />
+                    </video>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={mode4RegenIdx === row.index || mode4AssemblyBusy}
+                    onClick={async () => {
+                      setMode4RegenIdx(row.index);
+                      setError('');
+                      try {
+                        await api.mode4RegenerateClip(sid, row.index);
+                        setClipVersion((v) => v + 1);
+                      } catch (e) {
+                        setError(e.message || 'Перегенерация не удалась');
+                      } finally {
+                        setMode4RegenIdx(null);
+                      }
+                    }}
+                    className="btn-secondary flex items-center gap-2 text-sm"
+                  >
+                    <RiRestartLine /> Перегенерировать этот фрагмент
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="p-4 border-t border-[#27272f] flex flex-col gap-4">
+              <label className="flex items-center gap-2 text-sm text-[#d4d4d8] cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  className="rounded border-[#3f3f46] bg-[#1a1a24] text-brand-600 focus:ring-brand-500"
+                  checked={mode4AssemblySubs}
+                  onChange={(e) => setMode4AssemblySubs(e.target.checked)}
+                  disabled={mode4AssemblyBusy}
+                />
+                Субтитры в финальном ролике
+              </label>
+              <button
+                type="button"
+                disabled={mode4AssemblyBusy}
+                onClick={async () => {
+                  setMode4AssemblyBusy(true);
+                  setError('');
+                  try {
+                    const res = await api.mode4Assemble(sid, mode4AssemblySubs);
+                    setDone({ ...res, session_id: res.session_id || sid });
+                  } catch (e) {
+                    setError(e.message || 'Монтаж не удался');
+                  } finally {
+                    setMode4AssemblyBusy(false);
+                  }
+                }}
+                className="btn-primary flex items-center justify-center gap-2 text-sm font-semibold py-3"
+              >
+                {mode4AssemblyBusy ? 'Монтаж…' : 'Финальный монтаж'}
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Done — video player(s) */}
       <AnimatePresence>
-        {done && videoUrls.length > 0 && (
+        {done && !done.mode4_multiclip_ready && !done.mode13_review_ready && !done.mode5_review_ready && videoUrls.length > 0 && (
           <motion.div
             initial={{ opacity: 0, scale: 0.95, y: 10 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -431,79 +1074,203 @@ export default function Progress() {
 
       {/* Publishing Metadata */}
       <AnimatePresence>
-        {publishMeta && (
-          <motion.div
-            initial={{ opacity: 0, scale: 0.95, y: 10 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            className="card overflow-hidden mb-4"
-          >
-            <div className="p-4 border-b border-[#27272f] flex items-center gap-2">
-              <span className="text-lg">📝</span>
-              <span className="text-sm font-semibold text-white">Данные для публикации</span>
-            </div>
-            <div className="p-4 space-y-4">
-              {/* Title */}
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs font-medium text-[#71717a] uppercase tracking-wider">Название</span>
-                  <button
-                    onClick={() => copyToClipboard(publishMeta.title, 'title')}
-                    className="text-[#71717a] hover:text-white transition-colors"
-                  >
-                    {copied === 'title' ? <RiCheckLine className="text-emerald-400" /> : <RiFileCopyLine />}
-                  </button>
+        {showPublishingMetadata && (() => {
+          const p = done.publishing;
+          const nested = p.ru || p.en;
+          const renderBlock = (block, label, prefix) => {
+            if (!block) return null;
+            return (
+              <div key={prefix} className="space-y-4 pt-4 first:pt-0 first:border-0 border-t border-[#27272f]">
+                <p className="text-xs font-semibold text-brand-300 uppercase tracking-wider">{label}</p>
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-medium text-[#71717a] uppercase tracking-wider">Название</span>
+                    <button
+                      type="button"
+                      onClick={() => copyToClipboard(block.title, `${prefix}-title`)}
+                      className="text-[#71717a] hover:text-white transition-colors"
+                    >
+                      {copied === `${prefix}-title` ? <RiCheckLine className="text-emerald-400" /> : <RiFileCopyLine />}
+                    </button>
+                  </div>
+                  <p className="text-white text-sm font-medium">{block.title}</p>
                 </div>
-                <p className="text-white text-sm font-medium">{publishMeta.title}</p>
+                {Array.isArray(block.title_variants) && block.title_variants.length > 0 && (
+                  <div className="space-y-2">
+                    <span className="text-xs font-medium text-[#71717a] uppercase tracking-wider">Варианты A/B/C</span>
+                    {block.title_variants.map((t, i) => (
+                      <div key={i} className="flex items-start gap-2">
+                        <span className="text-[10px] text-[#52525b] font-mono w-4 shrink-0 pt-0.5">{String.fromCharCode(65 + i)}</span>
+                        <p className="text-[#a1a1aa] text-sm flex-1 min-w-0">{t}</p>
+                        <button
+                          type="button"
+                          onClick={() => copyToClipboard(t, `${prefix}-v${i}`)}
+                          className="text-[#71717a] hover:text-white shrink-0"
+                        >
+                          {copied === `${prefix}-v${i}` ? <RiCheckLine className="text-emerald-400 text-sm" /> : <RiFileCopyLine className="text-sm" />}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-medium text-[#71717a] uppercase tracking-wider">Описание</span>
+                    <button
+                      type="button"
+                      onClick={() => copyToClipboard(block.description, `${prefix}-desc`)}
+                      className="text-[#71717a] hover:text-white transition-colors"
+                    >
+                      {copied === `${prefix}-desc` ? <RiCheckLine className="text-emerald-400" /> : <RiFileCopyLine />}
+                    </button>
+                  </div>
+                  <p className="text-[#a1a1aa] text-sm whitespace-pre-wrap">{block.description}</p>
+                </div>
+                {block.hashtags?.length > 0 && (
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs font-medium text-[#71717a] uppercase tracking-wider">Хештеги</span>
+                      <button
+                        type="button"
+                        onClick={() => copyToClipboard(block.hashtags.join(' '), `${prefix}-hash`)}
+                        className="text-[#71717a] hover:text-white transition-colors"
+                      >
+                        {copied === `${prefix}-hash` ? <RiCheckLine className="text-emerald-400" /> : <RiFileCopyLine />}
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {block.hashtags.map((tag, i) => (
+                        <span key={i} className="px-2 py-1 bg-[#27272f] rounded text-xs text-[#a1a1aa]">{tag}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-medium text-[#71717a] uppercase tracking-wider">Теги</span>
+                    <button
+                      type="button"
+                      onClick={() => copyToClipboard(block.tags?.join(', '), `${prefix}-tags`)}
+                      className="text-[#71717a] hover:text-white transition-colors"
+                    >
+                      {copied === `${prefix}-tags` ? <RiCheckLine className="text-emerald-400" /> : <RiFileCopyLine />}
+                    </button>
+                  </div>
+                  <p className="text-[#71717a] text-xs font-mono">{block.tags?.join(', ')}</p>
+                </div>
+                {block.first_comment ? (
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs font-medium text-[#71717a] uppercase tracking-wider">Первый комментарий</span>
+                      <button
+                        type="button"
+                        onClick={() => copyToClipboard(block.first_comment, `${prefix}-fc`)}
+                        className="text-[#71717a] hover:text-white transition-colors"
+                      >
+                        {copied === `${prefix}-fc` ? <RiCheckLine className="text-emerald-400" /> : <RiFileCopyLine />}
+                      </button>
+                    </div>
+                    <p className="text-[#a1a1aa] text-sm whitespace-pre-wrap">{block.first_comment}</p>
+                  </div>
+                ) : null}
               </div>
-
-              {/* Description */}
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs font-medium text-[#71717a] uppercase tracking-wider">Описание</span>
-                  <button
-                    onClick={() => copyToClipboard(publishMeta.description, 'description')}
-                    className="text-[#71717a] hover:text-white transition-colors"
-                  >
-                    {copied === 'description' ? <RiCheckLine className="text-emerald-400" /> : <RiFileCopyLine />}
-                  </button>
-                </div>
-                <p className="text-[#a1a1aa] text-sm">{publishMeta.description}</p>
+            );
+          };
+          return (
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              className="card overflow-hidden mb-4"
+            >
+              <div className="p-4 border-b border-[#27272f] flex items-center gap-2">
+                <span className="text-lg">📝</span>
+                <span className="text-sm font-semibold text-white">Данные для публикации</span>
               </div>
-
-              {/* Hashtags */}
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs font-medium text-[#71717a] uppercase tracking-wider">Хештеги</span>
-                  <button
-                    onClick={() => copyToClipboard(publishMeta.hashtags?.join(' '), 'hashtags')}
-                    className="text-[#71717a] hover:text-white transition-colors"
-                  >
-                    {copied === 'hashtags' ? <RiCheckLine className="text-emerald-400" /> : <RiFileCopyLine />}
-                  </button>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {publishMeta.hashtags?.map((tag, i) => (
-                    <span key={i} className="px-2 py-1 bg-[#27272f] rounded text-xs text-[#a1a1aa]">{tag}</span>
-                  ))}
-                </div>
+              <div className="p-4 space-y-2">
+                {nested ? (
+                  <>
+                    {renderBlock(p.ru, '🇷🇺 Русская версия', 'ru')}
+                    {renderBlock(p.en, '🇬🇧 English', 'en')}
+                  </>
+                ) : (
+                  <div className="space-y-4">
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-xs font-medium text-[#71717a] uppercase tracking-wider">Название</span>
+                        <button
+                          type="button"
+                          onClick={() => copyToClipboard(p.title, 'title')}
+                          className="text-[#71717a] hover:text-white transition-colors"
+                        >
+                          {copied === 'title' ? <RiCheckLine className="text-emerald-400" /> : <RiFileCopyLine />}
+                        </button>
+                      </div>
+                      <p className="text-white text-sm font-medium">{p.title}</p>
+                    </div>
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-xs font-medium text-[#71717a] uppercase tracking-wider">Описание</span>
+                        <button
+                          type="button"
+                          onClick={() => copyToClipboard(p.description, 'description')}
+                          className="text-[#71717a] hover:text-white transition-colors"
+                        >
+                          {copied === 'description' ? <RiCheckLine className="text-emerald-400" /> : <RiFileCopyLine />}
+                        </button>
+                      </div>
+                      <p className="text-[#a1a1aa] text-sm">{p.description}</p>
+                    </div>
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-xs font-medium text-[#71717a] uppercase tracking-wider">Хештеги</span>
+                        <button
+                          type="button"
+                          onClick={() => copyToClipboard(p.hashtags?.join(' '), 'hashtags')}
+                          className="text-[#71717a] hover:text-white transition-colors"
+                        >
+                          {copied === 'hashtags' ? <RiCheckLine className="text-emerald-400" /> : <RiFileCopyLine />}
+                        </button>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {p.hashtags?.map((tag, i) => (
+                          <span key={i} className="px-2 py-1 bg-[#27272f] rounded text-xs text-[#a1a1aa]">{tag}</span>
+                        ))}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-xs font-medium text-[#71717a] uppercase tracking-wider">Теги (YouTube Studio)</span>
+                        <button
+                          type="button"
+                          onClick={() => copyToClipboard(p.tags?.join(', '), 'tags')}
+                          className="text-[#71717a] hover:text-white transition-colors"
+                        >
+                          {copied === 'tags' ? <RiCheckLine className="text-emerald-400" /> : <RiFileCopyLine />}
+                        </button>
+                      </div>
+                      <p className="text-[#71717a] text-xs font-mono">{p.tags?.join(', ')}</p>
+                    </div>
+                    {p.first_comment ? (
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs font-medium text-[#71717a] uppercase tracking-wider">Первый комментарий</span>
+                          <button
+                            type="button"
+                            onClick={() => copyToClipboard(p.first_comment, 'fc')}
+                            className="text-[#71717a] hover:text-white transition-colors"
+                          >
+                            {copied === 'fc' ? <RiCheckLine className="text-emerald-400" /> : <RiFileCopyLine />}
+                          </button>
+                        </div>
+                        <p className="text-[#a1a1aa] text-sm whitespace-pre-wrap">{p.first_comment}</p>
+                      </div>
+                    ) : null}
+                  </div>
+                )}
               </div>
-
-              {/* Tags */}
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs font-medium text-[#71717a] uppercase tracking-wider">Теги (YouTube Studio)</span>
-                  <button
-                    onClick={() => copyToClipboard(publishMeta.tags?.join(', '), 'tags')}
-                    className="text-[#71717a] hover:text-white transition-colors"
-                  >
-                    {copied === 'tags' ? <RiCheckLine className="text-emerald-400" /> : <RiFileCopyLine />}
-                  </button>
-                </div>
-                <p className="text-[#71717a] text-xs font-mono">{publishMeta.tags?.join(', ')}</p>
-              </div>
-            </div>
-          </motion.div>
-        )}
+            </motion.div>
+          );
+        })()}
       </AnimatePresence>
 
       {/* Log console */}

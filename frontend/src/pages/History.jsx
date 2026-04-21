@@ -66,6 +66,7 @@ export default function History() {
   const [state, dispatch] = useReducer(historyReducer, initialState);
   const [selected, setSelected] = useState(null);
   const [regenBusy, setRegenBusy] = useState(false);
+  const [mode5AssembleBusy, setMode5AssembleBusy] = useState(false);
   const [ytStatus, setYtStatus] = useState(null);
   /** Пока true — не полагаемся на ytStatus (быстрый первый paint без «пропавшей» кнопки). */
   const [ytLoading, setYtLoading] = useState(true);
@@ -197,6 +198,10 @@ export default function History() {
         <h1 className="text-2xl font-bold text-white mb-1">История видео</h1>
         <p className="text-[#71717a] text-sm">
           {videos.length} видео сгенерировано
+        </p>
+        <p className="text-[11px] text-[#52525b] mt-2 max-w-xl leading-relaxed">
+          Режим «77 фактов»: превью одной сессии показываются одной карточкой; кнопка «Склеить в одно видео» собирает{' '}
+          <code className="text-[#71717a]">video_mode5.mp4</code> из всех частей (тот же монтаж, что на экране прогресса).
         </p>
         {ytLoading && (
           <p className="mt-3 text-[11px] text-[#a1a1aa] flex items-center gap-2">
@@ -331,6 +336,8 @@ export default function History() {
               <VideoCard
                 video={v}
                 onClick={setSelected}
+                onOpenProgress={(sid) => navigate(`/run/${sid}`)}
+                onListRefresh={load}
                 onDelete={(sid, fname) =>
                   dispatch({
                     type: 'success',
@@ -414,6 +421,44 @@ export default function History() {
                   );
                 })()}
                 <div className="p-3 sm:p-4 border-t border-[#27272f] flex flex-col gap-2 shrink-0">
+                  {selected?.mode5_can_assemble && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (!selected?.session_id) return;
+                        setSelected(null);
+                        navigate(`/run/${selected.session_id}`);
+                      }}
+                      className="btn-secondary flex items-center justify-center gap-2 text-sm w-full"
+                    >
+                      Открыть редактирование фрагментов
+                    </button>
+                  )}
+                  {selected?.mode5_can_assemble && (
+                    <button
+                      type="button"
+                      disabled={mode5AssembleBusy}
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        const sid = selected?.session_id;
+                        if (!sid) return;
+                        setMode5AssembleBusy(true);
+                        try {
+                          await api.mode5Assemble(sid);
+                          setSelected(null);
+                          load();
+                        } catch (err) {
+                          alert(err.message || 'Не удалось склеить видео');
+                        } finally {
+                          setMode5AssembleBusy(false);
+                        }
+                      }}
+                      className="btn-primary flex items-center justify-center gap-2 text-sm w-full bg-emerald-600 hover:bg-emerald-500 border-emerald-500/40"
+                    >
+                      {mode5AssembleBusy ? 'Монтаж…' : 'Склеить все части в одно видео'}
+                    </button>
+                  )}
                   <a
                     href={api.videoUrl(selected?.session_id, selected?.filename)}
                     download
@@ -502,21 +547,27 @@ export default function History() {
                         onClick={() => {
                           const ru = selected.publishing.ru;
                           const en = selected.publishing.en;
+                          const ruVar = (ru?.title_variants || []).map((t, i) => `  ${String.fromCharCode(65 + i)}: ${t}`).join('\n');
+                          const enVar = (en?.title_variants || []).map((t, i) => `  ${String.fromCharCode(65 + i)}: ${t}`).join('\n');
                           const text = `🇷🇺 Русская версия
 
 Название: ${ru?.title || ''}
-
+${ruVar ? `Варианты:\n${ruVar}\n` : ''}
 Описание: ${ru?.description || ''}
 
 Теги: ${(ru?.tags || []).join(', ')}
 
+Первый комментарий: ${ru?.first_comment || ''}
+
 🇬🇧 English Version
 
 Title: ${en?.title || ''}
-
+${enVar ? `Variants:\n${enVar}\n` : ''}
 Description: ${en?.description || ''}
 
-Tags: ${(en?.tags || []).join(', ')}`;
+Tags: ${(en?.tags || []).join(', ')}
+
+First comment: ${en?.first_comment || ''}`;
                           navigator.clipboard.writeText(text);
                         }}
                         className="text-sm bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-3 py-1.5 rounded transition-colors font-medium"
@@ -537,7 +588,7 @@ Tags: ${(en?.tags || []).join(', ')}`;
                         {/* Title RU */}
                         <div>
                           <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1.5">
-                            Название
+                            Название (основное)
                           </label>
                           <div className="flex gap-2">
                             <input
@@ -558,6 +609,31 @@ Tags: ${(en?.tags || []).join(', ')}`;
                             </button>
                           </div>
                         </div>
+                        {Array.isArray(selected.publishing.ru.title_variants) && selected.publishing.ru.title_variants.length > 0 && (
+                          <div className="space-y-2">
+                            <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider">
+                              Варианты заголовка (A / B / C)
+                            </label>
+                            {selected.publishing.ru.title_variants.map((t, i) => (
+                              <div key={i} className="flex gap-2 items-center">
+                                <span className="text-xs text-[#52525b] w-6 font-mono shrink-0">{String.fromCharCode(65 + i)}</span>
+                                <input
+                                  type="text"
+                                  value={t || ''}
+                                  readOnly
+                                  className="flex-1 bg-[#1a1a2e] border border-[#27272f] rounded px-3 py-2 text-sm text-white min-w-0"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => navigator.clipboard.writeText(t || '')}
+                                  className="text-sm bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-3 py-2 rounded shrink-0"
+                                >
+                                  📋
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                         
                         {/* Description RU */}
                         <div>
@@ -608,6 +684,28 @@ Tags: ${(en?.tags || []).join(', ')}`;
                             </button>
                           </div>
                         </div>
+                        {selected.publishing.ru.first_comment ? (
+                          <div>
+                            <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1.5">
+                              Первый комментарий
+                            </label>
+                            <div className="flex gap-2">
+                              <textarea
+                                value={selected.publishing.ru.first_comment || ''}
+                                readOnly
+                                rows={3}
+                                className="flex-1 bg-[#1a1a2e] border border-[#27272f] rounded px-3 py-2 text-sm text-white resize-none"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => navigator.clipboard.writeText(selected.publishing.ru.first_comment || '')}
+                                className="text-sm bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-3 py-2 rounded self-start"
+                              >
+                                📋
+                              </button>
+                            </div>
+                          </div>
+                        ) : null}
                       </div>
                     )}
                     
@@ -622,7 +720,7 @@ Tags: ${(en?.tags || []).join(', ')}`;
                         {/* Title EN */}
                         <div>
                           <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1.5">
-                            Title
+                            Title (primary)
                           </label>
                           <div className="flex gap-2">
                             <input
@@ -643,6 +741,31 @@ Tags: ${(en?.tags || []).join(', ')}`;
                             </button>
                           </div>
                         </div>
+                        {Array.isArray(selected.publishing.en.title_variants) && selected.publishing.en.title_variants.length > 0 && (
+                          <div className="space-y-2">
+                            <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider">
+                              Title variants (A / B / C)
+                            </label>
+                            {selected.publishing.en.title_variants.map((t, i) => (
+                              <div key={i} className="flex gap-2 items-center">
+                                <span className="text-xs text-[#52525b] w-6 font-mono shrink-0">{String.fromCharCode(65 + i)}</span>
+                                <input
+                                  type="text"
+                                  value={t || ''}
+                                  readOnly
+                                  className="flex-1 bg-[#1a1a2e] border border-[#27272f] rounded px-3 py-2 text-sm text-white min-w-0"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => navigator.clipboard.writeText(t || '')}
+                                  className="text-sm bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-3 py-2 rounded shrink-0"
+                                >
+                                  📋
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                         
                         {/* Description EN */}
                         <div>
@@ -693,6 +816,28 @@ Tags: ${(en?.tags || []).join(', ')}`;
                             </button>
                           </div>
                         </div>
+                        {selected.publishing.en.first_comment ? (
+                          <div>
+                            <label className="block text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-1.5">
+                              First comment
+                            </label>
+                            <div className="flex gap-2">
+                              <textarea
+                                value={selected.publishing.en.first_comment || ''}
+                                readOnly
+                                rows={3}
+                                className="flex-1 bg-[#1a1a2e] border border-[#27272f] rounded px-3 py-2 text-sm text-white resize-none"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => navigator.clipboard.writeText(selected.publishing.en.first_comment || '')}
+                                className="text-sm bg-brand-400/20 hover:bg-brand-400/30 text-brand-300 px-3 py-2 rounded self-start"
+                              >
+                                📋
+                              </button>
+                            </div>
+                          </div>
+                        ) : null}
                       </div>
                     )}
                   </div>

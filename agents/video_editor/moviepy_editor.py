@@ -41,7 +41,7 @@ from agents.video_editor.ffmpeg_xfade import (
 )
 from agents.video_editor.fonts import load_ui_font
 from agents.video_editor.sound_effects import SoundEffects
-from agents.video_editor.subtitles import render_subtitle_overlay
+from agents.video_editor.subtitles import render_quote_header_overlay, render_subtitle_overlay
 from agents.video_editor.music_gen import generate_background_music
 from config import settings
 
@@ -897,6 +897,12 @@ def _make_scene_clip(
     watermark_arr: np.ndarray | None,
     hook_text: str | None = None,
     hook_duration: float = 3.0,
+    *,
+    show_fact_label: bool = True,
+    header_title: str | None = None,
+    subtitle_karaoke: bool = True,
+    subtitle_static_font_divisor: int = 15,
+    ken_burns_intensity: float = 1.0,
 ) -> VideoClip:
     """
     Build one scene clip with ALL overlays composited inside a single make_frame
@@ -904,12 +910,16 @@ def _make_scene_clip(
 
     Overlays:
       subtitle   – pill + karaoke, fades in over 0.30 s (rendered per frame)
-      fact label – static (top center)
+      fact label – static (top center), optional (Top-5 facts format)
+      header_title – optional top banner (same style as Mode 4 quotes)
       watermark  – static (top-left)
       hook banner – animated alpha (first hook_duration seconds, scene 1 only)
     """
+    header_plain = (header_title or "").strip() or None
     # ── Pre-render static RGBA overlays ──────────────────────────────────────
-    fact_arr: np.ndarray | None = _make_fact_label_overlay(scene_num, target_w, target_h)
+    fact_arr: np.ndarray | None = (
+        _make_fact_label_overlay(scene_num, target_w, target_h) if show_fact_label else None
+    )
     has_subtitle = bool(subtitle_text and subtitle_text.strip())
     hook_arr: np.ndarray | None = (
         _make_hook_banner_arr(hook_text, target_w, target_h)
@@ -917,7 +927,9 @@ def _make_scene_clip(
     )
 
     # ── Ken Burns setup ───────────────────────────────────────────────────────
-    pad = 1.15
+    k_motion = max(0.6, min(2.25, float(ken_burns_intensity)))
+    # Сильнее зум — чуть больше «запаса» вокруг кадра, чтобы не упираться в край.
+    pad = min(1.30, 1.15 + 0.07 * max(0.0, k_motion - 1.0))
     img = Image.open(img_path).convert("RGB")
     img = _resize_fill(img, int(target_w * pad), int(target_h * pad))
     img = _color_grade(img)
@@ -988,20 +1000,23 @@ def _make_scene_clip(
     HK_FADE_IN, HK_FADE_OUT = 0.20, 0.35
     sub_transition: dict = {}
 
+    zi = 0.05 * k_motion
+    pa = 0.10 * k_motion
+    zp = 0.04 * k_motion
+
     def make_frame(t: float) -> np.ndarray:
         p = min(1.0, t / duration)
 
-        # 1. Ken Burns background
-        # Reduce motion amplitude to minimize visible "jump" at scene boundaries.
-        if   style == "zoom_in":           frame = _crop(p, 0.5, 0.5, 1.0 + 0.05 * p)
-        elif style == "zoom_out":          frame = _crop(p, 0.5, 0.5, 1.05 - 0.05 * p)
-        elif style == "pan_left":          frame = _crop(p, 0.60 - 0.10 * p, 0.5, 1.0)
-        elif style == "pan_right":         frame = _crop(p, 0.40 + 0.10 * p, 0.5, 1.0)
-        elif style == "zoom_pan_lr":       frame = _crop(p, 0.46 + 0.04 * p, 0.5, 1.0 + 0.04 * p)
-        elif style == "zoom_pan_rl":       frame = _crop(p, 0.54 - 0.04 * p, 0.5, 1.0 + 0.04 * p)
-        elif style == "zoom_pan_diag_tl":  frame = _crop(p, 0.54 - 0.04 * p, 0.54 - 0.04 * p, 1.0 + 0.04 * p)
-        elif style == "zoom_pan_diag_br":  frame = _crop(p, 0.46 + 0.04 * p, 0.46 + 0.04 * p, 1.05 - 0.05 * p)
-        else:                              frame = _crop(p, 0.5, 0.5, 1.0 + 0.05 * p)
+        # 1. Ken Burns background (intensity > 1 — заметнее зум/пан для слайд-шоу)
+        if   style == "zoom_in":           frame = _crop(p, 0.5, 0.5, 1.0 + zi * p)
+        elif style == "zoom_out":          frame = _crop(p, 0.5, 0.5, (1.0 + zi) - zi * p)
+        elif style == "pan_left":          frame = _crop(p, 0.60 - pa * p, 0.5, 1.0)
+        elif style == "pan_right":         frame = _crop(p, 0.40 + pa * p, 0.5, 1.0)
+        elif style == "zoom_pan_lr":       frame = _crop(p, 0.46 + zp * p, 0.5, 1.0 + zp * p)
+        elif style == "zoom_pan_rl":       frame = _crop(p, 0.54 - zp * p, 0.5, 1.0 + zp * p)
+        elif style == "zoom_pan_diag_tl":  frame = _crop(p, 0.54 - zp * p, 0.54 - zp * p, 1.0 + zp * p)
+        elif style == "zoom_pan_diag_br":  frame = _crop(p, 0.46 + zp * p, 0.46 + zp * p, (1.0 + zi) - zi * p)
+        else:                              frame = _crop(p, 0.5, 0.5, 1.0 + zi * p)
 
         # 2. Subtitle (fade-in on whole overlay)
         if has_subtitle:
@@ -1011,6 +1026,8 @@ def _make_scene_clip(
                 target_h,
                 t,
                 duration,
+                karaoke=subtitle_karaoke,
+                static_font_divisor=subtitle_static_font_divisor,
                 transition_state=sub_transition,
             )
             # Fade in/out so during crossfades the previous subtitle doesn't overlap.
@@ -1026,6 +1043,11 @@ def _make_scene_clip(
                 ov = ov.copy()
                 ov[:, :, 3] = (ov[:, :, 3] * alpha).astype(np.uint8)
             frame = _alpha_blit(frame, ov)
+
+        # 2b. Top header (Mode 4 / Mode 13 — custom title)
+        if header_plain:
+            hdr = render_quote_header_overlay(header_plain, target_w, target_h, t, duration)
+            frame = _alpha_blit(frame, hdr)
 
         # 3. Fact label (static)
         if fact_arr is not None:
@@ -1074,6 +1096,7 @@ def _pick_background_music(
         path = generate_background_music(
             topic=topic,
             duration=dur,
+            base_duration=int(getattr(settings, "ai_music_base_duration_sec", 180) or 180),
             cache_dir=settings.music_cache_dir,
         )
         if path:
@@ -1218,9 +1241,19 @@ def assemble_video(
     title_subtitle_text: str | None = None,
     outro_subtitle_text: str | None = None,
     outro_bg_image_path: str | None = None,
+    *,
+    skip_background_music: bool = False,
+    skip_sound_effects: bool = False,
+    show_fact_label: bool = True,
+    header_title: str | None = None,
+    output_resolution: tuple[int, int] | None = None,
+    subtitle_karaoke: bool = True,
+    subtitle_static_font_divisor: int = 15,
+    ken_burns_per_scene: bool = False,
+    ken_burns_intensity: float = 1.0,
 ) -> Path:
     """
-    Assemble a complete vertical video from scene data.
+    Assemble a complete video from scene data (vertical by default via settings).
 
     Args:
         scenes:      SceneData list (image + subtitle + audio).
@@ -1229,8 +1262,15 @@ def assemble_video(
         hook:        Hook line for title card + first-scene banner.
         outro:       CTA text for outro card.
         topic:       Original topic string — used for AI music generation.
+        show_fact_label: If True (default), draw "Факт N" at the top (mode 1). False for mode 13 (audio slides).
+        header_title: Optional fixed title at top (Mode 4 quote style); e.g. Mode 13 user-defined heading.
+        output_resolution: Optional (width, height); только mode 13 передаёт своё (16:9), остальные — из VIDEO_FORMAT.
+        subtitle_karaoke: False — весь текст сегмента сразу (mode 13), без пословной подсветки.
+        subtitle_static_font_divisor: делитель ширины для размера шрифта при subtitle_karaoke=False.
+        ken_burns_per_scene: каждый слайд — свой тип движения (mode 13); иначе один стиль на всё видео.
+        ken_burns_intensity: множитель амплитуды Ken Burns (1.0 — как раньше для факт-режимов).
     """
-    target_w, target_h = settings.video_resolution
+    target_w, target_h = output_resolution if output_resolution is not None else settings.video_resolution
     fps = settings.video_fps
     base_dur = settings.video_duration_per_image
     T = max(0.0, settings.video_transition_duration)
@@ -1247,8 +1287,8 @@ def assemble_video(
     # Вступление отключено — сразу начинаем с фактов (scene clips)
 
     # ── Scene clips ───────────────────────────────────────────────────────────
-    # Keep one Ken Burns motion style across the whole video for smoother
-    # visual continuity (crossfades with different styles look "jerky").
+    # По умолчанию один стиль на всё видео (ровнее кроссфейды). Для слайд-шоу (mode 13)
+    # включают ken_burns_per_scene — на каждом кадре свой зум/пан.
     scene_style = random.choice(_KB_STYLES)
     total_scenes = len(scenes)
 
@@ -1264,7 +1304,7 @@ def assemble_video(
             except Exception as e:
                 logger.warning(f"[VideoEditor] Could not load audio: {e}")
 
-        style = scene_style
+        style = random.choice(_KB_STYLES) if ken_burns_per_scene else scene_style
         hook_dur = min(3.0, clip_dur - 0.3)
 
         # Build the scene clip with ALL overlays combined in a single make_frame
@@ -1281,6 +1321,11 @@ def assemble_video(
             watermark_arr=wm_arr,
             hook_text=None,
             hook_duration=hook_dur,
+            show_fact_label=show_fact_label,
+            header_title=header_title,
+            subtitle_karaoke=subtitle_karaoke,
+            subtitle_static_font_divisor=subtitle_static_font_divisor,
+            ken_burns_intensity=ken_burns_intensity,
         )
 
         # Voiceover (audio is attached separately — not part of frame rendering)
@@ -1347,7 +1392,11 @@ def assemble_video(
     assert final is not None
 
     # ── Background music (generated last when video duration is known) ─────────
-    music_path = _pick_background_music(topic=topic or title, duration=final.duration)
+    music_path = (
+        None
+        if skip_background_music
+        else _pick_background_music(topic=topic or title, duration=final.duration)
+    )
     audio_layers: list = []
 
     if final.audio:
@@ -1375,7 +1424,7 @@ def assemble_video(
             logger.warning(f"[VideoEditor] Music failed: {exc}")
 
     # ── Sound effects ─────────────────────────────────────────────────────────
-    if sfx is not None:
+    if sfx is not None and not skip_sound_effects:
         try:
             clip_starts, transition_times = _compute_timecodes(clip_durations, T)
             # scene_start_times = timecodes of the actual scene clips within all_clips

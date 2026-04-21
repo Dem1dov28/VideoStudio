@@ -39,7 +39,12 @@ XFADE_PRESETS = frozenset({
 
 
 def ffmpeg_available() -> bool:
-    return shutil.which("ffmpeg") is not None
+    try:
+        from utils.ffmpeg_resolve import resolve_ffmpeg_executable
+
+        return resolve_ffmpeg_executable() is not None
+    except Exception:
+        return shutil.which("ffmpeg") is not None
 
 
 def _xfade_offsets(durations: list[float], t: float) -> list[float]:

@@ -1,13 +1,17 @@
 import { useState } from 'react';
 import { RiCloseLine, RiTimeLine, RiAddLine } from 'react-icons/ri';
-import { useRateLimit } from '../context/RateLimitContext';
+import { useRateLimit, ALLOWED_HOURLY_LIMITS } from '../context/RateLimitContext';
 import { motion, AnimatePresence } from 'framer-motion';
 
 export default function RateLimitPanel() {
   const { limit, used, remaining, queue, setLimit, removeFromQueue } = useRateLimit();
   const [isExpanded, setIsExpanded] = useState(true);
 
-  const progressPercent = Math.min(100, (remaining / limit) * 100);
+  const safeLimit = ALLOWED_HOURLY_LIMITS.includes(limit) ? limit : 2;
+  const unlimited = safeLimit === 0;
+  const progressPercent = unlimited
+    ? 100
+    : Math.min(100, safeLimit ? ((remaining ?? 0) / safeLimit) * 100 : 0);
 
   return (
     <div className="px-4 py-3 border-b border-[#27272f]">
@@ -42,7 +46,15 @@ export default function RateLimitPanel() {
             <div className="mb-3">
               <div className="flex items-center justify-between mb-1">
                 <div className="text-xs text-[#e4e4f0]">
-                  Доступно: <span className="font-bold text-brand-400">{remaining}</span> из {limit}
+                  Доступно:{' '}
+                  <span className="font-bold text-brand-400">
+                    {unlimited ? '∞' : remaining}
+                  </span>
+                  {unlimited ? (
+                    <span className="text-[#71717a] font-normal"> (лимит выкл.)</span>
+                  ) : (
+                    <> из {safeLimit}</>
+                  )}
                 </div>
                 <div className="text-[10px] text-[#71717a]">
                   Использовано: {used}
@@ -56,10 +68,12 @@ export default function RateLimitPanel() {
                   animate={{ width: `${progressPercent}%` }}
                   transition={{ duration: 0.3 }}
                   className={`h-2 rounded-full transition-all ${
-                    remaining === 0 
-                      ? 'bg-red-500' 
-                      : remaining === 1 
-                      ? 'bg-amber-500' 
+                    unlimited
+                      ? 'bg-emerald-500/80'
+                      : remaining === 0
+                      ? 'bg-red-500'
+                      : remaining === 1
+                      ? 'bg-amber-500'
                       : 'bg-brand-500'
                   }`}
                 />
@@ -72,13 +86,18 @@ export default function RateLimitPanel() {
                 Лимит в час:
               </label>
               <select
-                value={limit}
+                value={safeLimit}
                 onChange={(e) => setLimit(Number(e.target.value))}
                 className="w-full px-2 py-1.5 bg-[#1a1a24] border border-[#27272f] rounded-lg text-xs text-[#e4e4f0] focus:outline-none focus:border-brand-500/50"
               >
+                <option value={0}>Без лимита</option>
                 <option value={1}>1 видео/час</option>
                 <option value={2}>2 видео/час</option>
                 <option value={3}>3 видео/час</option>
+                <option value={5}>5 видео/час</option>
+                <option value={10}>10 видео/час</option>
+                <option value={15}>15 видео/час</option>
+                <option value={30}>30 видео/час</option>
               </select>
             </div>
 

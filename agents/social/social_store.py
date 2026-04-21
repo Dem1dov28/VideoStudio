@@ -254,25 +254,3 @@ class SocialChannelStore:
                         self._write_root(root)
                         return True
             return False
-
-    def pop_video(self, channel_id: str, video_key: str) -> SocialVideoRecord | None:
-        """
-        Delete video row from a channel and return removed record.
-        Returns None when channel/video is missing.
-        """
-        with self._lock:
-            root = self._read_root()
-            rows = self._channels_list(root)
-            for ch in rows:
-                if ch.id != channel_id:
-                    continue
-                for i, v in enumerate(ch.videos):
-                    if v.key != video_key:
-                        continue
-                    removed = ch.videos.pop(i)
-                    ch.updated_at = _utc_now()
-                    root["channels"] = [r.to_json() for r in rows]
-                    self._write_root(root)
-                    return removed
-                return None
-            return None

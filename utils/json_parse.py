@@ -15,43 +15,39 @@ def extract_first_json(text: str) -> str:
     Handles markdown code blocks and trailing content after closing brace.
     """
     raw = text.strip()
-    # Remove markdown fences
+    # Открытый ```json без закрывающих ``` (частый случай при обрезке по max_tokens)
+    if raw.startswith("```"):
+        first_nl = raw.find("\n")
+        if first_nl != -1:
+            raw = raw[first_nl + 1 :].strip()
+        if raw.endswith("```"):
+            raw = raw[:-3].strip()
+        elif "```" in raw:
+            raw = raw.split("```", 1)[0].strip()
+    # Закрытый fence целиком
     for pattern in (r"```(?:json)?\s*(.*?)\s*```",):
         m = re.search(pattern, raw, re.DOTALL)
         if m:
             raw = m.group(1).strip()
             break
 
-    start = raw.find("{")
-    if start == -1:
-        raise ValueError("No JSON object found in response")
+    decoder = json.JSONDecoder()
+    saw_json_start = False
 
-    depth = 0
-    in_string = False
-    escape = False
-    quote = None
-
-    for i, c in enumerate(raw[start:], start=start):
-        if escape:
-            escape = False
+    for start, char in enumerate(raw):
+        if char not in "{[":
             continue
-        if c == "\\" and in_string:
-            escape = True
-            continue
-        if not in_string:
-            if c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0:
-                    return raw[start : i + 1]
-            elif c in ('"', "'"):
-                in_string = True
-                quote = c
-        elif c == quote:
-            in_string = False
 
-    raise ValueError("Unbalanced braces in JSON")
+        saw_json_start = True
+        try:
+            _, end = decoder.raw_decode(raw[start:])
+        except json.JSONDecodeError:
+            continue
+        return raw[start : start + end]
+
+    if saw_json_start:
+        raise ValueError("Unbalanced braces in JSON")
+    raise ValueError("No JSON object found in response")
 
 
 def parse_json_safe(text: str) -> dict:

@@ -43,9 +43,6 @@ def overlay_banner(
     crf: int = 20,
     audio_bitrate: str = "192k",
     banner_is_video: bool = False,
-    strip_overlay_black: bool = True,
-    overlay_black_similarity: float = 0.08,
-    overlay_black_blend: float = 0.02,
 ) -> Path:
     inp = Path(input_video)
     ban = Path(banner)
@@ -54,56 +51,40 @@ def overlay_banner(
 
     xy = _overlay_position(corner, margin)
 
-    sim = float(overlay_black_similarity)
-    blend = float(overlay_black_blend)
-    if not (0.0 <= sim <= 1.0 and 0.0 <= blend <= 1.0):
-        raise ValueError("overlay_black_similarity and overlay_black_blend must be between 0 and 1")
-
     if banner_width and banner_width > 0:
-        banner_chain = f"[1:v]scale={banner_width}:-1"
+        filter_chain = f"[1:v]scale={banner_width}:-1[b];[0:v][b]overlay={xy}"
     else:
-        banner_chain = "[1:v]"
-    if banner_is_video and strip_overlay_black:
-        banner_chain += f",colorkey=0x000000:{sim:g}:{blend:g}"
-    banner_chain += "[b];"
-    filter_chain = f"{banner_chain}[0:v][b]overlay={xy}"
+        filter_chain = f"[0:v][1:v]overlay={xy}"
 
     if banner_is_video:
-        # Loop banner to main length; overlay shortest=1 then ends with the main video (not with one banner pass).
         filter_chain += ":shortest=1"
     filter_chain += ":format=auto[v]"
 
-    cmd: list[str] = [
+    cmd = [
         "ffmpeg",
         "-y",
         "-i",
         str(inp),
+        "-i",
+        str(ban),
+        "-filter_complex",
+        filter_chain,
+        "-map",
+        "[v]",
+        "-map",
+        "0:a?",
+        "-c:v",
+        video_codec,
+        "-crf",
+        str(crf),
+        "-c:a",
+        audio_codec,
+        "-b:a",
+        audio_bitrate,
+        "-movflags",
+        "+faststart",
+        str(out),
     ]
-    if banner_is_video:
-        cmd.extend(["-stream_loop", "-1"])
-    cmd.extend(
-        [
-            "-i",
-            str(ban),
-            "-filter_complex",
-            filter_chain,
-            "-map",
-            "[v]",
-            "-map",
-            "0:a?",
-            "-c:v",
-            video_codec,
-            "-crf",
-            str(crf),
-            "-c:a",
-            audio_codec,
-            "-b:a",
-            audio_bitrate,
-            "-movflags",
-            "+faststart",
-            str(out),
-        ]
-    )
     logger.debug("ffmpeg %s", " ".join(cmd))
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:

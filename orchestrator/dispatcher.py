@@ -12,7 +12,6 @@ Mode 8: House Building Timelapse
 Mode 9: Vehicle Assembly Timelapse
 Mode 10: Beach cleanup timelapse (логика как mode 8)
 Mode 11: Monument deconstruction timelapse
-Mode 12: Room cleanup and restoration timelapse (5 stages fixed)
 """
 
 from __future__ import annotations
@@ -50,6 +49,21 @@ async def _run_pipeline_wrapped(
     mode4_person_name: str | None = None,
     mode4_photo_path: str | None = None,
     mode4_only_lang: str | None = None,
+    mode4_show_author_on_video: bool = True,
+    mode4_video_header_title: str | None = None,
+    mode4_subtitle_style: str = "karaoke",
+    mode4_multiclip: bool = False,
+    mode4_segments: list[str] | None = None,
+    mode4_skip_final_assembly: bool = True,
+    mode5_script_text: str | None = None,
+    mode5_language: str | None = None,
+    mode5_chunk_seconds: int = 300,
+    mode5_segment_seconds: int = 15,
+    mode5_skip_final_assembly: bool = True,
+    mode5_max_parallel_images: int = 10,
+    mode5_video_header_title: str | None = None,
+    mode5_bible_mode: bool = False,
+    mode5_sub_mode: str = "manual",
     mode6_num_characters: int = 3,
     mode7_keyboards: list[str] | None = None,
     mode7_animal_type: str | None = None,
@@ -65,23 +79,69 @@ async def _run_pipeline_wrapped(
     mode10_num_stages: int = 5,
     mode11_structure_type: str | None = None,
     mode11_num_stages: int = 5,
-    mode12_room_type: str | None = None,
-    mode12_room_lighting: str | None = None,
+    mode13_audio_path: str | None = None,
+    mode13_voice_preset: str = "studio",
+    mode13_language: str | None = None,
+    mode13_show_subtitles: bool = True,
+    mode13_skip_final_assembly: bool = True,
+    mode13_chunk_seconds: int = 300,
+    mode13_segment_seconds: int = 30,
+    mode13_video_header_title: str | None = None,
+    mode13_voice_gain_db: float = 0.0,
+    mode13_voice_tempo_scale: float = 1.0,
+    mode13_voice_pitch_semitones: float = 0.0,
+    mode13_voice_ai_cleanup: float = 0.0,
+    mode13_voice_noise_suppression: float = 50.0,
+    mode13_voice_level_normalize: float = 50.0,
+    mode13_voice_highpass_hz: int | None = None,
+    mode13_voice_deesser: float = 0.0,
+    mode13_voice_clarity: float = 0.0,
+    mode13_voice_mud_cut: float = 0.0,
+    mode13_voice_compression: float = 0.0,
     control: dict | None = None,
 ) -> dict[str, Any]:
     """Internal pipeline runner with session context."""
     from pipeline_control import checkpoint
 
-    # Mode 12: Room cleanup / restoration timelapse (always 5 stages)
-    if mode == 12:
+    # Mode 13: аудио → смена тембра → слайды 30 с → превью по 5 мин
+    if mode == 13:
+        ap = (mode13_audio_path or "").strip()
+        if not ap:
+            raise ValueError("Mode 13: укажите путь к загруженному аудиофайлу")
         await checkpoint(control)
-        from modes.mode12.pipeline import run_mode12_pipeline
+        from modes.mode13.pipeline import run_mode13_pipeline
 
-        return await run_mode12_pipeline(
+        vp = (mode13_voice_preset or "studio").strip().lower()
+        if vp not in ("original", "studio", "calm", "natural", "soft", "medium", "strong"):
+            vp = "studio"
+        lang = (mode13_language or "").strip() or None
+        vht = (mode13_video_header_title or "").strip() or None
+        return await run_mode13_pipeline(
             session_id=session_id,
-            local_only=local_only,
-            room_type=mode12_room_type,
-            room_lighting=mode12_room_lighting,
+            audio_path=ap,
+            voice_preset=vp,
+            voice_gain_db=float(mode13_voice_gain_db or 0.0),
+            voice_tempo_scale=float(mode13_voice_tempo_scale or 1.0),
+            voice_pitch_semitones=float(mode13_voice_pitch_semitones or 0.0),
+            voice_ai_cleanup=float(mode13_voice_ai_cleanup or 0.0),
+            voice_noise_suppression=float(mode13_voice_noise_suppression),
+            voice_level_normalize=float(mode13_voice_level_normalize),
+            voice_highpass_hz=(
+                int(mode13_voice_highpass_hz)
+                if mode13_voice_highpass_hz is not None
+                and 40 <= int(mode13_voice_highpass_hz) <= 200
+                else None
+            ),
+            voice_deesser=float(mode13_voice_deesser or 0.0),
+            voice_clarity=float(mode13_voice_clarity or 0.0),
+            voice_mud_cut=float(mode13_voice_mud_cut or 0.0),
+            voice_compression=float(mode13_voice_compression or 0.0),
+            language=lang,
+            show_subtitles=bool(mode13_show_subtitles),
+            skip_final_assembly=bool(mode13_skip_final_assembly),
+            chunk_seconds=int(mode13_chunk_seconds or 300),
+            segment_seconds=int(mode13_segment_seconds or 30),
+            video_header_title=vht,
             control=control,
         )
 
@@ -167,25 +227,53 @@ async def _run_pipeline_wrapped(
             control=control,
         )
 
-    # Mode 5: Длинные видео
-    if mode == 5 and topic and str(topic).strip():
+    # Mode 5: Manual long-form text -> ElevenLabs -> reviewable previews
+    if mode == 5:
+        txt = str(mode5_script_text or "").strip()
+        if not txt:
+            raise ValueError("Mode 5: укажите текст для озвучки")
+        sub5 = (mode5_sub_mode or "manual").strip().lower()
+        if sub5 not in ("manual", "bible", "facts50", "outline", "book_night"):
+            sub5 = "manual"
+        if sub5 == "manual" and mode5_bible_mode:
+            sub5 = "bible"
+        if sub5 not in ("facts50", "outline", "book_night") and len(txt) < 80:
+            raise ValueError("Mode 5: вставьте полноценный текст для озвучки")
+        if sub5 == "outline":
+            from modes.mode5.outline_generator import MIN_OUTLINE_BRIEF_CHARS
+
+            if len(txt) < MIN_OUTLINE_BRIEF_CHARS:
+                raise ValueError(
+                    f"Mode 5: для «плана из описания» введите краткое описание сюжета (от {MIN_OUTLINE_BRIEF_CHARS} символов), "
+                    "не только название ролика."
+                )
+        elif sub5 in ("facts50", "book_night") and len(txt) < 8:
+            raise ValueError(
+                "Mode 5: для «77 фактов» или «книга на ночь» введите тему или название книги (от 8 символов)"
+            )
         await checkpoint(control)
         from modes.mode5.pipeline import run_mode5_pipeline
         return await run_mode5_pipeline(
-            topic=topic.strip(),
+            script_text=txt,
             session_id=session_id,
-            local_only=local_only,
-            language=language or "ru",
+            language=(mode5_language or language or "ru"),
+            skip_final_assembly=bool(mode5_skip_final_assembly),
+            chunk_seconds=int(mode5_chunk_seconds or 300),
+            segment_seconds=int(mode5_segment_seconds or 15),
+            max_parallel_images=int(mode5_max_parallel_images or 10),
+            video_header_title=(mode5_video_header_title or "").strip() or None,
+            bible_mode=bool(mode5_bible_mode),
+            sub_mode=sub5,
             control=control,
         )
 
     # Mode 4: Цитата + фото
-    if mode == 4 and mode4_quote and mode4_person_name and mode4_photo_path:
+    if mode == 4 and mode4_quote and mode4_photo_path:
         await checkpoint(control)
         from modes.mode4.pipeline import run_mode4_pipeline
         return await run_mode4_pipeline(
             quote=mode4_quote.strip(),
-            person_name=mode4_person_name.strip(),
+            person_name=(mode4_person_name or "").strip(),
             photo_path=mode4_photo_path,
             session_id=session_id,
             language="both",
@@ -196,6 +284,16 @@ async def _run_pipeline_wrapped(
                 if (mode4_only_lang or "").strip().lower() in ("ru", "en")
                 else None
             ),
+            show_author_on_video=bool(mode4_show_author_on_video),
+            video_header_title=(mode4_video_header_title or "").strip() or None,
+            subtitle_style=mode4_subtitle_style or "karaoke",
+            multiclip=bool(mode4_multiclip),
+            multiclip_segments=(
+                [str(s).strip() for s in (mode4_segments or []) if str(s).strip()]
+                if mode4_segments
+                else None
+            ),
+            skip_final_assembly_multiclip=bool(mode4_skip_final_assembly),
         )
 
     # Mode 3: Восстановление домов
@@ -301,6 +399,21 @@ async def run_pipeline(
     mode4_person_name: str | None = None,
     mode4_photo_path: str | None = None,
     mode4_only_lang: str | None = None,
+    mode4_show_author_on_video: bool = True,
+    mode4_video_header_title: str | None = None,
+    mode4_subtitle_style: str = "karaoke",
+    mode4_multiclip: bool = False,
+    mode4_segments: list[str] | None = None,
+    mode4_skip_final_assembly: bool = True,
+    mode5_script_text: str | None = None,
+    mode5_language: str | None = None,
+    mode5_chunk_seconds: int = 300,
+    mode5_segment_seconds: int = 15,
+    mode5_skip_final_assembly: bool = True,
+    mode5_max_parallel_images: int = 10,
+    mode5_video_header_title: str | None = None,
+    mode5_bible_mode: bool = False,
+    mode5_sub_mode: str = "manual",
     mode6_num_characters: int = 3,
     mode7_keyboards: list[str] | None = None,
     mode7_animal_type: str | None = None,
@@ -316,8 +429,25 @@ async def run_pipeline(
     mode10_num_stages: int = 5,
     mode11_structure_type: str | None = None,
     mode11_num_stages: int = 5,
-    mode12_room_type: str | None = None,
-    mode12_room_lighting: str | None = None,
+    mode13_audio_path: str | None = None,
+    mode13_voice_preset: str = "studio",
+    mode13_language: str | None = None,
+    mode13_show_subtitles: bool = True,
+    mode13_skip_final_assembly: bool = True,
+    mode13_chunk_seconds: int = 300,
+    mode13_segment_seconds: int = 30,
+    mode13_video_header_title: str | None = None,
+    mode13_voice_gain_db: float = 0.0,
+    mode13_voice_tempo_scale: float = 1.0,
+    mode13_voice_pitch_semitones: float = 0.0,
+    mode13_voice_ai_cleanup: float = 0.0,
+    mode13_voice_noise_suppression: float = 50.0,
+    mode13_voice_level_normalize: float = 50.0,
+    mode13_voice_highpass_hz: int | None = None,
+    mode13_voice_deesser: float = 0.0,
+    mode13_voice_clarity: float = 0.0,
+    mode13_voice_mud_cut: float = 0.0,
+    mode13_voice_compression: float = 0.0,
     control: dict | None = None,
 ) -> dict[str, Any]:
     """Route to the appropriate pipeline by mode with session context."""
@@ -356,6 +486,21 @@ async def run_pipeline(
             mode4_person_name=mode4_person_name,
             mode4_photo_path=mode4_photo_path,
             mode4_only_lang=mode4_only_lang,
+            mode4_show_author_on_video=mode4_show_author_on_video,
+            mode4_video_header_title=mode4_video_header_title,
+            mode4_subtitle_style=mode4_subtitle_style,
+            mode4_multiclip=mode4_multiclip,
+            mode4_segments=mode4_segments,
+            mode4_skip_final_assembly=mode4_skip_final_assembly,
+            mode5_script_text=mode5_script_text,
+            mode5_language=mode5_language,
+            mode5_chunk_seconds=mode5_chunk_seconds,
+            mode5_segment_seconds=mode5_segment_seconds,
+            mode5_skip_final_assembly=mode5_skip_final_assembly,
+            mode5_max_parallel_images=mode5_max_parallel_images,
+            mode5_video_header_title=mode5_video_header_title,
+            mode5_bible_mode=mode5_bible_mode,
+            mode5_sub_mode=mode5_sub_mode,
             mode6_num_characters=mode6_num_characters,
             mode7_keyboards=mode7_keyboards,
             mode7_animal_type=mode7_animal_type,
@@ -371,8 +516,25 @@ async def run_pipeline(
             mode10_num_stages=mode10_num_stages,
             mode11_structure_type=mode11_structure_type,
             mode11_num_stages=mode11_num_stages,
-            mode12_room_type=mode12_room_type,
-            mode12_room_lighting=mode12_room_lighting,
+            mode13_audio_path=mode13_audio_path,
+            mode13_voice_preset=mode13_voice_preset,
+            mode13_language=mode13_language,
+            mode13_show_subtitles=mode13_show_subtitles,
+            mode13_skip_final_assembly=mode13_skip_final_assembly,
+            mode13_chunk_seconds=mode13_chunk_seconds,
+            mode13_segment_seconds=mode13_segment_seconds,
+            mode13_video_header_title=mode13_video_header_title,
+            mode13_voice_gain_db=mode13_voice_gain_db,
+            mode13_voice_tempo_scale=mode13_voice_tempo_scale,
+            mode13_voice_pitch_semitones=mode13_voice_pitch_semitones,
+            mode13_voice_ai_cleanup=mode13_voice_ai_cleanup,
+            mode13_voice_noise_suppression=mode13_voice_noise_suppression,
+            mode13_voice_level_normalize=mode13_voice_level_normalize,
+            mode13_voice_highpass_hz=mode13_voice_highpass_hz,
+            mode13_voice_deesser=mode13_voice_deesser,
+            mode13_voice_clarity=mode13_voice_clarity,
+            mode13_voice_mud_cut=mode13_voice_mud_cut,
+            mode13_voice_compression=mode13_voice_compression,
             control=control,
         )
     finally:

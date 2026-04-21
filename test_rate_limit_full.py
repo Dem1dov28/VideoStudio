@@ -65,19 +65,19 @@ def test_backend_logic():
 def test_limit_validation():
     """Test limit value validation."""
     print("\n" + "="*60)
-    print("TEST 2: Limit Validation (1-3)")
+    print("TEST 2: Limit Validation (0,1,2,3,5,10,15,30)")
     print("="*60)
     
     limiter = get_rate_limiter()
     
     # Valid limits
-    for valid_limit in [1, 2, 3]:
+    for valid_limit in [0, 1, 2, 3, 5, 10, 15, 30]:
         result = limiter.set_limit(valid_limit)
         assert result, f"Should accept valid limit {valid_limit}"
         print(f"✓ Valid limit {valid_limit} accepted")
     
     # Invalid limits
-    for invalid_limit in [0, 4, 5, -1, 100]:
+    for invalid_limit in [4, 6, 7, 20, -1, 100]:
         result = limiter.set_limit(invalid_limit)
         assert not result, f"Should reject invalid limit {invalid_limit}"
         print(f"✓ Invalid limit {invalid_limit} rejected")
@@ -201,7 +201,7 @@ if __name__ == "__main__":
         print("="*60)
         print("\nThe rate limiting system is working correctly:")
         print("✓ Backend logic enforces limits")
-        print("✓ Limit validation accepts only 1, 2, or 3")
+        print("✓ Limit validation accepts 0 (off) and 1,2,3,5,10,15,30")
         print("✓ Hour key format is correct (YYYY-MM-DD-HH)")
         print("✓ Concurrent access is handled properly")
         print("✓ API endpoint simulation returns correct responses")

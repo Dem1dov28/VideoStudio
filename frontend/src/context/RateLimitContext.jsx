@@ -5,6 +5,15 @@ const RateLimitContext = createContext(null);
 
 const STORAGE_KEY = 'rateLimit';
 
+/** Допустимые лимиты «видео в час» — как на бэкенде (utils.rate_limiter.ALLOWED_HOURLY_LIMITS). 0 = без лимита. */
+export const ALLOWED_HOURLY_LIMITS = [0, 1, 2, 3, 5, 10, 15, 30];
+
+/** Оставшихся генераций в текущем часу; null если лимит отключён (0). */
+export function remainingForLimit(limit, used) {
+  if (limit === 0) return null;
+  return Math.max(0, limit - used);
+}
+
 /**
  * Get current hour key in format: YYYY-MM-DD-HH
  */
@@ -63,7 +72,7 @@ function saveToStorage(data) {
 
 export function RateLimitProvider({ children }) {
   const [state, setState] = useState(() => ({
-    limit: 2,           // Default limit (1-3)
+    limit: 2,           // Default; выбор: ALLOWED_HOURLY_LIMITS
     used: 0,            // Used in current hour
     remaining: 2,       // Remaining in current hour
     hourKey: getCurrentHourKey(),
@@ -114,7 +123,7 @@ export function RateLimitProvider({ children }) {
           ...prev,
           limit: stored.limit,
           used: stored.used,
-          remaining: Math.max(0, stored.limit - stored.used),
+          remaining: remainingForLimit(stored.limit, stored.used),
           hourKey: stored.hourKey,
           queue: stored.queue || [],
         }));
@@ -125,10 +134,10 @@ export function RateLimitProvider({ children }) {
   }, []); // NO dependencies - stable function
 
   /**
-   * Set the hourly limit (1-3)
+   * Set the hourly limit (ALLOWED_HOURLY_LIMITS)
    */
   const setLimit = useCallback(async (newLimit) => {
-    if (![1, 2, 3].includes(newLimit)) {
+    if (!ALLOWED_HOURLY_LIMITS.includes(newLimit)) {
       console.error('[RateLimit] Invalid limit:', newLimit);
       return false;
     }
@@ -140,7 +149,7 @@ export function RateLimitProvider({ children }) {
         const newState = {
           ...prev,
           limit: newLimit,
-          remaining: Math.max(0, newLimit - prev.used),
+          remaining: remainingForLimit(newLimit, prev.used),
         };
         
         // Save to localStorage
@@ -203,7 +212,7 @@ export function RateLimitProvider({ children }) {
         // Update usage
         setState(prev => {
         const newUsed = prev.used + 1;
-        const newRemaining = prev.limit - newUsed;
+        const newRemaining = remainingForLimit(prev.limit, newUsed);
         
         const newState = {
           ...prev,
@@ -355,19 +364,21 @@ export function RateLimitProvider({ children }) {
 
     console.log(`[RateLimit] Starting queue processing: queue=${queue.length}, used=${used}, limit=${limit}`);
 
-    if (used >= limit || queue.length === 0) {
+    if ((limit !== 0 && used >= limit) || queue.length === 0) {
       console.log(`[RateLimit] Queue processing skipped: used=${used}, limit=${limit}, queue=${queue.length}`);
       return;
     }
 
     let processedCount = 0;
     let errorCount = 0;
-    const maxAttempts = Math.min(queue.length, limit - used);
+    const maxAttempts = limit === 0
+      ? queue.length
+      : Math.min(queue.length, limit - used);
 
     console.log(`[RateLimit] Will attempt to start ${maxAttempts} video(s) from queue`);
 
     for (let attempt = 0; attempt < maxAttempts && errorCount < 3; attempt++) {
-      if (used >= limit || queue.length === 0) break;
+      if ((limit !== 0 && used >= limit) || queue.length === 0) break;
 
       const item = queue[0];
       if (!item) break;
@@ -401,7 +412,7 @@ export function RateLimitProvider({ children }) {
     setState(prev => ({
       ...prev,
       used,
-      remaining: Math.max(0, limit - used),
+      remaining: remainingForLimit(limit, used),
       queue,
       hourKey,
     }));
@@ -436,7 +447,7 @@ export function RateLimitProvider({ children }) {
     setState(prev => ({
       ...prev,
       used: 0,
-      remaining: prev.limit,
+      remaining: remainingForLimit(prev.limit, 0),
       hourKey: currentHourKey,
     }));
 

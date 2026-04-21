@@ -18,10 +18,14 @@ const LEVEL_PREFIX = {
 };
 
 export default function LogConsole({ logs, className, sessionId }) {
-  const bottomRef = useRef(null);
+  const scrollRef = useRef(null);
 
+  // Прокручиваем только внутренний контейнер логов, без scrollIntoView — иначе при новых
+  // строках браузер прокручивает всю страницу вниз, если пользователь смотрит превью выше.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
   }, [logs]);
 
   // Получаем уникальные session_id из логов для отображения
@@ -46,7 +50,7 @@ export default function LogConsole({ logs, className, sessionId }) {
       </div>
 
       {/* Log lines */}
-      <div className="p-4 h-80 overflow-y-auto space-y-0.5 font-mono">
+      <div ref={scrollRef} className="p-4 h-80 overflow-y-auto space-y-0.5 font-mono">
         {logs.length === 0 ? (
           <div className="text-[#3f3f50] text-xs">Waiting for pipeline to start...</div>
         ) : (
@@ -62,7 +66,6 @@ export default function LogConsole({ logs, className, sessionId }) {
             </div>
           ))
         )}
-        <div ref={bottomRef} />
       </div>
     </div>
   );

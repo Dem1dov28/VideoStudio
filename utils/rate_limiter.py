@@ -10,6 +10,9 @@ from datetime import datetime
 from typing import Optional
 from loguru import logger
 
+# Допустимые значения «видео в час» (UI и API). 0 = лимит отключён (без ограничения).
+ALLOWED_HOURLY_LIMITS: tuple[int, ...] = (0, 1, 2, 3, 5, 10, 15, 30)
+
 
 class RateLimiter:
     """
@@ -21,7 +24,7 @@ class RateLimiter:
     
     def __init__(self):
         # In-memory storage for rate limit state
-        self._limit = 2  # Default: 2 videos per hour (user-configurable 1-3)
+        self._limit = 2  # Default: 2/час; пользователь: см. ALLOWED_HOURLY_LIMITS
         self._used = 0   # Videos generated in current hour
         self._hour_key = self._get_current_hour_key()
         self._last_checked = time.time()
@@ -70,7 +73,10 @@ class RateLimiter:
         # Check if hour has changed
         self._check_and_reset_hour()
         
-        remaining = max(0, self._limit - self._used)
+        if self._limit == 0:
+            remaining: int | None = None
+        else:
+            remaining = max(0, self._limit - self._used)
         
         # Calculate next reset time (start of next hour)
         now = datetime.now()
@@ -79,26 +85,31 @@ class RateLimiter:
             from datetime import timedelta
             next_hour += timedelta(hours=1)
         
-        return {
+        out: dict = {
             "limit": self._limit,
             "used": self._used,
             "remaining": remaining,
             "hour_key": self._hour_key,
             "next_reset": next_hour.isoformat(),
         }
+        if self._limit == 0:
+            out["unlimited"] = True
+        return out
     
     def set_limit(self, limit: int) -> bool:
         """
         Set the hourly generation limit.
         
         Args:
-            limit: New limit (must be 1, 2, or 3)
-            
+            limit: Новое значение (одно из ALLOWED_HOURLY_LIMITS; 0 = без лимита).
+
         Returns:
             bool: True if limit was set successfully
         """
-        if limit not in (1, 2, 3):
-            logger.warning(f"[RateLimiter] Invalid limit: {limit}. Must be 1, 2, or 3.")
+        if limit not in ALLOWED_HOURLY_LIMITS:
+            logger.warning(
+                f"[RateLimiter] Invalid limit: {limit}. Allowed: {ALLOWED_HOURLY_LIMITS}."
+            )
             return False
         
         old_limit = self._limit
@@ -117,10 +128,11 @@ class RateLimiter:
         # Check if hour has changed
         self._check_and_reset_hour()
         
+        if self._limit == 0:
+            return True, "No hourly limit"
         if self._used < self._limit:
             return True, "Generation allowed"
-        else:
-            return False, f"Hourly limit reached ({self._used}/{self._limit})"
+        return False, f"Hourly limit reached ({self._used}/{self._limit})"
     
     def increment_usage(self) -> bool:
         """
@@ -132,7 +144,7 @@ class RateLimiter:
         # Check if hour has changed
         self._check_and_reset_hour()
         
-        if self._used >= self._limit:
+        if self._limit != 0 and self._used >= self._limit:
             logger.warning(f"[RateLimiter] Cannot increment: limit reached ({self._used}/{self._limit})")
             return False
         
@@ -145,9 +157,11 @@ class RateLimiter:
         self._check_and_reset_hour()
         return self._used
     
-    def get_remaining(self) -> int:
-        """Get remaining generations in current hour."""
+    def get_remaining(self) -> int | None:
+        """Get remaining generations in current hour. None if unlimited (limit 0)."""
         self._check_and_reset_hour()
+        if self._limit == 0:
+            return None
         return max(0, self._limit - self._used)
     
     def reset_usage(self):

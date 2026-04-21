@@ -8,6 +8,11 @@ langgraph-swarm>=0.0.1
 # ─── OpenAI ──────────────────────────────────────────────────────────────────
 openai>=1.30.0
 
+# ─── API server ───────────────────────────────────────────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+
 # ─── Browser automation (Image Generator via fast-gen.ai) ────────────────────
 playwright>=1.44.0
 
@@ -48,6 +53,8 @@ apscheduler>=3.10.0
 # ─── Utilities ────────────────────────────────────────────────────────────────
 aiofiles>=23.0.0
 tenacity>=8.2.0
+# LLM JSON with broken quotes / commas (Mode 5 facts50 large payloads)
+json-repair>=0.30.0
 loguru>=0.7.0
 rich>=13.0.0
 pytrends>=4.9.0

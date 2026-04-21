@@ -92,9 +92,79 @@ export const api = {
       headers: {},
     }).then(r => r.ok ? r.json() : r.json().then(e => { throw new Error(e.detail || 'Upload failed'); }));
   },
+  uploadAudio:        (file)       => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return fetch((import.meta.env.VITE_API_URL || '') + '/api/upload/audio', {
+      method: 'POST',
+      body: fd,
+      headers: {},
+    }).then(r => r.ok ? r.json() : r.json().then(e => { throw new Error(e.detail || 'Upload failed'); }));
+  },
+  /** Короткий WAV с фильтрами пресета (предпрослушивание mode 13). */
+  mode13VoicePreview: async (body) => {
+    const url = `${BASE}/api/mode13/voice-preview`;
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || r.statusText || 'Voice preview failed');
+    }
+    return r.blob();
+  },
   startPipeline:      (data)       => request('/api/pipeline/start', { method: 'POST', body: JSON.stringify(data) }),
+  mode4RegenerateClip: (sid, index) =>
+    request(`/api/mode4/${sid}/regenerate-clip`, {
+      method: 'POST',
+      body: JSON.stringify({ index }),
+    }),
+  mode4Assemble: (sid, showSubtitles = undefined) =>
+    request(`/api/mode4/${sid}/assemble`, {
+      method: 'POST',
+      body: JSON.stringify(
+        showSubtitles === undefined ? {} : { show_subtitles: showSubtitles },
+      ),
+    }),
+  mode13RegenerateSegment: (sid, chunkIndex, segmentIndex) =>
+    request(`/api/mode13/${sid}/regenerate-segment`, {
+      method: 'POST',
+      body: JSON.stringify({ chunk_index: chunkIndex, segment_index: segmentIndex }),
+    }),
+  mode5RegenerateImage: (sid, chunkIndex, segmentIndex) =>
+    request(`/api/mode5/${sid}/regenerate-image`, {
+      method: 'POST',
+      body: JSON.stringify({ chunk_index: chunkIndex, segment_index: segmentIndex }),
+    }),
+  mode5RegenerateChunk: (sid, chunkIndex, text) =>
+    request(`/api/mode5/${sid}/regenerate-chunk`, {
+      method: 'POST',
+      body: JSON.stringify({ chunk_index: chunkIndex, text }),
+    }),
+  mode5Assemble: (sid) =>
+    request(`/api/mode5/${sid}/assemble`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+  mode5ReviewState: (sid) =>
+    request(`/api/mode5/${sid}/review-state`),
+  mode5ContinueGeneration: (sid) =>
+    request(`/api/mode5/${sid}/continue-generation`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+  mode13Assemble: (sid, showSubtitles = undefined) =>
+    request(`/api/mode13/${sid}/assemble`, {
+      method: 'POST',
+      body: JSON.stringify(
+        showSubtitles === undefined ? {} : { show_subtitles: showSubtitles },
+      ),
+    }),
   listPipelineSessions: ()         => request('/api/pipeline/sessions'),
   getPipelineStatus:  (sid)       => request(`/api/pipeline/${sid}/status`),
+  getPipelineStartRequest: (sid) => request(`/api/pipeline/${sid}/start-request`),
   pausePipeline:      (sid)       => request(`/api/pipeline/${sid}/pause`, { method: 'POST' }),
   resumePipeline:     (sid)       => request(`/api/pipeline/${sid}/resume`, { method: 'POST' }),
   cancelPipeline:     (sid)       => request(`/api/pipeline/${sid}/cancel`, { method: 'POST' }),

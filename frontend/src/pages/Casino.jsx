@@ -2,6 +2,15 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, socialVideoFileUrl } from '../services/api';
 
 const DEFAULT_YT_TITLE = '🤑ССЫЛКА В ШАПКЕ ПРОФИЛЯ🤑';
+const DEFAULT_YT_DESCRIPTION = `🎰 Очередная нарезка казино – смотри до конца, будет жарко!
+
+💎 Все ссылки на бонусы и лучшие казино – в шапке профиля (клик на аватарку).
+
+📢 Подпишись, чтобы не пропустить новые моменты: #нарезкиказино #игравпрофиле #джекпот #Shorts`;
+const DEFAULT_KEYWORDS =
+  'нарезки казино, крупные выигрыши, слот 777, джекпот срыв, игра в профиле, эмоции игроков, лучшие моменты казино.';
+const DEFAULT_TAGS =
+  'Shorts, нарезки казино, крупные выигрыши, слот 777, джекпот, казино онлайн, casino highlights, big win, slot machine, jackpot';
 
 function socialRowSid(channelId, videoKey) {
   return `${channelId}\u001f${videoKey}`;
@@ -158,9 +167,9 @@ export default function Casino() {
   const [youtubeForm, setYoutubeForm] = useState({
     titleMode: 'tiktok',
     title: DEFAULT_YT_TITLE,
-    description: '',
-    keywords: '',
-    tags: '',
+    description: DEFAULT_YT_DESCRIPTION,
+    keywords: DEFAULT_KEYWORDS,
+    tags: DEFAULT_TAGS,
     privacy: 'public',
     categoryId: '22',
     channelProfile: 'primary',
@@ -361,9 +370,7 @@ export default function Casino() {
         <aside className="rounded-2xl border border-[#27272f] bg-[#0d0d14] p-5 space-y-4 lg:sticky lg:top-4">
           <h2 className="text-lg font-semibold text-white mt-0">Заливка на YouTube</h2>
           <p className="text-xs text-[#71717a]">
-            Заголовок/приватность — общие на все ролики. Описание, ключевые слова и теги: если оставить пустыми, при
-            каждой заливке сервер подставит случайный из 10 готовых SEO-наборов (один набор = три поля сразу). Чтобы
-            зафиксировать текст — заполни все три поля перед «Залить».
+            Эти поля одни на все ролики: у каждого видео своя кнопка «Залить».
           </p>
 
           {!health?.client_secret_exists ? (
@@ -466,7 +473,6 @@ export default function Casino() {
               value={youtubeForm.description}
               onChange={(e) => patchYoutube({ description: e.target.value })}
               rows={5}
-              placeholder="Пусто = случайный набор из 10 при заливке"
               className="w-full rounded-lg border border-[#27272f] bg-[#09090b] px-3 py-2 text-sm text-[#e4e4f0]"
             />
           </div>
@@ -477,7 +483,6 @@ export default function Casino() {
                 type="text"
                 value={youtubeForm.keywords}
                 onChange={(e) => patchYoutube({ keywords: e.target.value })}
-                placeholder="Пусто = из того же случайного набора"
                 className="w-full rounded-lg border border-[#27272f] bg-[#09090b] px-3 py-2 text-sm text-[#e4e4f0]"
               />
             </div>
@@ -488,7 +493,6 @@ export default function Casino() {
                   type="text"
                   value={youtubeForm.tags}
                   onChange={(e) => patchYoutube({ tags: e.target.value })}
-                  placeholder="Пусто = из того же набора"
                   className="w-full rounded-lg border border-[#27272f] bg-[#09090b] px-3 py-2 text-sm text-[#e4e4f0]"
                 />
               </div>

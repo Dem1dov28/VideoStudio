@@ -1,5 +1,6 @@
 """
 Mode 4 Video Generator — 1 или 2 видеофрагмента с reference image (фото личности).
+Несколько фрагментов одной цитаты — параллельная генерация как в режиме 12 (generate_parable_clips).
 """
 
 from __future__ import annotations
@@ -14,9 +15,93 @@ from agents.content_generator.fastgen_scraper import (
 )
 from config import settings
 
-from modes.mode4.quote_format import dashes_to_commas_for_voice
+from modes.mode4.quote_format import dashes_to_commas_for_voice, strip_quotes_for_voice
 
-_STYLE_SUFFIX = ", 9:16 portrait, photorealistic, no AI artifacts"
+_STYLE_SUFFIX = (
+    ", 9:16 portrait, photorealistic, no AI artifacts, "
+    "absolutely no on-screen text, no subtitles, no captions, no titles, no lower-thirds, "
+    "no burned-in words, no letters, no typography, no logos, no watermark"
+)
+
+_QUOTE_FRAGMENT_STYLE = (
+    ", 9:16 portrait, photorealistic, no AI artifacts, ~8 second take, "
+    "cinematic feature-film quality: richly detailed multi-layer background, "
+    "same locked historical scene and wardrobe across all parts of this quotation; "
+    "preserve the same 3-5 anchor details of the environment in every clip; "
+    "speech begins within the first fraction of a second; no long silence before or after; "
+    "steady or very slow camera; the first second must feel visually arresting with an immediate cinematic read of the setting; "
+    "absolutely no on-screen text, no subtitles, no captions, "
+    "no title cards, no lower-thirds, no burned-in words, no letters, no logos, no watermark"
+)
+
+_TEXT_ONLY_SCENE_LOCK = (
+    "Honor the master scene's single location in every frame — one coherent place, "
+    "no random backdrop swaps; identical era, costume, and environment as in the scene bible. "
+)
+
+
+def build_quote_fragment_prompt(
+    master_scene_en: str,
+    segment_text: str,
+    voice_description: str,
+    fragment_index: int,
+    num_fragments: int,
+    speech_lang: str = "ru",
+) -> str:
+    """Один клип из серии: та же сцена, что в master_scene_en; озвучка — только segment_text."""
+    seg_voice = strip_quotes_for_voice((segment_text or "").strip())
+    voice = (voice_description or "").strip()
+    base = (master_scene_en or "").strip().rstrip(".,; ")
+    lang = (speech_lang or "ru").lower()
+    tail = (seg_voice or "").rstrip()
+    has_terminal = bool(tail) and tail[-1] in ".!?…"
+    flow_hint = (
+        " The line may be a mid-sentence clause: speak it without inserting "
+        "an oral full stop or long pause at the end; flow naturally into the idea continuing in other clips."
+        if not has_terminal
+        else " End with natural closure only if the line ends with sentence-final punctuation."
+    )
+    if lang.startswith("en"):
+        dialogue_priority = (
+            "PRIMARY SPOKEN LINE (English) — The speaker in reference image 1 must say ONLY this, "
+            "word-for-word, in clear speech: "
+            f"{seg_voice} "
+            "Rules: no paraphrase, no extra sentences, no translation; lip-sync must match this exact text. "
+        )
+        delivery_mid = (
+            f"Segment {fragment_index + 1} of {num_fragments} of one continuous quotation — same scene and breath. "
+            f"Speak clearly in English; start quickly; no long silence before or after.{flow_hint} "
+        )
+        dialogue_repeat = f" FINAL AUDIO CHECK — spoken words must be exactly: {seg_voice}"
+    else:
+        dialogue_priority = (
+            "PRIMARY SPOKEN LINE (Russian) — The speaker in reference image 1 must say ONLY this, "
+            "word-for-word, in clear Russian: "
+            f"{seg_voice} "
+            "Rules: no paraphrase, no extra sentences, do not switch to English; lip-sync must match. "
+        )
+        delivery_mid = (
+            f"Segment {fragment_index + 1} of {num_fragments} of one continuous quotation — same scene and breath. "
+            f"Speak clearly in Russian; start quickly; no long silence before or after.{flow_hint} "
+        )
+        dialogue_repeat = f" FINAL AUDIO CHECK — spoken words must be exactly: {seg_voice}"
+
+    block = (
+        f"{dialogue_priority}"
+        f"{base}. "
+        f"{_TEXT_ONLY_SCENE_LOCK}"
+        f"IDENTICAL wardrobe, face, hair, and the same richly detailed environment as in all other parts. "
+        "Keep the same visual hook, same dominant background structure, same light direction, and same anchor props. "
+        f"Do not change clothing or era. "
+        f"{delivery_mid}"
+        "Subtle natural gestures only; soft natural sound. Make the image feel premium and scroll-stopping through depth, silhouette, texture, and light rather than gimmicks. "
+        "VISUAL CLEAN FRAME RULE: absolutely no text rendered inside the video image - "
+        "no subtitles, no captions, no quote text on screen, no title overlays, no lower-thirds, "
+        "no letters on walls, no signs, no poster text, no watermark, no logo. "
+    )
+    if voice and len(voice) > 10:
+        block += f" Voice and delivery: {voice}"
+    return dashes_to_commas_for_voice(block + dialogue_repeat + _QUOTE_FRAGMENT_STYLE)
 
 
 def _enrich_prompt(prompt: str, voice_description: str, script: str) -> str:
@@ -40,6 +125,12 @@ def _enrich_prompt(prompt: str, voice_description: str, script: str) -> str:
             base = base + f". Voice: {voice_clean}"
 
     # Озвучка FastGen плохо читает тире — в промпт уходят запятые; субтитры без изменений
+    base = (
+        base
+        + ". VISUAL CLEAN FRAME RULE: absolutely no text rendered inside the video image - "
+        + "no subtitles, no captions, no quote text on screen, no title overlays, no lower-thirds, "
+        + "no letters, no readable signage, no logos, no watermark"
+    )
     return dashes_to_commas_for_voice(base + _STYLE_SUFFIX)
 
 
@@ -79,7 +170,7 @@ async def generate_quote_videos(
             f"[Mode4 Video] Generating RU + EN in parallel; same reference for both: {ref_path}"
         )
         paths = await generate_videos_fastgen(
-            enriched, output_dir, str(ref_path)
+            enriched, output_dir, str(ref_path), mode4_veo_flow_flower=True
         )
         if any(p is None or not Path(p).exists() for p in paths):
             failed = [i for i, p in enumerate(paths) if p is None or not Path(p).exists()]
@@ -90,7 +181,12 @@ async def generate_quote_videos(
                 for retry in range(clip_retries + 1):
                     logger.info(f"[Mode4 Video] Retry clip {i} with reference: {ref_path}")
                     path = await generate_single_video_fastgen(
-                        enriched[i], output_dir, i, ref_path, cancel_event=cancel_event
+                        enriched[i],
+                        output_dir,
+                        i,
+                        ref_path,
+                        cancel_event=cancel_event,
+                        mode4_veo_flow_flower=True,
                     )
                     if path and Path(path).exists():
                         out[i] = path
@@ -110,7 +206,12 @@ async def generate_quote_videos(
         for retry in range(clip_retries + 1):
             logger.info(f"[Mode4 Video] Clip {i}: reference image {ref_path}")
             path = await generate_single_video_fastgen(
-                full_prompt, output_dir, i, ref_path, cancel_event=cancel_event
+                full_prompt,
+                output_dir,
+                i,
+                ref_path,
+                cancel_event=cancel_event,
+                mode4_veo_flow_flower=True,
             )
             if path and Path(path).exists():
                 break

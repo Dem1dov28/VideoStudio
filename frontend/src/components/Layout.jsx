@@ -1,6 +1,17 @@
 import { useEffect, useState } from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
-import { RiVideoAddLine, RiHistoryLine, RiSparklingLine, RiBookmarkLine, RiLoader4Line, RiPauseLine, RiDiceLine } from 'react-icons/ri';
+import {
+  RiVideoAddLine,
+  RiHistoryLine,
+  RiSparklingLine,
+  RiBookmarkLine,
+  RiLoader4Line,
+  RiPauseLine,
+  RiDiceLine,
+  RiCheckboxCircleLine,
+  RiErrorWarningLine,
+  RiStopCircleLine,
+} from 'react-icons/ri';
 import { motion } from 'framer-motion';
 import { api } from '../services/api';
 import RateLimitPanel from './RateLimitPanel';
@@ -12,7 +23,21 @@ const NAV = [
   { to: '/casino',  icon: RiDiceLine,       label: 'Казино' },
 ];
 
-const MODE_LABELS = { 1: '5 фактов', 2: 'Почему X?', 3: 'Реставрация', 4: 'Цитата', 5: 'Длинные', 6: 'Релакс', 7: '2 клипа', 8: 'Было→стало', 9: 'Keyframe', 10: 'Пляж' };
+const MODE_LABELS = {
+  1: '5 фактов',
+  2: 'Почему X?',
+  3: 'Реставрация',
+  4: 'Цитата',
+  5: 'Длинные',
+  6: 'Релакс',
+  7: '2 клипа',
+  8: 'Было→стало',
+  9: 'Keyframe',
+  10: 'Пляж',
+  11: 'Постройка',
+  12: 'Притча',
+  13: 'Аудио→слайды',
+};
 
 export default function Layout({ children }) {
   const { pathname } = useLocation();
@@ -67,12 +92,15 @@ export default function Layout({ children }) {
         {activeSessions.length > 0 && (
           <div className="px-4 py-3 border-b border-[#27272f]">
             <div className="text-[10px] font-semibold text-[#52525b] uppercase tracking-wider mb-2">
-              В работе ({activeSessions.length})
+              Сессии ({activeSessions.length})
             </div>
             <div className="space-y-1">
               {activeSessions.map(s => {
                 const isCurrent = activeRunSessionId && s.session_id === activeRunSessionId;
                 const isPaused = s.status === 'paused';
+                const isError = s.status === 'error';
+                const isCancelled = s.status === 'cancelled';
+                const isReviewPending = !!s.review_pending;
                 return (
                   <button
                     key={s.session_id}
@@ -80,17 +108,34 @@ export default function Layout({ children }) {
                     className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left text-xs border transition-colors ${
                       isCurrent
                         ? 'bg-brand-600/25 border-brand-500/60 ring-1 ring-brand-500/30'
-                        : 'bg-brand-600/10 border-brand-600/20 hover:border-brand-600/40'
+                        : isError
+                          ? 'bg-red-950/30 border-red-900/40 hover:border-red-800/50'
+                          : isCancelled
+                            ? 'bg-[#1a1a24] border-[#3f3f46] hover:border-[#52525b]'
+                            : 'bg-brand-600/10 border-brand-600/20 hover:border-brand-600/40'
                     }`}
                   >
-                    {isPaused ? (
+                    {isReviewPending ? (
+                      <RiCheckboxCircleLine className="flex-shrink-0 text-emerald-400 text-sm" />
+                    ) : isPaused ? (
                       <RiPauseLine className="flex-shrink-0 text-amber-400 text-sm" />
+                    ) : isError ? (
+                      <RiErrorWarningLine className="flex-shrink-0 text-red-400 text-sm" />
+                    ) : isCancelled ? (
+                      <RiStopCircleLine className="flex-shrink-0 text-[#71717a] text-sm" />
                     ) : (
                       <RiLoader4Line className="flex-shrink-0 animate-spin text-brand-400 text-sm" />
                     )}
                     <span className="truncate flex-1 text-[#e4e4f0]">
                       {s.topic || `#${s.session_id?.slice(-8)}`}
                     </span>
+                    {isReviewPending ? (
+                      <span className="text-[10px] text-emerald-400/90 flex-shrink-0">Проверка</span>
+                    ) : isError ? (
+                      <span className="text-[10px] text-red-400/90 flex-shrink-0">Ошибка</span>
+                    ) : isCancelled ? (
+                      <span className="text-[10px] text-[#71717a] flex-shrink-0">Стоп</span>
+                    ) : null}
                     <span className="text-[10px] text-[#71717a] flex-shrink-0">
                       {MODE_LABELS[s.mode] || s.mode}
                     </span>

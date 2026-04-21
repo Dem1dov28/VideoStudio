@@ -18,6 +18,20 @@ from agents.content_generator.types import EnrichedScene
 
 # ── fast-gen.ai ────────────────────────────────────────────────────────────────
 
+def _normalize_aspect_ratio(aspect_ratio: str | None) -> str:
+    raw = (aspect_ratio or "").strip().lower().replace(" ", "")
+    if raw in {"16:9", "horizontal", "landscape"}:
+        return "16:9"
+    if raw in {"9:16", "vertical", "portrait"}:
+        return "9:16"
+    return "9:16" if settings.video_format == "vertical" else "16:9"
+
+
+def _image_dimensions_for_aspect(aspect_ratio: str | None) -> tuple[int, int]:
+    ratio = _normalize_aspect_ratio(aspect_ratio)
+    return (1216, 832) if ratio == "16:9" else (832, 1216)
+
+
 async def _generate_images_fastgen(prompts: list[str], output_dir: Path) -> list[Path]:
     from agents.content_generator.fastgen_scraper import generate_images_fastgen
     return await generate_images_fastgen(prompts, output_dir)
@@ -29,13 +43,14 @@ _HF_URL = "https://router.huggingface.co/hf-inference/models/black-forest-labs/F
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=5, max=30))
-async def _generate_hf(prompt: str, dest: Path) -> Path:
+async def _generate_hf(prompt: str, dest: Path, *, aspect_ratio: str | None = None) -> Path:
     if not settings.hf_token:
         raise ValueError(
             "HF_TOKEN is empty. Get a free token at https://huggingface.co/settings/tokens"
         )
     headers = {"Authorization": f"Bearer {settings.hf_token}", "Content-Type": "application/json"}
-    payload = {"inputs": prompt, "parameters": {"width": 832, "height": 1216}}
+    width, height = _image_dimensions_for_aspect(aspect_ratio)
+    payload = {"inputs": prompt, "parameters": {"width": width, "height": height}}
     async with httpx.AsyncClient(timeout=120) as client:
         r = await client.post(_HF_URL, headers=headers, json=payload)
         if r.status_code == 503:
@@ -48,12 +63,17 @@ async def _generate_hf(prompt: str, dest: Path) -> Path:
     return dest
 
 
-async def _generate_images_hf(prompts: list[str], output_dir: Path) -> list[Path]:
+async def _generate_images_hf(
+    prompts: list[str],
+    output_dir: Path,
+    *,
+    aspect_ratio: str | None = None,
+) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     for i, prompt in enumerate(prompts):
         dest = output_dir / f"frame_{int(time.time())}_{i}.jpg"
-        paths.append(await _generate_hf(prompt, dest))
+        paths.append(await _generate_hf(prompt, dest, aspect_ratio=aspect_ratio))
         await asyncio.sleep(1)
     return paths
 
@@ -61,12 +81,12 @@ async def _generate_images_hf(prompts: list[str], output_dir: Path) -> list[Path
 # ── DALL-E 3 ──────────────────────────────────────────────────────────────────
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
-async def _generate_dalle(prompt: str, dest: Path) -> Path:
+async def _generate_dalle(prompt: str, dest: Path, *, aspect_ratio: str | None = None) -> Path:
     if not settings.openai_api_key:
         raise ValueError("OPENAI_API_KEY is empty. Set it in .env for DALL-E.")
     import openai
     client = openai.AsyncOpenAI(api_key=settings.openai_api_key)
-    size = "1024x1792" if settings.video_format == "vertical" else "1792x1024"
+    size = "1792x1024" if _normalize_aspect_ratio(aspect_ratio) == "16:9" else "1024x1792"
     response = await client.images.generate(
         model="dall-e-3", prompt=prompt, size=size,
         quality="standard", n=1, response_format="b64_json",
@@ -77,10 +97,15 @@ async def _generate_dalle(prompt: str, dest: Path) -> Path:
     return dest
 
 
-async def _generate_images_dalle(prompts: list[str], output_dir: Path) -> list[Path]:
+async def _generate_images_dalle(
+    prompts: list[str],
+    output_dir: Path,
+    *,
+    aspect_ratio: str | None = None,
+) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     tasks = [
-        _generate_dalle(prompt, output_dir / f"frame_{int(time.time())}_{i}.png")
+        _generate_dalle(prompt, output_dir / f"frame_{int(time.time())}_{i}.png", aspect_ratio=aspect_ratio)
         for i, prompt in enumerate(prompts)
     ]
     return list(await asyncio.gather(*tasks))

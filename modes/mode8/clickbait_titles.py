@@ -57,7 +57,7 @@ VEHICLE_TEMPLATES_EN = [
     "FROM PARTS TO {vehicle_type} IN {duration} SECONDS {emoji}",
 ]
 
-# Room restoration / makeover (Mode 12) — style_or_type = room_type key, location = lighting key
+# Room restoration / makeover (legacy room timelapse metadata) — style_or_type = room_type key, location = lighting key
 ROOM_TEMPLATES = [
     "Я ПРИВЁЛ В ПОРЯДОК {house_type} {location_variant} ЗА {duration} СЕКУНД {emoji}",
     "РЕСТАВРАЦИЯ КОМНАТЫ: {house_type} ЗА {duration} СЕК {emoji}",

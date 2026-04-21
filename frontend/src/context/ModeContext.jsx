@@ -11,7 +11,9 @@ export function ModeProvider({ children }) {
   const [mode, setModeState] = useState(() => {
     try {
       const stored = localStorage.getItem(MODE_KEY);
-      return stored ? parseInt(stored, 10) : 1;
+      let v = stored ? parseInt(stored, 10) : 1;
+      if (v === 12) v = 4;
+      return [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13].includes(v) ? v : 1;
     } catch {
       return 1;
     }
@@ -23,7 +25,10 @@ export function ModeProvider({ children }) {
     } catch {}
   }, [mode]);
 
-  const setMode = (m) => setModeState([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].includes(m) ? m : 1);
+  const setMode = (m) => {
+    if (m === 12) m = 4;
+    setModeState([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13].includes(m) ? m : 1);
+  };
 
   return (
     <ModeContext.Provider value={{ mode, setMode }}>

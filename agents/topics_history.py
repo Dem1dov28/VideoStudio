@@ -173,6 +173,38 @@ def attach_start_request_to_session(session_id: str, payload: dict) -> bool:
     return found
 
 
+def upsert_start_request_for_session(session_id: str, topic: str, payload: dict) -> bool:
+    """
+    Сохранить StartRequest для перезапуска с Progress и перегенерации из «Видео».
+    Если записи с таким session_id ещё нет (часто режим 13 / обрыв до mark_topic_used) — создаётся.
+    """
+    if not session_id or not isinstance(payload, dict) or not payload:
+        return False
+    data = _load()
+    topics = data.setdefault("topics", [])
+    label = (topic or "").strip() or f"Видео #{session_id[-8:]}"
+    for e in topics:
+        if e.get("session_id") == session_id:
+            e["start_request"] = dict(payload)
+            if label and not (e.get("topic") or "").strip():
+                e["topic"] = label
+            _save(data)
+            return True
+    topics.append(
+        {
+            "topic": label,
+            "video_angle": "",
+            "session_id": session_id,
+            "video_path": "",
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "start_request": dict(payload),
+        }
+    )
+    _save(data)
+    logger.info(f"[TopicsHistory] upsert start_request for session {session_id} (new history row)")
+    return True
+
+
 def get_publishing_by_session() -> dict[str, dict]:
     """Return a dict mapping session_id to publishing metadata."""
     topics = get_used_topics()

@@ -1,10 +1,11 @@
-"""Text-to-speech via configurable provider (Edge-TTS / VK Cloud / ElevenLabs)."""
+"""Text-to-speech через VoiceAPI (один endpoint, без смены провайдера)."""
 
 from __future__ import annotations
 
 import asyncio
 import re
 import tempfile
+import time
 from pathlib import Path
 
 import httpx
@@ -245,6 +246,451 @@ def prepare_tts_plain_text(text: str) -> str:
     return re.sub(r"\s{2,}", " ", processed).strip()
 
 
+# VoiceAPI (csv666) отклоняет короткие запросы: «Minimum text length is 500 characters».
+VOICEAPI_MIN_PLAIN_CHARS = 500
+
+# Невидимый символ: обычно не озвучивается TTS, но увеличивает len() для лимита API без смыслового «хвоста».
+NONSPOKEN_LEN_FILLER_CHAR = "\u200b"
+
+
+def append_nonspeaking_length_pad(
+    text: str,
+    min_len: int,
+    *,
+    filler: str = NONSPOKEN_LEN_FILLER_CHAR,
+) -> str:
+    """Дополняет строку до min_len без дополнительного смысла (только невидимые символы)."""
+    s = text or ""
+    if len(s) >= min_len:
+        return s
+    need = min_len - len(s)
+    return s + filler * need
+
+
+def _pad_plain_to_voiceapi_minimum(plain: str, *, language: str = "ru", pad_salt: int = 0) -> str:
+    """Дополняет уже подготовленный plain-текст до лимита VoiceAPI без озвучиваемых вставок."""
+    _ = (language, pad_salt)  # сохраняем сигнатуру для вызывающего кода
+    p = (plain or "").strip()
+    return append_nonspeaking_length_pad(p, VOICEAPI_MIN_PLAIN_CHARS)
+
+
+def plain_text_for_voiceapi_tts(text: str, *, language: str = "ru", pad_salt: int = 0) -> str:
+    """sanitize + stress + невидимое дополнение до минимума для VoiceAPI /tasks."""
+    prepared = prepare_tts_plain_text(text)
+    return _pad_plain_to_voiceapi_minimum(prepared, language=language, pad_salt=pad_salt)
+
+
+def _voiceapi_headers() -> dict[str, str]:
+    api_key = (settings.voiceapi_api_key or "").strip()
+    if not api_key:
+        raise ValueError("VOICEAPI_API_KEY is empty. Set it in .env.")
+    return {"X-API-Key": api_key}
+
+
+def _voiceapi_inline_template(voice: str | None = None) -> dict | None:
+    voice_id = (voice or settings.voiceapi_voice_id or "").strip()
+    public_owner_id = (settings.voiceapi_public_owner_id or "").strip()
+    if not voice_id or not public_owner_id:
+        return None
+    return _voiceapi_inline_template_from_voice_ids(
+        voice_id=voice_id,
+        public_owner_id=public_owner_id,
+    )
+
+
+def _voiceapi_inline_template_from_voice_ids(
+    *,
+    voice_id: str,
+    public_owner_id: str,
+    model_id: str | None = None,
+) -> dict:
+    """Build VoiceAPI inline template with our tuned voice settings."""
+    return {
+        "model_id": (model_id or settings.voiceapi_model_id or "eleven_multilingual_v2").strip(),
+        "voice_id": voice_id.strip(),
+        "public_owner_id": public_owner_id.strip(),
+        "voice_settings": {
+            "stability": float(settings.voiceapi_stability),
+            "similarity_boost": float(settings.voiceapi_similarity_boost),
+            "use_speaker_boost": bool(settings.voiceapi_speaker_boost),
+            "speed": float(settings.voiceapi_speed),
+        },
+    }
+
+
+def _voiceapi_base_url() -> str:
+    """Единственный base URL озвучки (без mirror / backup)."""
+    u = (settings.voiceapi_base_url or "").strip().rstrip("/")
+    return u or "https://voiceapi.csv666.ru"
+
+
+def _voiceapi_exc_detail(exc: BaseException) -> str:
+    """httpx/httpcore иногда дают пустой str(exc); для логов показываем тип и repr."""
+    msg = str(exc).strip()
+    if msg:
+        return f"{type(exc).__name__}: {msg}"
+    return f"{type(exc).__name__}: {exc!r}"
+
+
+# Транзиентные сетевые сбои при long-poll к VoiceAPI (обрыв чтения, reset peer и т.д.).
+_VOICEAPI_TRANSIENT_HTTPX: tuple[type[BaseException], ...] = (
+    httpx.ReadError,
+    httpx.ConnectError,
+    httpx.RemoteProtocolError,
+    httpx.WriteError,
+    httpx.ConnectTimeout,
+    httpx.ReadTimeout,
+    httpx.WriteTimeout,
+    httpx.PoolTimeout,
+)
+
+
+async def _voiceapi_retrying_get(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: dict[str, str],
+    label: str,
+) -> httpx.Response:
+    """Идемпотентный GET с backoff при обрыве соединения (poll status / fetch result)."""
+    max_attempts = max(1, int(getattr(settings, "voiceapi_transient_retry_attempts", 8) or 8))
+    base = max(0.5, float(getattr(settings, "voiceapi_retry_base_sec", 2.0) or 2.0))
+    max_delay = max(base, float(getattr(settings, "voiceapi_retry_max_sec", 30.0) or 30.0))
+    last: BaseException | None = None
+    for attempt in range(max_attempts):
+        try:
+            return await client.get(url, headers=headers)
+        except _VOICEAPI_TRANSIENT_HTTPX as e:
+            last = e
+            if attempt >= max_attempts - 1:
+                raise
+            wait = min(max_delay, base * (2**attempt))
+            logger.warning(
+                "[TTS:VoiceAPI] {} — transient {} (attempt {}/{}), retry in {:.1f}s: {}",
+                label,
+                type(e).__name__,
+                attempt + 1,
+                max_attempts,
+                wait,
+                _voiceapi_exc_detail(e),
+            )
+            await asyncio.sleep(wait)
+    assert last is not None
+    raise last
+
+
+async def _voiceapi_retrying_post(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: dict[str, str],
+    json_body: dict,
+    label: str,
+) -> httpx.Response:
+    """POST /tasks с backoff при обрыве соединения (RemoteProtocolError и т.п.)."""
+    max_attempts = max(1, int(getattr(settings, "voiceapi_transient_retry_attempts", 8) or 8))
+    base = max(0.5, float(getattr(settings, "voiceapi_retry_base_sec", 2.0) or 2.0))
+    max_delay = max(base, float(getattr(settings, "voiceapi_retry_max_sec", 30.0) or 30.0))
+    last: BaseException | None = None
+    for attempt in range(max_attempts):
+        try:
+            return await client.post(url, headers=headers, json=json_body)
+        except _VOICEAPI_TRANSIENT_HTTPX as e:
+            last = e
+            if attempt >= max_attempts - 1:
+                raise
+            wait = min(max_delay, base * (2**attempt))
+            logger.warning(
+                "[TTS:VoiceAPI] {} — transient {} on POST (attempt {}/{}), retry in {:.1f}s: {}",
+                label,
+                type(e).__name__,
+                attempt + 1,
+                max_attempts,
+                wait,
+                _voiceapi_exc_detail(e),
+            )
+            await asyncio.sleep(wait)
+    assert last is not None
+    raise last
+
+
+_VOICEAPI_TEMPLATE_RESOLVE_CACHE: dict[str, dict[str, str]] = {}
+_VOICEAPI_TEMPLATE_RESOLVE_LOCK = asyncio.Lock()
+_VOICEAPI_TEMPLATE_RESOLVE_FAILED: set[str] = set()
+_VOICEAPI_SYNTH_SEMAPHORE: asyncio.Semaphore | None = None
+
+
+def _voiceapi_synth_semaphore() -> asyncio.Semaphore:
+    global _VOICEAPI_SYNTH_SEMAPHORE
+    size = max(1, int(getattr(settings, "voiceapi_max_concurrency", 3) or 3))
+    sem = _VOICEAPI_SYNTH_SEMAPHORE
+    if sem is None:
+        _VOICEAPI_SYNTH_SEMAPHORE = asyncio.Semaphore(size)
+    return _VOICEAPI_SYNTH_SEMAPHORE
+
+
+def _voiceapi_retry_after_seconds(resp: httpx.Response, attempt: int) -> float:
+    base_delay = max(0.5, float(getattr(settings, "voiceapi_retry_base_sec", 2.0) or 2.0))
+    max_delay = max(base_delay, float(getattr(settings, "voiceapi_retry_max_sec", 30.0) or 30.0))
+    header = (resp.headers.get("Retry-After") or "").strip()
+    if header:
+        try:
+            return max(0.0, min(max_delay, float(header)))
+        except Exception:
+            pass
+    return min(max_delay, base_delay * (2 ** max(0, int(attempt))))
+
+
+async def _voiceapi_resolve_template_voice(template_uuid: str) -> dict[str, str] | None:
+    """
+    Best-effort: resolve template_uuid → (voice_id, public_owner_id, model_id).
+
+    This lets us apply our own voice settings even when the request normally uses
+    `template_uuid` (which freezes template's internal voice_settings).
+    """
+    template_uuid = (template_uuid or "").strip()
+    if not template_uuid:
+        return None
+
+    if template_uuid in _VOICEAPI_TEMPLATE_RESOLVE_FAILED:
+        return None
+
+    if template_uuid in _VOICEAPI_TEMPLATE_RESOLVE_CACHE:
+        return _VOICEAPI_TEMPLATE_RESOLVE_CACHE[template_uuid]
+
+    async with _VOICEAPI_TEMPLATE_RESOLVE_LOCK:
+        if template_uuid in _VOICEAPI_TEMPLATE_RESOLVE_CACHE:
+            return _VOICEAPI_TEMPLATE_RESOLVE_CACHE[template_uuid]
+
+        def _extract_templates_list(payload: object) -> list[dict]:
+            """Best-effort extraction of templates list from various response shapes."""
+            if isinstance(payload, list):
+                return [x for x in payload if isinstance(x, dict)]
+            if not isinstance(payload, dict):
+                return []
+
+            # Common keys / nesting.
+            for key in ("templates", "data", "items", "results"):
+                v = payload.get(key)
+                if isinstance(v, list):
+                    return [x for x in v if isinstance(x, dict)]
+                if isinstance(v, dict):
+                    for key2 in ("templates", "items", "results"):
+                        v2 = v.get(key2)
+                        if isinstance(v2, list):
+                            return [x for x in v2 if isinstance(x, dict)]
+
+            # Fallback: pick first list of dicts.
+            for v in payload.values():
+                if isinstance(v, list) and v and all(isinstance(x, dict) for x in v):
+                    return v
+            return []
+
+        # GET /templates на единственном VOICEAPI_BASE_URL.
+        any_templates_response = False
+        base_url = _voiceapi_base_url()
+        try:
+            async with httpx.AsyncClient(
+                timeout=max(15.0, float(settings.voiceapi_timeout_sec or 30.0)),
+                follow_redirects=True,
+                verify=False,
+                http2=False,
+            ) as client:
+                resp = await client.get(
+                    f"{base_url}/templates",
+                    headers={**_voiceapi_headers(), "Accept": "application/json"},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+
+            templates = _extract_templates_list(data)
+            if templates:
+                any_templates_response = True
+
+            for item in templates:
+                if not isinstance(item, dict):
+                    continue
+                item_uuid = str(
+                    item.get("template_uuid")
+                    or item.get("uuid")
+                    or item.get("id")
+                    or item.get("templateId")
+                    or item.get("templateID")
+                    or ""
+                ).strip()
+                if item_uuid != template_uuid:
+                    continue
+
+                s = item.get("settings") or {}
+                if not isinstance(s, dict):
+                    s = {}
+                voice_id = str(
+                    s.get("voice_id")
+                    or s.get("voiceId")
+                    or item.get("voice_id")
+                    or item.get("voiceId")
+                    or s.get("VOICE_ID")
+                    or ""
+                ).strip()
+                public_owner_id = str(
+                    s.get("public_owner_id")
+                    or s.get("publicOwnerId")
+                    or s.get("publicOwnerID")
+                    or item.get("public_owner_id")
+                    or item.get("publicOwnerId")
+                    or s.get("PUBLIC_OWNER_ID")
+                    or ""
+                ).strip()
+                model_id = str(
+                    s.get("model_id")
+                    or s.get("modelId")
+                    or s.get("model")
+                    or item.get("model_id")
+                    or item.get("modelId")
+                    or ""
+                ).strip()
+
+                if voice_id and public_owner_id:
+                    resolved = {
+                        "voice_id": voice_id,
+                        "public_owner_id": public_owner_id,
+                        "model_id": model_id,
+                    }
+                    _VOICEAPI_TEMPLATE_RESOLVE_CACHE[template_uuid] = resolved
+                    return resolved
+        except Exception:
+            pass
+
+        if not any_templates_response:
+            logger.warning(
+                "[TTS:VoiceAPI] /templates is not returning expected JSON for template_uuid={} "
+                "(endpoints may be blocked).",
+                template_uuid,
+            )
+        else:
+            logger.warning(
+                "[TTS:VoiceAPI] template_uuid={} not found in /templates response.",
+                template_uuid,
+            )
+        _VOICEAPI_TEMPLATE_RESOLVE_FAILED.add(template_uuid)
+
+    return None
+
+
+async def _voiceapi_synthesize(plain: str, tmp_path: Path, voice: str | None = None) -> None:
+    timeout = max(30.0, float(settings.voiceapi_timeout_sec or 300.0))
+    poll_interval = max(0.5, float(settings.voiceapi_poll_interval_sec or 2.0))
+
+    payload: dict = {"text": plain}
+    template_uuid = (settings.voiceapi_template_uuid or "").strip()
+
+    # Voice must be configured only via template_uuid.
+    if not template_uuid:
+        raise ValueError("VOICEAPI_TEMPLATE_UUID is empty. Voice must be configured only via template.")
+    payload["template_uuid"] = template_uuid
+    # Keep technical chunking (not a voice override) for long texts.
+    chunk_size = getattr(settings, "voiceapi_chunk_size", None)
+    if chunk_size is not None:
+        payload["chunk_size"] = max(500, min(2000, int(chunk_size)))
+
+    create_attempts = max(1, int(getattr(settings, "voiceapi_create_max_attempts", 6) or 6))
+    base_url = _voiceapi_base_url()
+    async with _voiceapi_synth_semaphore():
+        try:
+            async with httpx.AsyncClient(
+                timeout=timeout,
+                follow_redirects=True,
+                http2=False,
+            ) as client:
+                create_resp: httpx.Response | None = None
+                for attempt in range(create_attempts):
+                    create_resp = await _voiceapi_retrying_post(
+                        client,
+                        f"{base_url}/tasks",
+                        headers={
+                            **_voiceapi_headers(),
+                            "Content-Type": "application/json",
+                            "Accept": "application/json",
+                        },
+                        json_body=payload,
+                        label=f"POST /tasks via {base_url}",
+                    )
+                    if create_resp.status_code != 429:
+                        break
+                    wait_sec = _voiceapi_retry_after_seconds(create_resp, attempt)
+                    logger.warning(
+                        "[TTS:VoiceAPI] /tasks rate-limited (429) via {} | attempt {}/{} | wait {:.1f}s",
+                        base_url,
+                        attempt + 1,
+                        create_attempts,
+                        wait_sec,
+                    )
+                    if attempt >= create_attempts - 1:
+                        break
+                    await asyncio.sleep(wait_sec)
+                assert create_resp is not None
+                if create_resp.status_code >= 400:
+                    body_preview = (create_resp.text or "").strip().replace("\n", " ")
+                    if len(body_preview) > 800:
+                        body_preview = body_preview[:800] + " ..."
+                    logger.error(
+                        "[TTS:VoiceAPI] /tasks failed {} via {} | body={} | payload_meta={{template_uuid: {}, chunk_size: {}, text_len: {}}}",
+                        create_resp.status_code,
+                        base_url,
+                        body_preview,
+                        bool(payload.get("template_uuid")),
+                        payload.get("chunk_size"),
+                        len(plain),
+                    )
+                create_resp.raise_for_status()
+                task_id = int(create_resp.json()["task_id"])
+                logger.debug(f"[TTS] VoiceAPI task created id={task_id} via {base_url}")
+
+                deadline = time.monotonic() + timeout
+                last_status = "waiting"
+                while True:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"VoiceAPI task {task_id} did not finish in {timeout:.0f}s")
+                    status_resp = await _voiceapi_retrying_get(
+                        client,
+                        f"{base_url}/tasks/{task_id}/status",
+                        headers={**_voiceapi_headers(), "Accept": "application/json"},
+                        label=f"task {task_id} status",
+                    )
+                    status_resp.raise_for_status()
+                    status_data = status_resp.json()
+                    last_status = (status_data.get("status") or "").strip().lower()
+                    if last_status in {"ending", "ending_processed"}:
+                        break
+                    if last_status in {"error", "error_handled"}:
+                        raise RuntimeError(f"VoiceAPI task {task_id} failed with status={last_status}")
+                    await asyncio.sleep(poll_interval)
+
+                result_resp = await _voiceapi_retrying_get(
+                    client,
+                    f"{base_url}/tasks/{task_id}/result",
+                    headers={**_voiceapi_headers(), "Accept": "audio/mpeg,application/zip,*/*"},
+                    label=f"task {task_id} result",
+                )
+                if result_resp.status_code == 202:
+                    raise RuntimeError(f"VoiceAPI task {task_id} is not ready yet after status={last_status}")
+                result_resp.raise_for_status()
+                content_type = (result_resp.headers.get("content-type") or "").lower()
+                if "zip" in content_type:
+                    raise RuntimeError(
+                        "VoiceAPI returned ZIP instead of MP3. Reduce VOICEAPI_CHUNK_SIZE or adjust provider settings."
+                    )
+                tmp_path.write_bytes(result_resp.content)
+                logger.debug(f"[TTS] VoiceAPI synthesized task={task_id} via {base_url} → {tmp_path.name}")
+        except Exception as exc:
+            logger.error(
+                "[TTS] VoiceAPI endpoint failed ({}): {}",
+                base_url,
+                _voiceapi_exc_detail(exc),
+            )
+            raise
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Audio normalization (pydub)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -280,20 +726,30 @@ async def synthesize(
     output_path: Path,
     rate: str | None = None,
     voice: str | None = None,
+    pitch: str | None = None,
     *,
     with_word_timestamps: bool = False,
     language: str = "ru",
+    pad_salt: int | None = None,
+    voiceapi_plain: str | None = None,
 ) -> tuple[Path, list[tuple[float, float]] | None, list[str]]:
     """
     Synthesize `text` to MP3 at `output_path`.
 
     Returns:
-        (output_path, word_timestamps, tts_words) — word_timestamps per word when
-        with_word_timestamps=True and provider=edge, else None; tts_words for sync.
+        (output_path, word_timestamps, tts_words) — для VoiceAPI таймкоды слов не заполняются
+        (with_word_timestamps зарезервировано); tts_words для совместимости API.
+
+    voiceapi_plain: если задан — отправляется в VoiceAPI как есть (уже sanitize+pad),
+        чтобы не дублировать подготовку текста с вызывающим кодом (Mode 5).
+    pad_salt: зарезервировано (совместимость); дополнение до лимита — невидимые символы.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    plain = prepare_tts_plain_text(text)
+    if voiceapi_plain is not None:
+        plain = (voiceapi_plain or "").strip()
+    else:
+        plain = plain_text_for_voiceapi_tts(text, language=language, pad_salt=pad_salt)
     word_timestamps: list[tuple[float, float]] | None = None
     tts_words: list[str] = []
 
@@ -302,93 +758,8 @@ async def synthesize(
         tmp_path = Path(tmp.name)
 
     try:
-        provider = (settings.tts_provider or "edge").strip().lower()
-        if provider == "edge":
-            import edge_tts
-            voice_name = (voice or settings.edge_tts_voice).strip()
-            use_rate = rate if rate is not None else (
-                getattr(settings, "edge_tts_rate_en", "-10%")
-                if (language or "").strip().lower() == "en"
-                else settings.edge_tts_rate
-            )
-            communicate = edge_tts.Communicate(
-                plain,
-                voice_name,
-                rate=use_rate,
-                pitch=settings.edge_tts_pitch,
-                boundary="WordBoundary" if with_word_timestamps else "SentenceBoundary",
-            )
-            if with_word_timestamps:
-                audio_chunks: list[bytes] = []
-                async for chunk in communicate.stream():
-                    if chunk.get("type") == "WordBoundary":
-                        offset = chunk.get("offset", 0) or 0
-                        dur = chunk.get("duration", 0) or 0
-                        start_sec = offset / 1e7
-                        end_sec = (offset + dur) / 1e7
-                        word_timestamps = word_timestamps or []
-                        word_timestamps.append((start_sec, end_sec))
-                        w = (chunk.get("text") or "").strip()
-                        if w:
-                            tts_words.append(w)
-                        else:
-                            tts_words.append("")  # keep 1:1 with timestamps
-                    elif chunk.get("type") == "audio" and chunk.get("data"):
-                        audio_chunks.append(chunk["data"])
-                tmp_path.write_bytes(b"".join(audio_chunks))
-                if tts_words and len(tts_words) != len(word_timestamps or []):
-                    tts_words = []  # fallback: используем split по тексту
-                logger.debug(f"[TTS] Edge-TTS synthesized with {len(word_timestamps or [])} word boundaries → {tmp_path.name}")
-            else:
-                await communicate.save(str(tmp_path))
-                logger.debug(f"[TTS] Edge-TTS synthesized ({voice_name}) → {tmp_path.name}")
-        else:
-            async with httpx.AsyncClient(timeout=120) as client:
-                if provider == "vkcloud":
-                    if not settings.vkcloud_voice_token:
-                        raise ValueError("VKCLOUD_VOICE_TOKEN is empty. Set it in .env.")
-                    url = "https://voice.mcs.mail.ru/tts"
-                    headers = {"Authorization": f"Bearer {settings.vkcloud_voice_token}"}
-                    data = {
-                        "text": plain,
-                        "model": settings.vkcloud_voice_model,
-                        "encoder": settings.vkcloud_voice_encoder,
-                        "tempo": str(settings.vkcloud_voice_speed),
-                    }
-                    resp = await client.post(url, headers=headers, data=data)
-                    resp.raise_for_status()
-                    tmp_path.write_bytes(resp.content)
-                    logger.debug(f"[TTS] VK Cloud synthesized ({settings.vkcloud_voice_model}) → {tmp_path.name}")
-                elif provider == "elevenlabs":
-                    if not settings.elevenlabs_api_key:
-                        raise ValueError("ELEVENLABS_API_KEY is empty. Set it in .env.")
-                    voice_id = (voice or settings.elevenlabs_voice_id).strip()
-                    if not voice_id:
-                        raise ValueError("ELEVENLABS_VOICE_ID is empty. Set it in .env.")
-                    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-                    headers = {
-                        "xi-api-key": settings.elevenlabs_api_key,
-                        "Accept": "audio/mpeg",
-                        "Content-Type": "application/json",
-                    }
-                    payload = {
-                        "text": plain,
-                        "model_id": settings.elevenlabs_model_id,
-                        "voice_settings": {
-                            "stability": settings.elevenlabs_stability,
-                            "similarity_boost": settings.elevenlabs_similarity_boost,
-                            "style": settings.elevenlabs_style,
-                            "use_speaker_boost": settings.elevenlabs_speaker_boost,
-                        },
-                    }
-                    resp = await client.post(url, headers=headers, json=payload)
-                    resp.raise_for_status()
-                    tmp_path.write_bytes(resp.content)
-                    logger.debug(f"[TTS] ElevenLabs synthesized ({voice_id}) → {tmp_path.name}")
-                else:
-                    raise ValueError(
-                        f"Unsupported TTS_PROVIDER={provider!r}. Use edge, vkcloud or elevenlabs."
-                    )
+        # Strict mode: only VoiceAPI + template UUID is supported.
+        await _voiceapi_synthesize(plain, tmp_path, voice=None)
 
         _normalize_mp3(tmp_path, output_path)
         logger.debug(f"[TTS] Normalized → {output_path}")
@@ -413,6 +784,7 @@ async def synthesize_all(
     *,
     with_word_timestamps: bool = False,
     rate: str | None = None,
+    pitch: str | None = None,
 ) -> tuple[list[Path], list[list[tuple[float, float]] | None], list[list[str]]]:
     """
     Synthesize all texts in parallel.
@@ -427,6 +799,7 @@ async def synthesize_all(
             output_dir / f"voice_{i:03d}.mp3",
             voice=voice,
             rate=rate,
+            pitch=pitch,
             with_word_timestamps=with_word_timestamps,
             language=language,
         )
