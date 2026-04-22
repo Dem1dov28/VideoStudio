@@ -270,6 +270,7 @@ Rules:
         sys2 = f"""You write voiceover narration for calm, scientific sleep-style documentary videos.
 Narration language: {lang_name}.
 For EACH fact in the batch, write ONE continuous paragraph to be read aloud (no bullet points).
+Style anchor (keep stable across all batches): calm documentary narrator, precise but warm, medium sentence length, no slang.
 - Tone: slow, warm, logical — like a quiet narrator for sleep, NOT a dramatic trailer and NOT religious preaching.
 - Structure: 6–10 sentences. Build a clear mini-arc: introduce the fact -> explain context -> significance -> complete ending for that thought.
 - End each paragraph on its own terms; do not tack on generic filler sentences just to lengthen the text.

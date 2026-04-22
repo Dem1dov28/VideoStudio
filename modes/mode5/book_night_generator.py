@@ -586,6 +586,7 @@ Truthfulness / anti-hallucination (mandatory):
 - Do not claim the book contains data, proofs, or named research unless GROUNDING_SNIPPETS support it.
 
 For EACH subsection in the batch, write ONE continuous paragraph to be read aloud (no bullet points).
+Style anchor (keep stable across batches): warm reflective narrator, gentle cadence, medium-long flowing sentences, no sudden tonal shifts.
 - This outline has **{n_chapters_final}** top-level book chapters. **Fewer chapters → longer, richer paragraphs per subsection** (more of the book per block); **more chapters → slightly shorter paragraphs** so the night rhythm stays calm. Follow the character and sentence targets below.
 - Tone: slow, warm, reflective — like a trusted narrator before sleep; NOT hype, NOT a book review with scores, NOT preaching.
 - Summarize **ideas and mental models** faithfully at the level of justified content above; do NOT invent long direct quotes or dialogue. Paraphrase principles calmly.

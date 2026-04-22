@@ -86,6 +86,16 @@ _MIN_CHUNK_TEXT_LEN = 80
 _MIN_CHUNK_TEXT_LEN_FACTS50 = 40
 _MODE5_OUTPUT_FORMAT = "horizontal"
 _MODE5_IMAGE_ASPECT_RATIO = "16:9"
+_MODE5_VARIATION_SHOTS = (
+    "wide establishing shot",
+    "medium environmental shot",
+    "close-up detail shot",
+    "over-the-shoulder perspective",
+    "low-angle cinematic shot",
+    "high-angle overview",
+    "rule-of-thirds side composition",
+    "foreground-depth layered composition",
+)
 
 
 def _mode5_parallel_images_cap() -> int:
@@ -496,7 +506,13 @@ def _segments_for_facts50_chunk(
     overlay_title: str,
 ) -> list[dict[str, Any]]:
     t1 = max(0.05, float(duration_sec))
-    text = (fact_hint or "").strip() or (chunk_text or "").strip()
+    hint = re.sub(r"\s+", " ", (fact_hint or "").strip())
+    spoken = re.sub(r"\s+", " ", (chunk_text or "").strip())
+    if hint and spoken:
+        # Keep strict fact anchor, but also feed the spoken moment for better visual alignment.
+        text = f"{hint}. Spoken context: {spoken[:900]}"
+    else:
+        text = hint or spoken
     return [{"s": 0, "t0": 0.0, "t1": t1, "text": text, "overlay_title": overlay_title}]
 
 
@@ -653,12 +669,25 @@ async def _generate_chunk_images(
     cap = _mode5_parallel_images_cap()
     sem = asyncio.Semaphore(max(1, min(cap, int(max_parallel_images or cap))))
     chunk_index = int(chunk.get("index", -1))
+    segments = list(chunk.get("segments") or [])
+
+    def _segment_variation_hint(seg: dict[str, Any]) -> str:
+        s = int(seg.get("s", 0) or 0)
+        shot = _MODE5_VARIATION_SHOTS[(chunk_index + s) % len(_MODE5_VARIATION_SHOTS)]
+        alt = _MODE5_VARIATION_SHOTS[(chunk_index + s + 3) % len(_MODE5_VARIATION_SHOTS)]
+        total = max(1, len(segments))
+        return (
+            f"Variation target for this frame (segment {s + 1}/{total}): use {shot}; "
+            f"avoid repeating composition from neighboring segments; prefer a distinct camera setup such as {alt}; "
+            "keep the same global art direction and character/world continuity."
+        )
 
     async def _one(seg: dict[str, Any]) -> tuple[dict[str, Any], BaseException | None]:
         prompt = await _build_image_prompt_async(
             seg.get("text", ""),
             style_suffix,
             output_format=_MODE5_OUTPUT_FORMAT,
+            variation_hint=_segment_variation_hint(seg),
             extra_suffix="Fresh alternative composition, same art direction." if refresh_all else "",
             visual_policy=visual_policy,
             visual_bible=visual_bible,
@@ -1809,6 +1838,10 @@ async def regenerate_mode5_image(
         seg.get("text", ""),
         plan.get("style_suffix") or "",
         output_format=_MODE5_OUTPUT_FORMAT,
+        variation_hint=(
+            f"Variation target for this regenerated frame: use a new camera angle and composition "
+            f"compared to neighboring segments, while preserving the same global style."
+        ),
         extra_suffix="Fresh alternative composition, same art direction.",
         visual_policy=_mode5_visual_policy(str(plan.get("sub_mode"))),
         visual_bible=plan.get("visual_bible") if isinstance(plan.get("visual_bible"), dict) else None,

@@ -292,6 +292,8 @@ async def _narration_to_visual_scene_brief_facts50(raw: str, *, series_scene_cue
             content=(
                 "You write ONE English phrase (max 40 words) for a single photorealistic illustration frame in an educational "
                 "\"facts\" video. Input may be Russian or English speech-to-text (noisy). "
+                "Priority order: (1) exact event/claim in THIS excerpt, (2) concrete place+action+objects, "
+                "(3) era and style constraints. Do not reverse this order. "
                 "Infer TIME PERIOD from the excerpt: if it is clearly about ancient/medieval/early-modern history, describe a "
                 "period-accurate place and people. If it is about modern countries, cities, science, nature, food, travel, or "
                 "everyday life without a historical era, show a CONTEMPORARY real-world scene (today's streets, modern buildings, "
@@ -301,7 +303,7 @@ async def _narration_to_visual_scene_brief_facts50(raw: str, *, series_scene_cue
                 "— never default to medieval markets or castles unless the words clearly demand that era. "
                 "Do NOT default to castles, knights, or medieval Europe when the fact is broadly modern. "
                 "Describe place, time of day, weather if outdoors, lighting, and key concrete objects; generic people as roles, not celebrity names. "
-                "Prefer literal filmable scenes over symbolism. "
+                "Prefer literal filmable scenes over symbolism; avoid generic stock-like shots unrelated to this exact line. "
                 "No books, scrolls, newspapers, screens with readable text as the main subject. "
                 "Output only the phrase, no quotes."
             )
@@ -327,12 +329,15 @@ async def _narration_to_visual_scene_brief(raw: str) -> str:
             content=(
                 "You write ONE English phrase (max 40 words) for a single illustration frame. "
                 "Input may be Russian or English speech-to-text (noisy). "
+                "Priority order: (1) exact sentence-level meaning of THIS excerpt moment, "
+                "(2) concrete place/action/objects, (3) style constraints. "
                 "Describe only the most visually specific scene from this exact episode moment: place, time of day, weather if outdoors, "
                 "generic people (roles, not names), gestures, lighting, and key concrete objects. "
                 "Prefer literal events over abstract symbolism. "
                 f"{_FACTS50_ERA_FLEX_RULES} "
                 "Do NOT suggest books, open scriptures, scrolls, letters, newspapers, screens with text, subtitles, or any "
                 "image where writing is the subject. Illustrate the story as lived environment and figures, not as text on a page. "
+                "Do not output broad thematic visuals if they do not match the current sentence-level meaning. "
                 "No proper names of real famous or religious figures — generic roles only. Output only the phrase, no quotes."
             )
         )
@@ -477,6 +482,7 @@ async def _build_image_prompt_async(
     style_suffix: str,
     *,
     extra_suffix: str = "",
+    variation_hint: str = "",
     output_format: str | None = None,
     visual_policy: str = "default",
     visual_bible: dict[str, Any] | None = None,
@@ -496,8 +502,14 @@ async def _build_image_prompt_async(
         visual_policy=visual_policy,
         visual_bible=visual_bible,
     )
+    parts = [body]
+    vh = (variation_hint or "").strip()
+    if vh:
+        parts.append(vh)
     suf = (extra_suffix or "").strip()
-    return f"{body} {suf}".strip() if suf else body
+    if suf:
+        parts.append(suf)
+    return " ".join(parts).strip()
 
 
 def _session_dir(session_id: str) -> Path:

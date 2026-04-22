@@ -400,6 +400,7 @@ The episode has {total_blocks} subchapter blocks total; each block should feel l
 The human message includes the user's **original synopsis** first, then the outline JSON. The whole narration must **grow from that synopsis** through the outline: never contradict what the user wrote; you may add invented scenes, small details, and inner monologue only where they fit the synopsis and the subchapter "coverage".
 
 For EACH subchapter in this batch, write ONE spoken block (same order as input).
+Style anchor (keep stable across batches): quiet immersive narrator, descriptive but restrained, smooth pacing, no abrupt register jumps.
 - Tone: slow, warm, immersive — gentle storyteller or quiet documentary for sleep; NOT a trailer voice, NOT preaching.
 - {length_rules}
 - Build a clear mini-arc per block: settle in → develop images and ideas → land softly; end without cliffhanger stress.
