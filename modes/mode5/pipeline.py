@@ -18,7 +18,7 @@ import time
 import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from loguru import logger
 
@@ -76,9 +76,69 @@ def _mode5_visual_policy(sub_mode: str | None) -> str:
         return "facts50"
     if sm == "book_night":
         return "book_night"
+    if sm == "unwritten_chapter":
+        return "unwritten_chapter"
     if sm == "outline":
         return VISUAL_POLICY_LONGFORM_FLEX
-    return "default"
+    # Manual/bible must still obey strict mode5 single-scene and anti-book rules.
+    return "mode5"
+
+
+def _unwritten_chunk_anchor_by_index(outline_doc: dict[str, Any] | None) -> dict[int, dict[str, str]]:
+    out: dict[int, dict[str, str]] = {}
+    if not isinstance(outline_doc, dict):
+        return out
+    idx = 0
+    for ch in outline_doc.get("chapters") or []:
+        if not isinstance(ch, dict):
+            continue
+        ct = str(ch.get("title") or "").strip()
+        for sc in ch.get("subchapters") or []:
+            if not isinstance(sc, dict):
+                continue
+            ev = str(sc.get("evidence_anchor") or "").strip()
+            va = str(sc.get("visual_anchor") or "").strip()
+            hs = str(sc.get("human_stakes") or "").strip()
+            mc = str(sc.get("micro_conclusion") or "").strip()
+            anchor_parts = [
+                f"Block title: {ct}" if ct else "",
+                f"Evidence anchor: {ev}" if ev else "",
+                f"Visual anchor: {va}" if va else "",
+                f"Human stakes: {hs}" if hs else "",
+                f"Target micro-conclusion: {mc}" if mc else "",
+            ]
+            out[idx] = {
+                "prompt_prefix": " | ".join([x for x in anchor_parts if x])[:1000],
+                "evidence_anchor": ev[:280],
+                "visual_anchor": va[:280],
+                "human_stakes": hs[:280],
+            }
+            idx += 1
+    return out
+
+
+def _chunk_block_prompt_prefix(chunk: dict[str, Any] | None, explicit: str = "") -> str:
+    prefix = str(explicit or "").strip()
+    if prefix:
+        return prefix[:1000]
+    if not isinstance(chunk, dict):
+        return ""
+    parts = []
+    chapter_title = str(chunk.get("chapter_title") or "").strip()
+    subchapter_title = str(chunk.get("subchapter_title") or "").strip()
+    evidence_anchor = str(chunk.get("evidence_anchor") or "").strip()
+    visual_anchor = str(chunk.get("visual_anchor") or "").strip()
+    human_stakes = str(chunk.get("human_stakes") or "").strip()
+    if chapter_title or subchapter_title:
+        label = " — ".join([x for x in (chapter_title, subchapter_title) if x])
+        parts.append(f"Block title: {label}")
+    if evidence_anchor:
+        parts.append(f"Evidence anchor: {evidence_anchor}")
+    if visual_anchor:
+        parts.append(f"Visual anchor: {visual_anchor}")
+    if human_stakes:
+        parts.append(f"Human stakes: {human_stakes}")
+    return " | ".join(parts)[:1000]
 CHUNK_SEC_DEFAULT = 300
 SEG_SEC_DEFAULT = 15
 _WORDS_PER_MIN = {"ru": 135.0, "en": 150.0}
@@ -95,6 +155,34 @@ _MODE5_VARIATION_SHOTS = (
     "high-angle overview",
     "rule-of-thirds side composition",
     "foreground-depth layered composition",
+)
+_MODE5_INTRO_ANIMATION_DESCRIPTION = (
+    "Animation direction: seamless loop, identical opening and closing frame, "
+    "very subtle cinematic ambient motion, gentle parallax drift, no sudden cuts, "
+    "no fast camera moves, no flicker, no morphing artifacts."
+)
+_MODE5_PROMPT_BAN_PATTERNS = (
+    r"\bcollage\b",
+    r"\bcarousel\b",
+    r"\bgallery\b",
+    r"\bcontact[\s-]?sheet\b",
+    r"\b(?:multi|multiple)[-\s]?(?:panel|photo|image|frame|picture)s?\b",
+    r"\b(?:grid|mosaic)\b.{0,40}\b(?:photo|image|picture|frame)s?\b",
+    r"\bopen book\b",
+    r"\bpage spread\b",
+    r"\bmanuscript\b",
+    r"\blibrary shelf\b",
+    r"\breading desk\b",
+    r"\btable with book\b",
+    r"\bbook on (?:a )?table\b",
+    r"\bbook on (?:a )?desk\b",
+)
+_MODE5_PROMPT_GUARD = (
+    "Hard override for mode5: render exactly one dominant full-frame scene with a single hero composition "
+    "(no collage, no gallery wall, no contact sheet, no split panel, no carousel, no mini-photo grid). "
+    "Do not use any reading trope: no open book, no page spread, no manuscript focus, no staged desk/table-with-book setup. "
+    "Keep one locked series art style for this video, but make each frame compositionally distinct from neighboring frames "
+    "(different camera angle, framing, subject arrangement, and location details)."
 )
 
 
@@ -113,6 +201,38 @@ def _clamp_mode5_parallel_images(value: int | None) -> int:
         return cap
     v = max(1, v)
     return min(cap, v)
+
+
+def _mode5_locked_style(plan: dict[str, Any]) -> str:
+    locked = str(plan.get("style_lock") or "").strip()
+    if locked:
+        if str(plan.get("style_suffix") or "").strip() != locked:
+            plan["style_suffix"] = locked
+        return locked
+    base = str(plan.get("style_suffix") or "").strip()
+    if base:
+        plan["style_lock"] = base
+    return base
+
+
+def _mode5_prompt_fingerprint(text: str) -> str:
+    tokens = [t for t in re.findall(r"[a-zA-Zа-яА-Я0-9]+", (text or "").lower()) if len(t) >= 4]
+    if not tokens:
+        return "neutral scene"
+    return " ".join(tokens[:6])
+
+
+def _sanitize_mode5_image_prompt(prompt: str) -> str:
+    original = (prompt or "").strip()
+    if not original:
+        return original
+    flagged = any(re.search(p, original, flags=re.IGNORECASE) for p in _MODE5_PROMPT_BAN_PATTERNS)
+    cleaned = original
+    if flagged:
+        for p in _MODE5_PROMPT_BAN_PATTERNS:
+            cleaned = re.sub(p, " ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return f"{cleaned}\n\n{_MODE5_PROMPT_GUARD}"
 
 
 def _session_dir(session_id: str) -> Path:
@@ -229,6 +349,27 @@ def _mode5_chunk_slices_complete(session_root: Path, ch: dict[str, Any]) -> bool
     return True
 
 
+def _default_mode5_chunk_audio_paths(session_id: str, chunk_index: int) -> tuple[Path, Path]:
+    m5 = _mode5_dir(session_id)
+    return (
+        m5 / f"chunk_{chunk_index:03d}.mp3",
+        m5 / f"chunk_{chunk_index:03d}.wav",
+    )
+
+
+def _resolve_mode5_chunk_audio_paths(
+    session_id: str, ch: dict[str, Any]
+) -> tuple[Path | None, Path | None]:
+    session_root = _session_dir(session_id)
+    idx = int(ch.get("index") or 0)
+    default_mp3, default_wav = _default_mode5_chunk_audio_paths(session_id, idx)
+    rel_mp3 = str(ch.get("chunk_audio") or "").strip()
+    rel_wav = str(ch.get("chunk_audio_wav") or "").strip()
+    mp3_path = (session_root / rel_mp3) if rel_mp3 else default_mp3
+    wav_path = (session_root / rel_wav) if rel_wav else default_wav
+    return (mp3_path if mp3_path.is_file() else None, wav_path if wav_path.is_file() else None)
+
+
 def _all_chunk_previews_on_disk(session_root: Path, chunks: list[dict[str, Any]]) -> bool:
     if not chunks:
         return False
@@ -323,11 +464,8 @@ def _mode5_progress_hint_payload(session_root: Path, plan: dict[str, Any]) -> di
 
 
 def mode5_resume_snapshot_for_plan(session_id: str, plan: dict[str, Any]) -> dict[str, Any]:
-    """Whether POST continue-generation can proceed (facts50, TTS on disk, work left before review-ready files)."""
-    sm = (plan.get("sub_mode") or "").strip().lower()
+    """Whether POST continue-generation can proceed using saved mode5 artifacts on disk."""
     stage = _checkpoint_stage(plan)
-    if sm != "facts50":
-        return {"can_resume": False, "stage": stage, "reason": "not_facts50"}
     root = _session_dir(session_id)
     final_mp4 = root / "video_mode5.mp4"
     if final_mp4.is_file():
@@ -335,14 +473,17 @@ def mode5_resume_snapshot_for_plan(session_id: str, plan: dict[str, Any]) -> dic
     chunks = list(plan.get("chunks") or [])
     if not chunks:
         return {"can_resume": False, "stage": stage, "reason": "no_chunks"}
+    sm = (plan.get("sub_mode") or "").strip().lower()
+    if sm == "unwritten_chapter" and stage in (MODE5_CKPT_STUB, MODE5_CKPT_AFTER_IMAGES):
+        return {"can_resume": True, "stage": stage, "reason": "resume_before_tts"}
     for ch in chunks:
-        wav = str(ch.get("chunk_audio_wav") or "").strip()
-        if not wav or not (root / wav).is_file():
+        _mp3_path, wav_path = _resolve_mode5_chunk_audio_paths(session_id, ch)
+        if wav_path is None:
             return {"can_resume": False, "stage": stage, "reason": "missing_chunk_wav"}
     if _all_chunk_previews_on_disk(root, chunks):
         return {"can_resume": False, "stage": stage or MODE5_CKPT_COMPLETED, "reason": "previews_complete"}
     if stage == MODE5_CKPT_STUB:
-        return {"can_resume": False, "stage": stage, "reason": "stub_only_wait_for_tts"}
+        return {"can_resume": True, "stage": stage, "reason": "resume_from_stub"}
     return {"can_resume": True, "stage": stage, "reason": ""}
 
 
@@ -498,6 +639,72 @@ def _segments_for_chunk(
     return out
 
 
+def _segments_for_chunk_from_text(
+    chunk_text: str,
+    seg_sec: int,
+    *,
+    language: str,
+) -> list[dict[str, Any]]:
+    compact = re.sub(r"\s+", " ", (chunk_text or "").strip())
+    if not compact:
+        return []
+    lang = (language or "ru").strip().lower()
+    wpm = _WORDS_PER_MIN.get(lang, 140.0)
+    target_words = max(30, int(round(max(8, int(seg_sec or SEG_SEC_DEFAULT)) * wpm / 60.0)))
+    sents = _split_into_sentences(compact)
+    if not sents:
+        sents = _fallback_word_chunks(compact, target_words)
+    blocks: list[str] = []
+    cur: list[str] = []
+    cur_words = 0
+    for sent in sents:
+        wn = len(sent.split())
+        if cur and cur_words + wn > target_words:
+            blocks.append(" ".join(cur).strip())
+            cur = [sent]
+            cur_words = wn
+        else:
+            cur.append(sent)
+            cur_words += wn
+    if cur:
+        blocks.append(" ".join(cur).strip())
+    blocks = [b for b in blocks if b.strip()]
+    if not blocks:
+        blocks = [compact]
+
+    words_per_block = [max(1, len(b.split())) for b in blocks]
+    total_words = max(1, sum(words_per_block))
+    est_total = max(float(len(blocks) * max(8, int(seg_sec or SEG_SEC_DEFAULT))), (total_words / wpm) * 60.0)
+    t = 0.0
+    out: list[dict[str, Any]] = []
+    for si, (txt, wn) in enumerate(zip(blocks, words_per_block)):
+        part = est_total * (wn / total_words)
+        t1 = est_total if si == len(blocks) - 1 else min(est_total, t + part)
+        out.append({"s": si, "t0": max(0.0, t), "t1": max(t + 0.05, t1), "text": txt.strip()})
+        t = t1
+    return out
+
+
+def _retime_existing_segments_for_audio(
+    segments: list[dict[str, Any]],
+    *,
+    duration_sec: float,
+) -> None:
+    n = len(segments)
+    dur = max(0.05, float(duration_sec or 0.0))
+    if n <= 0:
+        return
+    weights = [max(1, len(str(seg.get("text") or "").split())) for seg in segments]
+    total_w = max(1, sum(weights))
+    t = 0.0
+    for i, seg in enumerate(segments):
+        share = dur * (weights[i] / total_w)
+        t1 = dur if i == (n - 1) else min(dur, t + share)
+        seg["t0"] = max(0.0, t)
+        seg["t1"] = max(t + 0.05, t1)
+        t = t1
+
+
 def _segments_for_facts50_chunk(
     fact_hint: str,
     chunk_text: str,
@@ -607,6 +814,10 @@ def _chunk_meta_public(ch: dict[str, Any]) -> dict[str, Any]:
         meta["chapter_title"] = ct.strip()
     if isinstance(st, str) and st.strip():
         meta["subchapter_title"] = st.strip()
+    for k in ("visual_anchor", "evidence_anchor", "human_stakes"):
+        v = ch.get(k)
+        if isinstance(v, str) and v.strip():
+            meta[k] = v.strip()
     return meta
 
 
@@ -664,34 +875,54 @@ async def _generate_chunk_images(
     refresh_all: bool = False,
     visual_policy: str = "default",
     visual_bible: dict[str, Any] | None = None,
+    block_prompt_prefix: str = "",
+    on_segment_ready: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
 ) -> None:
     session_root = _session_dir(session_id)
     cap = _mode5_parallel_images_cap()
     sem = asyncio.Semaphore(max(1, min(cap, int(max_parallel_images or cap))))
     chunk_index = int(chunk.get("index", -1))
+    prompt_prefix = _chunk_block_prompt_prefix(chunk, explicit=block_prompt_prefix)
     segments = list(chunk.get("segments") or [])
 
-    def _segment_variation_hint(seg: dict[str, Any]) -> str:
+    def _segment_variation_hint(seg_idx: int, seg: dict[str, Any]) -> str:
         s = int(seg.get("s", 0) or 0)
         shot = _MODE5_VARIATION_SHOTS[(chunk_index + s) % len(_MODE5_VARIATION_SHOTS)]
         alt = _MODE5_VARIATION_SHOTS[(chunk_index + s + 3) % len(_MODE5_VARIATION_SHOTS)]
         total = max(1, len(segments))
+        recent_blocks: list[str] = []
+        for back in (1, 2):
+            prev_idx = seg_idx - back
+            if prev_idx < 0 or prev_idx >= len(segments):
+                continue
+            prev_seg = segments[prev_idx]
+            prev_s = int(prev_seg.get("s", prev_idx) or prev_idx)
+            prev_shot = _MODE5_VARIATION_SHOTS[(chunk_index + prev_s) % len(_MODE5_VARIATION_SHOTS)]
+            prev_fp = _mode5_prompt_fingerprint(str(prev_seg.get("text") or ""))
+            recent_blocks.append(f"seg {prev_idx + 1}: {prev_shot}, theme {prev_fp}")
+        avoid_recent = "; ".join(recent_blocks) if recent_blocks else "none"
         return (
             f"Variation target for this frame (segment {s + 1}/{total}): use {shot}; "
             f"avoid repeating composition from neighboring segments; prefer a distinct camera setup such as {alt}; "
+            f"avoid reusing recent fingerprints ({avoid_recent}); "
+            "do not repeat the same subject-location-prop triad from the previous 2 frames; "
             "keep the same global art direction and character/world continuity."
         )
 
-    async def _one(seg: dict[str, Any]) -> tuple[dict[str, Any], BaseException | None]:
+    async def _one(seg_idx: int, seg: dict[str, Any]) -> tuple[dict[str, Any], BaseException | None]:
+        seg_prompt_text = seg.get("text", "")
+        if prompt_prefix:
+            seg_prompt_text = f"{prompt_prefix}\n\nSegment meaning:\n{seg_prompt_text}"
         prompt = await _build_image_prompt_async(
-            seg.get("text", ""),
+            seg_prompt_text,
             style_suffix,
             output_format=_MODE5_OUTPUT_FORMAT,
-            variation_hint=_segment_variation_hint(seg),
+            variation_hint=_segment_variation_hint(seg_idx, seg),
             extra_suffix="Fresh alternative composition, same art direction." if refresh_all else "",
             visual_policy=visual_policy,
             visual_bible=visual_bible,
         )
+        prompt = _sanitize_mode5_image_prompt(prompt)
         seg["image_prompt"] = prompt
         img_path = session_root / seg["image"]
         async with sem:
@@ -703,52 +934,54 @@ async def _generate_chunk_images(
             except Exception as e:
                 return seg, e
 
-    tasks = []
-    for seg in chunk.get("segments") or []:
+    tasks: list[asyncio.Task[tuple[dict[str, Any], BaseException | None]]] = []
+    for seg_idx, seg in enumerate(segments):
         if not seg.get("image"):
             continue
         img_path = session_root / seg["image"]
         if refresh_all or not img_path.is_file():
-            tasks.append(_one(seg))
+            tasks.append(asyncio.create_task(_one(seg_idx, seg)))
     if not tasks:
-        return
-    results = await asyncio.gather(*tasks)
-    failures = [(seg, err) for seg, err in results if err is not None]
-    if not failures:
         return
 
     # Try to reuse any already existing image from this chunk/session before hard-failing.
     session_existing = [
         p for p in (session_root / "clips" / "mode5").glob("img_c*_s*.jpg") if p.is_file()
     ]
-    for seg, err in failures:
-        target = session_root / seg["image"]
-        fallback_src: Path | None = None
-        for other in chunk.get("segments") or []:
-            if other is seg or not other.get("image"):
-                continue
-            candidate = session_root / other["image"]
-            if candidate.is_file():
-                fallback_src = candidate
-                break
-        if fallback_src is None and session_existing:
-            fallback_src = session_existing[0]
-        try:
-            if fallback_src is not None:
-                shutil.copy2(fallback_src, target)
-                seg["image_fallback_reason"] = f"copied fallback: {type(err).__name__}"
-            else:
-                _write_mode5_placeholder_image(target, aspect_ratio=_MODE5_IMAGE_ASPECT_RATIO)
-                seg["image_fallback_reason"] = f"placeholder fallback: {type(err).__name__}"
-            seg["image_fallback"] = True
-            logger.warning(
-                f"[Mode5] Image fallback used for chunk={chunk_index} seg={seg.get('s')}: {err}"
-            )
-        except Exception as fallback_err:
-            raise RuntimeError(
-                f"[Mode5] Failed image generation and fallback for chunk={chunk_index} seg={seg.get('s')}: "
-                f"{err}; fallback_error={fallback_err}"
-            ) from fallback_err
+    for fut in asyncio.as_completed(tasks):
+        seg, err = await fut
+        if err is not None:
+            target = session_root / seg["image"]
+            fallback_src: Path | None = None
+            for other in chunk.get("segments") or []:
+                if other is seg or not other.get("image"):
+                    continue
+                candidate = session_root / other["image"]
+                if candidate.is_file():
+                    fallback_src = candidate
+                    break
+            if fallback_src is None and session_existing:
+                fallback_src = session_existing[0]
+            try:
+                if fallback_src is not None:
+                    shutil.copy2(fallback_src, target)
+                    seg["image_fallback_reason"] = f"copied fallback: {type(err).__name__}"
+                else:
+                    _write_mode5_placeholder_image(target, aspect_ratio=_MODE5_IMAGE_ASPECT_RATIO)
+                    seg["image_fallback_reason"] = f"placeholder fallback: {type(err).__name__}"
+                seg["image_fallback"] = True
+                logger.warning(
+                    f"[Mode5] Image fallback used for chunk={chunk_index} seg={seg.get('s')}: {err}"
+                )
+            except Exception as fallback_err:
+                raise RuntimeError(
+                    f"[Mode5] Failed image generation and fallback for chunk={chunk_index} seg={seg.get('s')}: "
+                    f"{err}; fallback_error={fallback_err}"
+                ) from fallback_err
+        if on_segment_ready is not None:
+            maybe = on_segment_ready(seg)
+            if asyncio.iscoroutine(maybe):
+                await maybe
 
 
 def _render_chunk_audio_slices(session_id: str, chunk: dict[str, Any]) -> None:
@@ -759,13 +992,124 @@ def _render_chunk_audio_slices(session_id: str, chunk: dict[str, Any]) -> None:
         slice_wav_time_range(chunk_wav, float(seg["t0"]), float(seg["t1"]), out_wav)
 
 
+def _is_global_intro_segment(chunk_index: int, segment_index: int) -> bool:
+    return chunk_index == 0 and segment_index == 0
+
+
+def _mode5_intro_video_path(session_id: str) -> Path:
+    return _mode5_dir(session_id) / "intro_loop_c0_s0.mp4"
+
+
+def _mode5_intro_animation_enabled(plan: dict[str, Any]) -> bool:
+    return (plan.get("sub_mode") or "").strip().lower() == "unwritten_chapter"
+
+
+def _build_mode5_intro_video_prompt(plan: dict[str, Any], seg0: dict[str, Any]) -> str:
+    """
+    Отдельный prompt для анимированного intro-видео (только unwritten_chapter):
+    берет смысл первого сегмента + явное описание желаемой анимации.
+    """
+    scene_text = re.sub(r"\s+", " ", str(seg0.get("text") or "").strip())
+    scene_text = scene_text[:420]
+    source_image_prompt = re.sub(r"\s+", " ", str(seg0.get("image_prompt") or "").strip())
+    source_image_prompt = source_image_prompt[:700]
+    style_tail = re.sub(r"\s+", " ", str(plan.get("style_suffix") or "").strip())
+    style_tail = style_tail[:320]
+
+    parts = [
+        "Create a loopable intro video from provided start/end keyframes.",
+        _MODE5_INTRO_ANIMATION_DESCRIPTION,
+    ]
+    if scene_text:
+        parts.append(f"Scene context: {scene_text}")
+    if source_image_prompt:
+        parts.append(f"Visual source context: {source_image_prompt}")
+    if style_tail:
+        parts.append(f"Style guardrails: {style_tail}")
+    parts.append("Keep composition stable and realistic. Preserve identity and scene structure.")
+    return " ".join(parts)
+
+
+async def _ensure_mode5_looped_intro_video(
+    session_id: str,
+    plan: dict[str, Any],
+    *,
+    force: bool = False,
+) -> None:
+    chunks = list(plan.get("chunks") or [])
+    if not chunks:
+        return
+    first_chunk = chunks[0]
+    segs = list(first_chunk.get("segments") or [])
+    if not segs:
+        return
+    seg0 = segs[0]
+    if not _mode5_intro_animation_enabled(plan):
+        seg0.pop("video", None)
+        seg0["asset_type"] = "image"
+        return
+    session_root = _session_dir(session_id)
+    img_rel = str(seg0.get("image") or "").strip()
+    aud_rel = str(seg0.get("audio") or "").strip()
+    if not img_rel or not aud_rel:
+        return
+    img_path = session_root / img_rel
+    aud_path = session_root / aud_rel
+    if not img_path.is_file() or not aud_path.is_file():
+        return
+
+    existing_rel = str(seg0.get("video") or "").strip()
+    if existing_rel and not force and (session_root / existing_rel).is_file():
+        seg0["asset_type"] = "video"
+        return
+
+    out_path = _mode5_intro_video_path(session_id)
+    if out_path.is_file() and not force:
+        seg0["video"] = _rel_session(session_root, out_path)
+        seg0["asset_type"] = "video"
+        return
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        http_base = str(getattr(settings, "fastgen_http_base_url", "") or "").strip()
+        if not http_base:
+            logger.warning(
+                "[Mode5] Intro keyframe API disabled: FASTGEN_HTTP_BASE_URL is empty, fallback to image motion"
+            )
+            seg0.pop("video", None)
+            seg0["asset_type"] = "image"
+            return
+        from agents.content_generator import fastgen_http
+
+        video_path = await fastgen_http.generate_video_from_keyframes(
+            prompt=_build_mode5_intro_video_prompt(plan, seg0),
+            output_dir=out_path.parent,
+            start_frame_path=img_path,
+            end_frame_path=img_path,
+            index=0,
+        )
+        resolved = Path(video_path) if video_path else None
+        if resolved and resolved.is_file():
+            if resolved.resolve() != out_path.resolve():
+                shutil.copy2(resolved, out_path)
+            seg0["video"] = _rel_session(session_root, out_path)
+            seg0["asset_type"] = "video"
+            logger.info("[Mode5] Intro looped video prepared: {}", out_path)
+            return
+        logger.warning("[Mode5] Intro keyframe video was not generated, fallback to image motion")
+    except Exception as err:
+        logger.warning(f"[Mode5] Intro keyframe generation failed, fallback to image motion: {err}")
+    seg0.pop("video", None)
+    seg0["asset_type"] = "image"
+
+
 def _build_chunk_preview_sync(session_id: str, chunk_index: int, plan: dict[str, Any]) -> Path:
     session_root = _session_dir(session_id)
     ch = plan["chunks"][chunk_index]
     show_sub = bool(plan.get("show_subtitles", True))
     sm = (plan.get("sub_mode") or "").strip().lower()
     ci = int(ch.get("index", chunk_index))
-    segment_data: list[tuple[Path, Path]] = []
+    segment_data: list[dict[str, Path | str]] = []
     subtitle_texts: list[str] = []
     top_labels: list[str] = []
     for seg in ch.get("segments") or []:
@@ -775,7 +1119,27 @@ def _build_chunk_preview_sync(session_id: str, chunk_index: int, plan: dict[str,
             raise FileNotFoundError(f"Missing image: {img}")
         if not aud.is_file():
             raise FileNotFoundError(f"Missing audio: {aud}")
-        segment_data.append((img, aud))
+        si = int(seg.get("s", len(segment_data)))
+        is_intro = _is_global_intro_segment(ci, si)
+        video_rel = str(seg.get("video") or "").strip()
+        video_abs = (session_root / video_rel) if video_rel else None
+        is_intro_video = is_intro and sm == "unwritten_chapter"
+        if is_intro_video and video_abs and video_abs.is_file():
+            segment_data.append(
+                {
+                    "asset_type": "video",
+                    "video_path": video_abs,
+                    "audio_path": aud,
+                }
+            )
+        else:
+            segment_data.append(
+                {
+                    "asset_type": "image",
+                    "image_path": img,
+                    "audio_path": aud,
+                }
+            )
         subtitle_texts.append(seg.get("text", "") if show_sub else "")
         if sm == "facts50" and (bool(ch.get("is_intro")) or bool(ch.get("is_outro"))):
             label = ""
@@ -850,7 +1214,7 @@ async def _generate_mode5_sleep_tail_theme_images(
     fallback_still: Path,
 ) -> list[Path]:
     """One thematic still per sleep-tail segment; fail-soft copies previous or fallback."""
-    style = (plan.get("style_suffix") or "").strip()
+    style = _mode5_locked_style(plan)
     m5 = _mode5_dir(session_id)
     out: list[Path] = []
     prev_ok: Path | None = fallback_still if fallback_still.is_file() else None
@@ -871,6 +1235,7 @@ async def _generate_mode5_sleep_tail_theme_images(
                 extra_suffix="Gentle atmosphere for long rest viewing; avoid harsh contrast.",
                 visual_policy="facts50",
             )
+            prompt = _sanitize_mode5_image_prompt(prompt)
             await _generate_one_image(prompt, dest, aspect_ratio=_MODE5_IMAGE_ASPECT_RATIO)
         except Exception as e:
             logger.warning(f"[Mode5] sleep tail theme image {idx} failed: {e}")
@@ -896,7 +1261,7 @@ def _append_mode5_sleep_tail(session_id: str, plan: dict[str, Any], final_path: 
     Fail-soft: on any error returns original final_path unchanged.
     """
     sm5 = (plan.get("sub_mode") or "").strip().lower()
-    if sm5 not in ("facts50", "book_night"):
+    if sm5 not in ("facts50", "book_night", "unwritten_chapter"):
         return final_path
     tail_sec = max(0, int(getattr(settings, "mode5_facts50_sleep_tail_sec", 0) or 0))
     if tail_sec <= 0:
@@ -1184,6 +1549,9 @@ def _rebuild_chunk_segment_paths(session_id: str, chunk: dict[str, Any]) -> None
         aud_path = m5 / f"seg_c{chunk['index']}_s{si}.wav"
         seg["image"] = _rel_session(session_root, img_path)
         seg["audio"] = _rel_session(session_root, aud_path)
+        if not _is_global_intro_segment(int(chunk["index"]), si):
+            seg.pop("video", None)
+        seg.pop("asset_type", None)
 
 
 async def _revoice_chunk(
@@ -1235,16 +1603,23 @@ async def _revoice_chunk(
     else:
         chunk["segments"] = _segments_for_chunk(tts_plain, dur, segment_seconds, wts, words)
     _rebuild_chunk_segment_paths(session_id, chunk)
+    locked_style = _mode5_locked_style(plan)
     await _generate_chunk_images(
         session_id,
         chunk,
-        plan.get("style_suffix") or "",
+        locked_style,
         max_parallel_images=max_parallel_images,
         refresh_all=True,
         visual_policy=_mode5_visual_policy(str(plan.get("sub_mode"))),
         visual_bible=plan.get("visual_bible") if isinstance(plan.get("visual_bible"), dict) else None,
+        block_prompt_prefix=_chunk_block_prompt_prefix(chunk),
     )
     _render_chunk_audio_slices(session_id, chunk)
+    await _ensure_mode5_looped_intro_video(
+        session_id,
+        plan,
+        force=chunk_index == 0,
+    )
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, lambda: _build_chunk_preview_sync(session_id, chunk_index, plan))
     _save_mode5_plan(session_id, plan)
@@ -1279,7 +1654,7 @@ async def run_mode5_pipeline(
         raise ValueError("Mode 5: пустой VOICEAPI_TEMPLATE_UUID в .env (голос настраивается только через шаблон)")
 
     sm = (sub_mode or "manual").strip().lower()
-    if sm not in ("manual", "bible", "facts50", "outline", "book_night"):
+    if sm not in ("manual", "bible", "facts50", "outline", "book_night", "unwritten_chapter"):
         sm = "manual"
     if sm == "manual" and bible_mode:
         sm = "bible"
@@ -1343,6 +1718,24 @@ async def run_mode5_pipeline(
             f"[Mode5] book_night: {len(outline_doc.get('chapters') or [])} book chapter(s), "
             f"{len(chunk_texts)} subsection narration(s)"
         )
+    elif sm == "unwritten_chapter":
+        if len(topic_input) < 8:
+            raise ValueError(
+                "Mode 5 (The Unwritten Chapter): укажите тему расследования (от 8 символов)."
+            )
+        language = detect_mode5_language(
+            f"{topic_input} {(video_header_title or '').strip()}",
+            language,
+        )
+        from modes.mode5.unwritten_chapter_generator import generate_unwritten_chapter_script
+
+        outline_doc, chunk_texts, script_clean = await generate_unwritten_chapter_script(
+            topic_input, language, control=control
+        )
+        logger.info(
+            f"[Mode5] unwritten_chapter: {len(outline_doc.get('chapters') or [])} block(s), "
+            f"{len(chunk_texts)} narration chunk(s)"
+        )
     else:
         script_clean = topic_input
         if len(script_clean) < _MIN_CHUNK_TEXT_LEN:
@@ -1351,11 +1744,11 @@ async def run_mode5_pipeline(
 
     chunk_sec = max(120, min(900, int(chunk_seconds or CHUNK_SEC_DEFAULT)))
     seg_sec = max(10, min(90, int(segment_seconds or SEG_SEC_DEFAULT)))
-    # book_night with 15s windows explodes image count and can run for many hours on long scripts.
+    # book_night / unwritten_chapter: 15s windows explode image count and can run for many hours.
     # Keep a practical floor unless user explicitly chooses larger values.
-    if sm == "book_night" and seg_sec < 30:
+    if sm in ("book_night", "unwritten_chapter") and seg_sec < 30:
         logger.info(
-            f"[Mode5] book_night: segment_seconds={seg_sec} too small, using 30 to reduce image workload"
+            f"[Mode5] {sm}: segment_seconds={seg_sec} too small, using 30 to reduce image workload"
         )
         seg_sec = 30
     header_stripped = (video_header_title or "").strip() or None
@@ -1368,7 +1761,7 @@ async def run_mode5_pipeline(
     logger.info(f"=== Mode 5 Pipeline | sub_mode={sm} | session={session_id} ===")
     await checkpoint(control)
 
-    if sm not in ("facts50", "outline", "book_night"):
+    if sm not in ("facts50", "outline", "book_night", "unwritten_chapter"):
         chunk_texts = _estimate_chunks_from_script(script_clean, language=language, chunk_seconds=chunk_sec)
         if not chunk_texts:
             raise ValueError(
@@ -1419,13 +1812,18 @@ async def run_mode5_pipeline(
                 "ancient Judea and Near East environments, modest historically plausible clothing, "
                 "sacred atmosphere, symbolic but respectful Christian iconography, and avoid modern artifacts."
             )
+    style_suffix = re.sub(r"\s+", " ", (style_suffix or "").strip())
+    style_lock = style_suffix
     await checkpoint(control)
 
     outline_labels: list[tuple[str, str]] = []
-    if sm in ("outline", "book_night") and isinstance(outline_doc, dict):
+    unwritten_anchor_map: dict[int, dict[str, str]] = {}
+    if sm in ("outline", "book_night", "unwritten_chapter") and isinstance(outline_doc, dict):
         from modes.mode5.outline_generator import get_chunk_outline_labels
 
         outline_labels = get_chunk_outline_labels(outline_doc)
+        if sm == "unwritten_chapter":
+            unwritten_anchor_map = _unwritten_chunk_anchor_by_index(outline_doc)
 
     # Persist stub plan before long parallel TTS so /review-state does not 404 while audio generates.
     if sm == "facts50" and chunk_texts:
@@ -1464,6 +1862,7 @@ async def run_mode5_pipeline(
             "facts_topic": topic_input,
             "facts_outline": facts_outline,
             "style_suffix": style_suffix,
+            "style_lock": style_lock,
             "visual_bible": visual_bible,
             "chunks": stub_chunks,
         }
@@ -1480,9 +1879,18 @@ async def run_mode5_pipeline(
                 "preview_ready": False,
                 "segments": [],
             }
-            if sm in ("outline", "book_night") and i < len(outline_labels):
+            if sm in ("outline", "book_night", "unwritten_chapter") and i < len(outline_labels):
                 row["chapter_title"] = outline_labels[i][0]
                 row["subchapter_title"] = outline_labels[i][1]
+            if sm == "unwritten_chapter":
+                meta = unwritten_anchor_map.get(i) or {}
+                ap = str(meta.get("prompt_prefix") or "").strip()
+                if ap:
+                    row["block_prompt_prefix"] = ap
+                for key in ("visual_anchor", "evidence_anchor", "human_stakes"):
+                    val = str(meta.get(key) or "").strip()
+                    if val:
+                        row[key] = val
             stub_chunks_lf.append(row)
         stub_plan_lf: dict[str, Any] = {
             "version": 1,
@@ -1496,10 +1904,13 @@ async def run_mode5_pipeline(
             "header_title": header_stripped,
             "bible_mode": sm == "bible",
             "sub_mode": sm,
-            "facts_topic": (topic_input.strip() if sm == "book_night" and topic_input else None),
+            "facts_topic": (
+                topic_input.strip() if sm in ("book_night", "unwritten_chapter") and topic_input else None
+            ),
             "facts_outline": None,
-            "outline_structure": outline_doc if sm in ("outline", "book_night") else None,
+            "outline_structure": outline_doc if sm in ("outline", "book_night", "unwritten_chapter") else None,
             "style_suffix": style_suffix,
+            "style_lock": style_lock,
             "visual_bible": visual_bible,
             "chunks": stub_chunks_lf,
         }
@@ -1595,34 +2006,36 @@ async def run_mode5_pipeline(
 
         for ch in chunks_plan:
             _render_chunk_audio_slices(session_id, ch)
+        await _ensure_mode5_looped_intro_video(session_id, plan, force=False)
         _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_SLICES)
         await checkpoint(control)
 
     else:
-        # Long-form manual / bible / outline: parallelize TTS per chunk.
+        # Long-form manual / bible / outline / book_night / unwritten_chapter:
+        # keep prompt/segment quality tied to real TTS output, but overlap image generation
+        # of ready chunks with TTS still running on the remaining chunks.
         par = max(1, min(16, int(getattr(settings, "mode5_facts50_parallel", 10) or 10)))
         sem_tts = asyncio.Semaphore(par)
+        # _generate_chunk_images already fans out segment image requests inside one chunk,
+        # so keep one chunk-level image lane to avoid explosive API concurrency.
+        sem_img = asyncio.Semaphore(1)
 
-        async def _longform_tts(ci: int, chunk_text: str):
+        plan = load_mode5_plan(session_id)
+        if visual_bible is not None:
+            plan["visual_bible"] = visual_bible
+        chunks_plan = plan.get("chunks") or []
+
+        async def _longform_pipeline_chunk(ci: int, chunk_text: str) -> None:
             async with sem_tts:
                 logger.info(f"[Mode5] Chunk {ci + 1}/{len(chunk_texts)}: TTS (voiceapi/template) synthesis")
                 await checkpoint(control)
-                pack = await _synthesize_chunk(
+                mp3_path, wav_path, dur, wts, words, tts_plain = await _synthesize_chunk(
                     session_id,
                     ci,
                     chunk_text,
                     language=language,
                 )
-                return ci, pack
 
-        tts_pairs = await asyncio.gather(
-            *[_longform_tts(ci, ct) for ci, ct in enumerate(chunk_texts)]
-        )
-        await checkpoint(control)
-        tts_by_ci = {p[0]: p[1] for p in tts_pairs}
-
-        for ci in range(len(chunk_texts)):
-            mp3_path, wav_path, dur, wts, words, tts_plain = tts_by_ci[ci]
             segs = _segments_for_chunk(tts_plain, dur, seg_sec, wts, words)
             preview_path = session_root / f"mode5_preview_{ci:03d}.mp4"
             ch_entry: dict[str, Any] = {
@@ -1633,53 +2046,120 @@ async def run_mode5_pipeline(
                 "chunk_audio_wav": _rel_session(session_root, wav_path),
                 "duration_sec": dur,
                 "preview_relpath": _rel_session(session_root, preview_path),
+                "preview_ready": False,
                 "segments": segs,
             }
-            if sm in ("outline", "book_night") and ci < len(outline_labels):
+            if sm in ("outline", "book_night", "unwritten_chapter") and ci < len(outline_labels):
                 ch_entry["chapter_title"] = outline_labels[ci][0]
                 ch_entry["subchapter_title"] = outline_labels[ci][1]
-            chunks_plan.append(ch_entry)
+            if sm == "unwritten_chapter":
+                meta = unwritten_anchor_map.get(ci) or {}
+                ap = str(meta.get("prompt_prefix") or "").strip()
+                if ap:
+                    ch_entry["block_prompt_prefix"] = ap
+                for key in ("visual_anchor", "evidence_anchor", "human_stakes"):
+                    val = str(meta.get(key) or "").strip()
+                    if val:
+                        ch_entry[key] = val
+            _rebuild_chunk_segment_paths(session_id, ch_entry)
+            chunks_plan[ci] = ch_entry
+            _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_TTS, chunk_index=ci)
 
-        for ch in chunks_plan:
-            _rebuild_chunk_segment_paths(session_id, ch)
-
-        plan = {
-            "version": 1,
-            "session_id": session_id,
-            "script_text": script_clean,
-            "language": language,
-            "show_subtitles": False,
-            "chunk_seconds": chunk_sec,
-            "segment_seconds": seg_sec,
-            "max_parallel_images": mpi,
-            "header_title": header_stripped,
-            "bible_mode": sm == "bible",
-            "sub_mode": sm,
-            "facts_topic": (topic_input.strip() if sm == "book_night" and topic_input else None),
-            "facts_outline": None,
-            "outline_structure": outline_doc if sm in ("outline", "book_night") else None,
-            "style_suffix": style_suffix,
-            "visual_bible": visual_bible,
-            "chunks": chunks_plan,
-        }
-        _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_TTS)
-
-        for ci, ch in enumerate(chunks_plan):
-            logger.info(
-                f"[Mode5] Chunk {ci + 1}/{len(chunks_plan)}: image generation for {len(ch['segments'])} window(s)"
-            )
-            await _generate_chunk_images(
-                session_id,
-                ch,
-                style_suffix,
-                max_parallel_images=mpi,
-                refresh_all=True,
-                visual_policy=_mode5_visual_policy(sm),
-                visual_bible=visual_bible,
-            )
-            _render_chunk_audio_slices(session_id, ch)
-            _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_SLICES, chunk_index=ci)
+            async with sem_img:
+                logger.info(
+                    f"[Mode5] Chunk {ci + 1}/{len(chunk_texts)}: image generation for {len(ch_entry['segments'])} window(s)"
+                )
+                await _generate_chunk_images(
+                    session_id,
+                    ch_entry,
+                    style_suffix,
+                    max_parallel_images=mpi,
+                    refresh_all=True,
+                    visual_policy=_mode5_visual_policy(sm),
+                    visual_bible=visual_bible,
+                    block_prompt_prefix=str(ch_entry.get("block_prompt_prefix") or ""),
+                )
+                _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_IMAGES, chunk_index=ci)
+                await asyncio.to_thread(_render_chunk_audio_slices, session_id, ch_entry)
+                _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_SLICES, chunk_index=ci)
             await checkpoint(control)
+
+        if sm == "unwritten_chapter":
+            for ci, chunk_text in enumerate(chunk_texts):
+                txt = re.sub(r"\s+", " ", (chunk_text or "").strip())
+                segs = _segments_for_chunk_from_text(txt, seg_sec, language=language)
+                preview_path = session_root / f"mode5_preview_{ci:03d}.mp4"
+                ch_entry: dict[str, Any] = {
+                    "index": ci,
+                    "text": txt,
+                    "fact_hint": None,
+                    "preview_relpath": _rel_session(session_root, preview_path),
+                    "preview_ready": False,
+                    "segments": segs,
+                }
+                if ci < len(outline_labels):
+                    ch_entry["chapter_title"] = outline_labels[ci][0]
+                    ch_entry["subchapter_title"] = outline_labels[ci][1]
+                meta = unwritten_anchor_map.get(ci) or {}
+                ap = str(meta.get("prompt_prefix") or "").strip()
+                if ap:
+                    ch_entry["block_prompt_prefix"] = ap
+                for key in ("visual_anchor", "evidence_anchor", "human_stakes"):
+                    val = str(meta.get(key) or "").strip()
+                    if val:
+                        ch_entry[key] = val
+                _rebuild_chunk_segment_paths(session_id, ch_entry)
+                chunks_plan[ci] = ch_entry
+                _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_STUB, chunk_index=ci)
+
+            for ci, ch_entry in enumerate(chunks_plan):
+                logger.info(
+                    f"[Mode5] Chunk {ci + 1}/{len(chunk_texts)}: image generation for {len(ch_entry.get('segments') or [])} window(s)"
+                )
+
+                async def _on_seg_ready(_seg: dict[str, Any], idx: int = ci) -> None:
+                    _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_IMAGES, chunk_index=idx)
+
+                await _generate_chunk_images(
+                    session_id,
+                    ch_entry,
+                    style_suffix,
+                    max_parallel_images=mpi,
+                    refresh_all=True,
+                    visual_policy=_mode5_visual_policy(sm),
+                    visual_bible=visual_bible,
+                    block_prompt_prefix=str(ch_entry.get("block_prompt_prefix") or ""),
+                    on_segment_ready=_on_seg_ready,
+                )
+                _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_IMAGES, chunk_index=ci)
+                await checkpoint(control)
+
+            async def _tts_after_images(ci: int, ch_entry: dict[str, Any]) -> None:
+                async with sem_tts:
+                    logger.info(f"[Mode5] Chunk {ci + 1}/{len(chunk_texts)}: TTS after images")
+                    mp3_path, wav_path, dur, _wts, _words, tts_plain = await _synthesize_chunk(
+                        session_id,
+                        ci,
+                        str(ch_entry.get("text") or ""),
+                        language=language,
+                    )
+                ch_entry["text"] = tts_plain
+                ch_entry["chunk_audio"] = _rel_session(session_root, mp3_path)
+                ch_entry["chunk_audio_wav"] = _rel_session(session_root, wav_path)
+                ch_entry["duration_sec"] = dur
+                _retime_existing_segments_for_audio(ch_entry["segments"], duration_sec=dur)
+                _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_TTS, chunk_index=ci)
+                await asyncio.to_thread(_render_chunk_audio_slices, session_id, ch_entry)
+                _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_SLICES, chunk_index=ci)
+                await checkpoint(control)
+
+            await asyncio.gather(*[_tts_after_images(ci, ch) for ci, ch in enumerate(chunks_plan)])
+        else:
+            await asyncio.gather(
+                *[_longform_pipeline_chunk(ci, ct) for ci, ct in enumerate(chunk_texts)]
+            )
+        await checkpoint(control)
+        await _ensure_mode5_looped_intro_video(session_id, plan, force=False)
 
     for ch in plan.get("chunks") or []:
         ch["preview_ready"] = False
@@ -1722,7 +2202,7 @@ async def resume_mode5_pipeline(
     control: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
-    Продолжить facts50 после сбоя: на диске уже есть mode5_plan.json с озвучкой и (частично) картинками.
+    Продолжить mode5 после сбоя: на диске уже есть mode5_plan.json с озвучкой и (частично) картинками.
     Пропускает готовые файлы (refresh_all=False), дорисовывает недостающее, затем превью как в основном пайплайне.
     """
     from pipeline_control import checkpoint
@@ -1740,18 +2220,160 @@ async def resume_mode5_pipeline(
 
     plan = load_mode5_plan(session_id)
     sm = (plan.get("sub_mode") or "").strip().lower()
-    if sm != "facts50":
-        raise ValueError("Продолжение только для sub_mode=facts50.")
-
     session_root = _session_dir(session_id)
     chunks = list(plan.get("chunks") or [])
-    style_suffix = str(plan.get("style_suffix") or "")
+    style_suffix = _mode5_locked_style(plan)
     mpi = _clamp_mode5_parallel_images(plan.get("max_parallel_images"))
+    language = str(plan.get("language") or "ru").strip() or "ru"
+    stage = _checkpoint_stage(plan)
 
-    for ch in chunks:
-        wav = str(ch.get("chunk_audio_wav") or "").strip()
-        if not wav or not (session_root / wav).is_file():
-            raise FileNotFoundError(f"Нет WAV для части {ch.get('index')}: {wav}")
+    if not (sm == "unwritten_chapter" and stage in (MODE5_CKPT_STUB, MODE5_CKPT_AFTER_IMAGES)):
+        for ch in chunks:
+            idx = int(ch.get("index") or 0)
+            mp3_path, wav_path = _resolve_mode5_chunk_audio_paths(session_id, ch)
+            if wav_path is None:
+                raise FileNotFoundError(f"Нет WAV для части {idx}: chunk_{idx:03d}.wav")
+            if mp3_path is None:
+                raise FileNotFoundError(f"Нет MP3 для части {idx}: chunk_{idx:03d}.mp3")
+            ch["chunk_audio"] = _rel_session(session_root, mp3_path)
+            ch["chunk_audio_wav"] = _rel_session(session_root, wav_path)
+
+    if sm != "facts50":
+        from modes.mode5.outline_generator import get_chunk_outline_labels
+
+        seg_sec = int(plan.get("segment_seconds") or SEG_SEC_DEFAULT)
+        outline_doc = plan.get("outline_structure") if isinstance(plan.get("outline_structure"), dict) else None
+        outline_labels = (
+            get_chunk_outline_labels(outline_doc)
+            if sm in ("outline", "book_night", "unwritten_chapter") and isinstance(outline_doc, dict)
+            else []
+        )
+        unwritten_anchor_map = (
+            _unwritten_chunk_anchor_by_index(outline_doc)
+            if sm == "unwritten_chapter" and isinstance(outline_doc, dict)
+            else {}
+        )
+
+        rebuilt_segments = False
+        for ci, ch in enumerate(chunks):
+            text = str(ch.get("text") or "").strip()
+            if not text:
+                raise ValueError(f"Mode 5 resume: пустой текст чанка {ci}")
+            _mp3_path, wav_path = _resolve_mode5_chunk_audio_paths(session_id, ch)
+            if wav_path is None and sm != "unwritten_chapter":
+                raise FileNotFoundError(f"Mode 5 resume: нет WAV для чанка {ci}")
+            dur = float(ch.get("duration_sec") or 0.0)
+            if wav_path is not None and dur <= 0:
+                dur = await asyncio.to_thread(_wav_duration_sec, wav_path)
+            if wav_path is not None:
+                ch["duration_sec"] = dur
+            if not list(ch.get("segments") or []):
+                if wav_path is not None:
+                    wts, words = await asyncio.to_thread(
+                        get_word_timestamps_from_audio_path,
+                        wav_path,
+                        script=text,
+                        language=language,
+                        vad_filter=False,
+                    )
+                    ch["segments"] = _segments_for_chunk(text, dur, seg_sec, wts, words)
+                else:
+                    ch["segments"] = _segments_for_chunk_from_text(text, seg_sec, language=language)
+                rebuilt_segments = True
+            if sm in ("outline", "book_night", "unwritten_chapter") and ci < len(outline_labels):
+                ch["chapter_title"] = outline_labels[ci][0]
+                ch["subchapter_title"] = outline_labels[ci][1]
+            if sm == "unwritten_chapter":
+                meta = unwritten_anchor_map.get(ci) or {}
+                ap = str(meta.get("prompt_prefix") or "").strip()
+                if ap:
+                    ch["block_prompt_prefix"] = ap
+                for key in ("visual_anchor", "evidence_anchor", "human_stakes"):
+                    val = str(meta.get(key) or "").strip()
+                    if val:
+                        ch[key] = val
+            _rebuild_chunk_segment_paths(session_id, ch)
+
+        if rebuilt_segments or stage in (MODE5_CKPT_STUB, MODE5_CKPT_AFTER_IMAGES):
+            _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_TTS)
+
+        for ci, ch in enumerate(chunks):
+            if not _mode5_chunk_images_complete(session_root, ch):
+                logger.info(
+                    f"[Mode5 resume] Chunk {ci + 1}/{len(chunks)}: image generation for {len(ch.get('segments') or [])} window(s)"
+                )
+                await _generate_chunk_images(
+                    session_id,
+                    ch,
+                    style_suffix,
+                    max_parallel_images=mpi,
+                    refresh_all=False,
+                    visual_policy=_mode5_visual_policy(sm),
+                    visual_bible=plan.get("visual_bible") if isinstance(plan.get("visual_bible"), dict) else None,
+                    block_prompt_prefix=str(ch.get("block_prompt_prefix") or ""),
+                    on_segment_ready=(
+                        lambda _seg, cidx=ci: _save_mode5_plan(
+                            session_id, plan, checkpoint=MODE5_CKPT_AFTER_IMAGES, chunk_index=cidx
+                        )
+                    ),
+                )
+                _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_IMAGES, chunk_index=ci)
+            if sm == "unwritten_chapter":
+                _mp3_path, wav_path = _resolve_mode5_chunk_audio_paths(session_id, ch)
+                if wav_path is None:
+                    logger.info(f"[Mode5 resume] Chunk {ci + 1}/{len(chunks)}: TTS after images")
+                    mp3_path_new, wav_path_new, dur, _wts, _words, tts_plain = await _synthesize_chunk(
+                        session_id,
+                        ci,
+                        str(ch.get("text") or ""),
+                        language=language,
+                    )
+                    ch["text"] = tts_plain
+                    ch["chunk_audio"] = _rel_session(session_root, mp3_path_new)
+                    ch["chunk_audio_wav"] = _rel_session(session_root, wav_path_new)
+                    ch["duration_sec"] = dur
+                    _retime_existing_segments_for_audio(ch["segments"], duration_sec=dur)
+                    _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_TTS, chunk_index=ci)
+            if not _mode5_chunk_slices_complete(session_root, ch):
+                _render_chunk_audio_slices(session_id, ch)
+                _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_SLICES, chunk_index=ci)
+            await checkpoint(control)
+
+        await _ensure_mode5_looped_intro_video(session_id, plan, force=False)
+        _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_SLICES)
+        await checkpoint(control)
+
+        for ch in plan.get("chunks") or []:
+            ch["preview_ready"] = False
+        _save_mode5_plan(session_id, plan)
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            functools.partial(_build_all_chunk_previews_parallel, session_id, plan),
+        )
+        _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_PREVIEWS)
+
+        if skip_final_assembly:
+            _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_COMPLETED)
+            logger.success(f"=== Mode 5 RESUME REVIEW READY | session={session_id} ===")
+            return _attach_mode5_resume_flags_from_plan(
+                session_id, plan, _result_payload(session_id, plan, review_ready=True)
+            )
+
+        final_path = session_root / "video_mode5.mp4"
+        await loop.run_in_executor(None, functools.partial(_rebuild_mode5_missing_previews, session_id, plan))
+        preview_paths = [session_root / ch["preview_relpath"] for ch in (plan.get("chunks") or [])]
+        await loop.run_in_executor(None, lambda: _ffmpeg_concat(preview_paths, final_path))
+        final_path = await loop.run_in_executor(None, lambda: _append_mode5_sleep_tail(session_id, plan, final_path))
+        rel_final = _rel_session(session_root, final_path)
+        _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_COMPLETED)
+        logger.success(f"=== Mode 5 RESUME DONE | video={final_path} ===")
+        return _attach_mode5_resume_flags_from_plan(
+            session_id,
+            plan,
+            _result_payload(session_id, plan, review_ready=False, final_video=rel_final),
+        )
 
     par = max(1, min(32, int(getattr(settings, "mode5_facts50_parallel", 10))))
     sem_img = asyncio.Semaphore(par)
@@ -1773,6 +2395,7 @@ async def resume_mode5_pipeline(
                     refresh_all=False,
                     visual_policy=_mode5_visual_policy(sm),
                     visual_bible=plan.get("visual_bible") if isinstance(plan.get("visual_bible"), dict) else None,
+                    block_prompt_prefix=str(ch.get("block_prompt_prefix") or ""),
                 )
                 _save_mode5_plan(
                     session_id, plan, checkpoint=MODE5_CKPT_AFTER_IMAGES, chunk_index=idx
@@ -1784,6 +2407,7 @@ async def resume_mode5_pipeline(
     for ch in chunks:
         if not _mode5_chunk_slices_complete(session_root, ch):
             _render_chunk_audio_slices(session_id, ch)
+    await _ensure_mode5_looped_intro_video(session_id, plan, force=False)
     _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_SLICES)
     await checkpoint(control)
 
@@ -1834,9 +2458,14 @@ async def regenerate_mode5_image(
     if segment_index < 0 or segment_index >= len(segs):
         raise ValueError("Invalid segment_index")
     seg = segs[segment_index]
+    seg_prompt_text = seg.get("text", "")
+    prompt_prefix = _chunk_block_prompt_prefix(chunk)
+    if prompt_prefix:
+        seg_prompt_text = f"{prompt_prefix}\n\nSegment meaning:\n{seg_prompt_text}"
+    locked_style = _mode5_locked_style(plan)
     prompt = await _build_image_prompt_async(
-        seg.get("text", ""),
-        plan.get("style_suffix") or "",
+        seg_prompt_text,
+        locked_style,
         output_format=_MODE5_OUTPUT_FORMAT,
         variation_hint=(
             f"Variation target for this regenerated frame: use a new camera angle and composition "
@@ -1846,10 +2475,13 @@ async def regenerate_mode5_image(
         visual_policy=_mode5_visual_policy(str(plan.get("sub_mode"))),
         visual_bible=plan.get("visual_bible") if isinstance(plan.get("visual_bible"), dict) else None,
     )
+    prompt = _sanitize_mode5_image_prompt(prompt)
     seg["image_prompt"] = prompt
     session_root = _session_dir(session_id)
     img_path = session_root / seg["image"]
     await _generate_one_image(prompt, img_path, aspect_ratio=_MODE5_IMAGE_ASPECT_RATIO)
+    if _is_global_intro_segment(chunk_index, segment_index):
+        await _ensure_mode5_looped_intro_video(session_id, plan, force=True)
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, lambda: _build_chunk_preview_sync(session_id, chunk_index, plan))
     _save_mode5_plan(session_id, plan)

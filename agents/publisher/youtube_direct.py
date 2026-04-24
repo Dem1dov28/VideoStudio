@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import re
+import socket
 import time
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,8 @@ YOUTUBE_UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
 # Нужен для channels.list(mine) — подсказка канала в UI; без него будет 403.
 YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
 SCOPES = [YOUTUBE_UPLOAD_SCOPE, YOUTUBE_READONLY_SCOPE]
+UPLOAD_DEADLINE_SECONDS = 15 * 60
+UPLOAD_STALL_TIMEOUT_SECONDS = 180
 
 
 def _authorized_http_for_youtube(creds: Credentials) -> google_auth_httplib2.AuthorizedHttp:
@@ -52,6 +55,11 @@ def _is_transient_network_error(exc: BaseException) -> bool:
     """
     WinError 10054 / RST / обрыв с Google API на Windows + старые SSL-глюки httplib2.
     """
+    if isinstance(exc, socket.gaierror):
+        # DNS resolve glitches: [Errno 11001] getaddrinfo failed (Windows)
+        return True
+    if isinstance(exc, httplib2.error.ServerNotFoundError):
+        return True
     if _is_ssl_session_glitch(exc):
         return True
     if isinstance(exc, (ConnectionResetError, BrokenPipeError)):
@@ -66,6 +74,8 @@ def _is_transient_network_error(exc: BaseException) -> bool:
     if "10054" in s or "forcibly closed" in s or "удаленный хост" in s:
         return True
     if "connection reset" in s or "broken pipe" in s:
+        return True
+    if "getaddrinfo failed" in s or "unable to find the server at" in s:
         return True
     return False
 
@@ -274,31 +284,62 @@ def upload_video_file(
     if t:
         body["snippet"]["tags"] = t
 
-    http = _authorized_http_for_youtube(creds)
-    youtube = build("youtube", "v3", http=http, cache_discovery=False)
-    # MediaFileUpload держит файл открытым до __del__ (GC) — на Windows unlink временного
-    # файла после загрузки падает с WinError 32. Явный with закрывает дескриптор до return.
-    with open(video_path, "rb") as fh:
-        media = MediaIoBaseUpload(
-            fh, mimetype="video/mp4", resumable=True, chunksize=8 * 1024 * 1024
-        )
-        request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
-        response = None
-        while response is None:
-            status = None
-            attempt = 0
-            while attempt < 3:
-                try:
-                    status, response = request.next_chunk()
-                    break
-                except Exception as e:
-                    attempt += 1
-                    if not _is_transient_network_error(e) or attempt >= 3:
-                        raise
-                    logger.warning(f"[YouTube] сеть при chunk, повтор {attempt}/3: {e}")
-                    time.sleep(1.0 * attempt)
-            if status and getattr(status, "progress", None) is not None:
-                logger.debug(f"[YouTube] upload progress {int(status.progress() * 100)}%")
+    # Полный рестарт upload-сессии нужен при DNS/transport сбоях (в т.ч. ServerNotFoundError).
+    # Повтор next_chunk на старом request не всегда оживляет соединение.
+    response: dict[str, Any] | None = None
+    for upload_attempt in range(3):
+        try:
+            http = _authorized_http_for_youtube(creds)
+            youtube = build("youtube", "v3", http=http, cache_discovery=False)
+            # MediaFileUpload держит файл открытым до __del__ (GC) — на Windows unlink временного
+            # файла после загрузки падает с WinError 32. Явный with закрывает дескриптор до return.
+            started_at = time.monotonic()
+            last_progress_at = started_at
+            last_progress_value = -1
+
+            with open(video_path, "rb") as fh:
+                media = MediaIoBaseUpload(
+                    fh, mimetype="video/mp4", resumable=True, chunksize=8 * 1024 * 1024
+                )
+                request = youtube.videos().insert(
+                    part="snippet,status", body=body, media_body=media
+                )
+                response = None
+                while response is None:
+                    now = time.monotonic()
+                    if now - started_at > UPLOAD_DEADLINE_SECONDS:
+                        raise TimeoutError(
+                            f"YouTube upload timeout after {UPLOAD_DEADLINE_SECONDS}s"
+                        )
+                    if now - last_progress_at > UPLOAD_STALL_TIMEOUT_SECONDS:
+                        raise TimeoutError(
+                            "YouTube upload stalled: no progress for "
+                            f"{UPLOAD_STALL_TIMEOUT_SECONDS}s"
+                        )
+                    status = None
+                    attempt = 0
+                    while attempt < 3:
+                        try:
+                            status, response = request.next_chunk()
+                            break
+                        except Exception as e:
+                            attempt += 1
+                            if not _is_transient_network_error(e) or attempt >= 3:
+                                raise
+                            logger.warning(f"[YouTube] сеть при chunk, повтор {attempt}/3: {e}")
+                            time.sleep(1.0 * attempt)
+                    if status and getattr(status, "progress", None) is not None:
+                        progress_value = int(status.progress() * 100)
+                        if progress_value > last_progress_value:
+                            last_progress_value = progress_value
+                            last_progress_at = time.monotonic()
+                        logger.debug(f"[YouTube] upload progress {progress_value}%")
+            break
+        except Exception as e:
+            if not _is_transient_network_error(e) or upload_attempt >= 2:
+                raise
+            logger.warning(f"[YouTube] перезапуск upload-сессии {upload_attempt + 1}/3: {e}")
+            time.sleep(1.2 * (upload_attempt + 1))
 
     vid = (response or {}).get("id", "")
     logger.success(f"[YouTube] Видео загружено, id={vid}")

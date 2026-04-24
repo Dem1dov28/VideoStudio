@@ -6,9 +6,13 @@ Mode 5 Video Assembler — длинное видео: изображение + �
 from __future__ import annotations
 
 import subprocess
+import sys
 import tempfile
+import time
+import uuid
 import wave
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from loguru import logger
@@ -39,6 +43,23 @@ _MOTION_PATTERNS: list[tuple[float, float, float, float]] = [
 ]
 
 _MIN_SEGMENT_AUDIO_SEC = 0.25
+
+
+def _unlink_retry(path: Path, *, attempts: int = 12, delay_sec: float = 0.08) -> None:
+    """Windows: MoviePy удаляет temp audio сразу после ffmpeg — часто WinError 32; чистим после close с ретраями."""
+    for _ in range(max(1, attempts)):
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except OSError as exc:
+            winerr = getattr(exc, "winerror", None)
+            if sys.platform == "win32" and winerr == 32:
+                time.sleep(delay_sec)
+                continue
+            if exc.errno == 13:  # EACCES
+                time.sleep(delay_sec)
+                continue
+            raise
 
 
 def _smoothstep(x: float) -> float:
@@ -357,8 +378,68 @@ def _make_segment_clip(
         raise
 
 
+def _make_looped_video_segment_clip(
+    video_path: Path,
+    audio_path: Path,
+    target_w: int,
+    target_h: int,
+    render_fps: int,
+) -> VideoFileClip:
+    """
+    Подготовить готовый видео-сегмент (intro) под длительность аудио:
+    - бесконечно зациклить источник;
+    - обрезать по длительности текущего WAV;
+    - привести к целевому размеру/fps/pix_fmt.
+    """
+    ffmpeg = resolve_ffmpeg_executable()
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg not found for mode5 looped intro render")
+
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+        temp_out = Path(tmp.name)
+
+    duration = _wav_duration_sec(audio_path)
+    vf = (
+        f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease:flags=lanczos,"
+        f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:black,"
+        "format=yuv420p"
+    )
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-stream_loop",
+        "-1",
+        "-i",
+        str(video_path),
+        "-t",
+        f"{duration:.6f}",
+        "-vf",
+        vf,
+        "-an",
+        "-r",
+        str(render_fps),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-pix_fmt",
+        "yuv420p",
+        str(temp_out),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=3600)
+        return VideoFileClip(str(temp_out))
+    except subprocess.CalledProcessError as exc:
+        temp_out.unlink(missing_ok=True)
+        stderr = (exc.stderr or "").strip()
+        raise RuntimeError(f"FFmpeg mode5 looped intro render failed: {stderr or exc}") from exc
+    except Exception:
+        temp_out.unlink(missing_ok=True)
+        raise
+
+
 def assemble_mode5_video(
-    segment_data: list[tuple[Path, Path]],
+    segment_data: list[dict[str, Any] | tuple[Path, Path]],
     output_path: Path,
     subtitle_texts: list[str] | None = None,
     top_labels: list[str] | None = None,
@@ -367,7 +448,9 @@ def assemble_mode5_video(
 ) -> Path:
     """
     Собирает длинное видео из сегментов (image + audio).
-    segment_data: list of (image_path, audio_path)
+    segment_data:
+      - legacy tuple: (image_path, audio_path)
+      - dict: {"asset_type": "image"|"video", "image_path"/"video_path", "audio_path"}
 
     facts50_static_still: для «50 фактов» — неподвижный кадр и ниже FPS (быстрее кодирование).
     """
@@ -387,9 +470,26 @@ def assemble_mode5_video(
     clip_durations: list[float] = []
     subtitle_texts = subtitle_texts or []
     top_labels = top_labels or []
-    for i, (img_path, audio_path) in enumerate(segment_data):
-        if not img_path.exists() or not audio_path.exists():
-            logger.warning(f"[Mode5] Skip missing: {img_path} or {audio_path}")
+    for i, seg_entry in enumerate(segment_data):
+        asset_type = "image"
+        img_path: Path | None = None
+        video_path: Path | None = None
+        if isinstance(seg_entry, tuple):
+            img_path, audio_path = seg_entry
+        elif isinstance(seg_entry, dict):
+            asset_type = str(seg_entry.get("asset_type") or "image").strip().lower()
+            audio_raw = seg_entry.get("audio_path")
+            audio_path = Path(audio_raw) if audio_raw else None
+            img_raw = seg_entry.get("image_path")
+            video_raw = seg_entry.get("video_path")
+            img_path = Path(img_raw) if img_raw else None
+            video_path = Path(video_raw) if video_raw else None
+        else:
+            logger.warning(f"[Mode5] Skip invalid segment entry type={type(seg_entry).__name__}")
+            continue
+
+        if not isinstance(audio_path, Path) or not audio_path.exists():
+            logger.warning(f"[Mode5] Skip missing audio: {audio_path}")
             continue
         seg_dur = _wav_duration_sec(audio_path)
         if seg_dur < _MIN_SEGMENT_AUDIO_SEC:
@@ -397,15 +497,31 @@ def assemble_mode5_video(
                 f"[Mode5] Skip tiny segment {audio_path.name}: {seg_dur:.3f}s < {_MIN_SEGMENT_AUDIO_SEC:.2f}s"
             )
             continue
-        base_clip = _make_segment_clip(
-            img_path,
-            audio_path,
-            target_w,
-            target_h,
-            render_fps,
-            i,
-            static_still=use_static,
-        )
+        if asset_type == "video":
+            if not isinstance(video_path, Path) or not video_path.exists():
+                logger.warning(f"[Mode5] Video segment fallback to image (missing video): {video_path}")
+                asset_type = "image"
+            else:
+                base_clip = _make_looped_video_segment_clip(
+                    video_path,
+                    audio_path,
+                    target_w,
+                    target_h,
+                    render_fps,
+                )
+        if asset_type != "video":
+            if not isinstance(img_path, Path) or not img_path.exists():
+                logger.warning(f"[Mode5] Skip missing image: {img_path}")
+                continue
+            base_clip = _make_segment_clip(
+                img_path,
+                audio_path,
+                target_w,
+                target_h,
+                render_fps,
+                i,
+                static_still=use_static,
+            )
         clip = _with_static_subtitle(
             base_clip,
             subtitle_texts[i] if i < len(subtitle_texts) else "",
@@ -458,6 +574,9 @@ def assemble_mode5_video(
             final = concatenate_videoclips(clips, method="compose")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    # Параллельные превью + дефолтный temp в CWD/префикс имени → коллизии и WinError 32.
+    # Явный UUID + не даём MoviePy сразу os.remove (закрываем клипы, потом unlink с ретраями).
+    temp_mpy_audio = output_path.parent / f"_m5_snd_{uuid.uuid4().hex}.mp4"
     try:
         final.write_videofile(
             str(output_path),
@@ -467,6 +586,9 @@ def assemble_mode5_video(
             threads=4,
             preset="medium",
             logger=None,
+            temp_audiofile=str(temp_mpy_audio),
+            temp_audiofile_path=str(output_path.parent),
+            remove_temp=False,
         )
     finally:
         final.close()
@@ -491,6 +613,7 @@ def assemble_mode5_video(
                 p.unlink(missing_ok=True)
             except Exception:
                 pass
+        _unlink_retry(temp_mpy_audio)
 
     logger.success(f"[Mode5] Done → {output_path}")
     return output_path

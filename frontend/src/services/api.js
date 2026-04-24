@@ -3,10 +3,17 @@ const BASE = import.meta.env.VITE_API_URL || '';
 // Global flag to prevent error reporting loops
 let isServerUnavailable = false;
 const SERVER_UNAVAILABLE_TIMEOUT = 30000; // 30 seconds cooldown
+const clientErrorCooldownMs = 5000;
+const recentClientErrors = new Map();
 
 function reportClientError(message, url = '') {
   // Don't send errors if server is already unavailable (prevent spam)
   if (isServerUnavailable) return;
+  const key = `${url}::${message}`;
+  const now = Date.now();
+  const lastAt = recentClientErrors.get(key) || 0;
+  if (now - lastAt < clientErrorCooldownMs) return;
+  recentClientErrors.set(key, now);
   
   // Don't send network errors - server is unavailable anyway
   if (/failed to fetch|connection refused|network error|ECONNREFUSED/i.test(message)) {
@@ -33,17 +40,33 @@ const DEBUG_API = false; // Включить для отладки API
 
 async function request(path, opts = {}) {
   const url = `${BASE}${path}`;
+  const { timeoutMs = 0, ...fetchOpts } = opts;
+  const controller = new AbortController();
+  const timeoutId =
+    timeoutMs > 0
+      ? setTimeout(() => controller.abort(new DOMException('Request timeout', 'AbortError')), timeoutMs)
+      : null;
   if (DEBUG_API) console.log(`[API] fetch ${url}`);
   try {
     const res = await fetch(url, {
-      headers: { 'Content-Type': 'application/json', ...opts.headers },
-      ...opts,
+      headers: { 'Content-Type': 'application/json', ...fetchOpts.headers },
+      ...fetchOpts,
+      signal: controller.signal,
     });
     const ct = res.headers.get('content-type') || '';
     if (DEBUG_API) console.log(`[API] ${path} → ${res.status} Content-Type: ${ct.slice(0, 50)}`);
 
     if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      const raw = await res.text().catch(() => '');
+      let err = { detail: res.statusText };
+      try {
+        err = raw ? JSON.parse(raw) : err;
+      } catch {
+        if (raw && raw.trim()) {
+          // Keep first line only; avoid giant HTML dumps
+          err = { detail: raw.trim().split('\n')[0] };
+        }
+      }
       if (DEBUG_API) console.error(`[API] ${path} ERROR:`, err);
       let msg = err.detail ?? err.message ?? res.statusText;
       if (Array.isArray(msg)) {
@@ -76,9 +99,17 @@ async function request(path, opts = {}) {
       throw new Error('Сервер вернул некорректный JSON');
     }
   } catch (e) {
+    if (e?.name === 'AbortError') {
+      const t = timeoutMs > 0 ? ` (${Math.round(timeoutMs / 1000)}с)` : '';
+      const timeoutError = new Error(`Таймаут запроса${t}`);
+      reportClientError(timeoutError.message, path);
+      throw timeoutError;
+    }
     if (DEBUG_API) console.error(`[API] ${path} catch:`, e);
     reportClientError(e.message || String(e), path);
     throw e;
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
   }
 }
 
@@ -155,6 +186,18 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({}),
     }),
+  mode5TopicIdeas: (subMode, limit = 8, seed = null) =>
+    request('/api/mode5/topic-ideas', {
+      method: 'POST',
+      body: JSON.stringify({ sub_mode: subMode, limit, seed }),
+    }),
+  mode5CachedTopicIdeas: (subMode, limit = 8) =>
+    request(`/api/mode5/topic-ideas?sub_mode=${encodeURIComponent(subMode)}&limit=${encodeURIComponent(limit)}`),
+  mode5ConsumeIdea: (ideaId, status = 'clicked') =>
+    request('/api/mode5/topic-ideas/consume', {
+      method: 'POST',
+      body: JSON.stringify({ idea_id: ideaId, status }),
+    }),
   mode13Assemble: (sid, showSubtitles = undefined) =>
     request(`/api/mode13/${sid}/assemble`, {
       method: 'POST',
@@ -209,7 +252,11 @@ export const api = {
   youtubeOAuthStart: (profile = 'primary') =>
     request(`/api/youtube/oauth/authorize?profile=${encodeURIComponent(profile)}`),
   youtubeUpload: (body) =>
-    request('/api/youtube/upload', { method: 'POST', body: JSON.stringify(body) }),
+    request('/api/youtube/upload', {
+      method: 'POST',
+      body: JSON.stringify(body),
+      timeoutMs: 16 * 60 * 1000,
+    }),
   youtubeResetTokens: () => request('/api/youtube/reset', { method: 'POST' }),
   /** Казино: TikTok-каналы + health для сайдбара YouTube */
   fetchCasinoHealth: () => request('/api/casino/health'),

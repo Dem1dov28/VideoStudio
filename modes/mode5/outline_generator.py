@@ -112,9 +112,9 @@ def _parse_json_obj(raw: str) -> dict[str, Any]:
     raise ValueError("Could not parse LLM JSON")
 
 
-def _scenario_llm(*, temperature: float = 0.4):
+def _scenario_llm(*, temperature: float = 0.4, **kwargs: Any):
     model = getattr(settings, "openrouter_scenario_model", None) or settings.openrouter_model
-    return make_llm(temperature=temperature, model=model)
+    return make_llm(temperature=temperature, model=model, **kwargs)
 
 
 async def _invoke_json(system: str, human: str, *, temperature: float = 0.4) -> dict[str, Any]:

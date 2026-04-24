@@ -274,6 +274,8 @@ export default function Progress() {
         : (p || '').includes('mode13_preview_') || (p || '').includes('mode5_preview_')
           ? done.mode5_sub_mode === 'facts50'
             ? `Fact ${idx + 1}`
+            : done.mode5_sub_mode === 'unwritten_chapter'
+              ? `Блок ${idx + 1}`
             : done.mode5_sub_mode === 'outline' || done.mode5_sub_mode === 'book_night'
               ? `Подглава ${idx + 1}`
               : `Часть ${idx + 1}`
@@ -516,7 +518,7 @@ export default function Progress() {
             </p>
           )}
           <div className="flex flex-wrap gap-2">
-            {(error || status === 'cancelled') && done?.mode5_can_resume === true && (
+            {done?.mode5_can_resume === true && !done?.mode5_review_ready && !done?.video_path && (
               <button
                 type="button"
                 onClick={async () => {
@@ -535,7 +537,7 @@ export default function Progress() {
                 disabled={mode5ContinueBusy || busy}
                 className="flex items-center gap-2 text-sm px-4 py-2.5 rounded-xl font-medium transition-colors bg-emerald-700 hover:bg-emerald-600 text-white border border-emerald-500/40 disabled:opacity-50"
               >
-                <RiPlayLine /> Продолжить с сохранённого этапа (77 фактов)
+                <RiPlayLine /> Продолжить с сохранённого этапа
               </button>
             )}
             <button
@@ -594,6 +596,8 @@ export default function Progress() {
                     ? 'Проверка по плану (от вашего описания)'
                     : mode5ReviewData.mode5_sub_mode === 'book_night'
                       ? 'Проверка «книга на ночь»'
+                    : mode5ReviewData.mode5_sub_mode === 'unwritten_chapter'
+                      ? 'Проверка The Unwritten Chapter'
                       : 'Проверка long-form частей'}
               </span>
             </div>
@@ -604,6 +608,8 @@ export default function Progress() {
                   ? 'Каждое превью — одна подглава плана, собранного из вашего краткого описания (обычно 10–18 частей); внутри блока — длинный текст, в духе истории на ночь. Можно править, переозвучить или перегенерировать кадры. Финальная склейка — кнопкой ниже.'
                   : mode5ReviewData.mode5_sub_mode === 'book_night'
                     ? 'Каждое превью — одна подглава по оглавлению выбранной книги. Спокойный ночной текст: чем меньше верхних глав в плане, тем длиннее озвучка на подглаву; при большем числе глав блоки короче (ближе к одному клипу «77 фактов»). Заголовок — глава и подраздел. Можно править, переозвучить или перегенерировать кадры. Финальная склейка — кнопкой ниже.'
+                    : mode5ReviewData.mode5_sub_mode === 'unwritten_chapter'
+                      ? 'Каждое превью — один блок расследования в стиле The Unwritten Chapter: спокойная подача, архивная логика, микровывод и переход. Можно править текст, переозвучить блок или перегенерировать отдельные кадры. Финальная склейка — кнопкой ниже.'
                     : 'Каждое превью — отдельный примерно 5-минутный фрагмент. Можно изменить текст чанка и заново озвучить только его, либо перегенерировать любой отдельный кадр внутри этого чанка. Финальная склейка — кнопкой ниже.'}
             </p>
             {Number.isFinite(mode5ReviewData?.mode5_ready_chunks) && Number.isFinite(mode5ReviewData?.mode5_total_chunks) && (
@@ -646,7 +652,7 @@ export default function Progress() {
                 const draftValue = mode5ChunkDrafts[chunkIndex] ?? meta?.text ?? '';
                 const partLabel = mode5ReviewData.mode5_sub_mode === 'facts50' ? 'Fact' : 'Часть';
                 const outlineHead =
-                  (mode5ReviewData.mode5_sub_mode === 'outline' || mode5ReviewData.mode5_sub_mode === 'book_night') &&
+                  (mode5ReviewData.mode5_sub_mode === 'outline' || mode5ReviewData.mode5_sub_mode === 'book_night' || mode5ReviewData.mode5_sub_mode === 'unwritten_chapter') &&
                   (meta?.chapter_title || meta?.subchapter_title)
                     ? [meta?.chapter_title, meta?.subchapter_title].filter(Boolean).join(' — ')
                     : null;
@@ -670,6 +676,8 @@ export default function Progress() {
                             ? 'Текст озвучки этой подглавы (развитие от вашего описания)'
                             : mode5ReviewData.mode5_sub_mode === 'book_night'
                               ? 'Текст озвучки этой подглавы (по книге)'
+                            : mode5ReviewData.mode5_sub_mode === 'unwritten_chapter'
+                              ? 'Текст озвучки этого расследовательского блока'
                               : 'Текст этого чанка'}
                       </label>
                       <textarea
@@ -711,6 +719,8 @@ export default function Progress() {
                             ? 'Переозвучка…'
                             : mode5ReviewData.mode5_sub_mode === 'facts50'
                               ? 'Переозвучить этот факт'
+                              : mode5ReviewData.mode5_sub_mode === 'unwritten_chapter'
+                                ? 'Переозвучить этот блок'
                               : mode5ReviewData.mode5_sub_mode === 'outline' || mode5ReviewData.mode5_sub_mode === 'book_night'
                                 ? 'Переозвучить эту подглаву'
                                 : 'Переозвучить этот чанк'}

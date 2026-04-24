@@ -233,11 +233,11 @@ async def _run_pipeline_wrapped(
         if not txt:
             raise ValueError("Mode 5: укажите текст для озвучки")
         sub5 = (mode5_sub_mode or "manual").strip().lower()
-        if sub5 not in ("manual", "bible", "facts50", "outline", "book_night"):
+        if sub5 not in ("manual", "bible", "facts50", "outline", "book_night", "unwritten_chapter"):
             sub5 = "manual"
         if sub5 == "manual" and mode5_bible_mode:
             sub5 = "bible"
-        if sub5 not in ("facts50", "outline", "book_night") and len(txt) < 80:
+        if sub5 not in ("facts50", "outline", "book_night", "unwritten_chapter") and len(txt) < 80:
             raise ValueError("Mode 5: вставьте полноценный текст для озвучки")
         if sub5 == "outline":
             from modes.mode5.outline_generator import MIN_OUTLINE_BRIEF_CHARS
@@ -247,9 +247,9 @@ async def _run_pipeline_wrapped(
                     f"Mode 5: для «плана из описания» введите краткое описание сюжета (от {MIN_OUTLINE_BRIEF_CHARS} символов), "
                     "не только название ролика."
                 )
-        elif sub5 in ("facts50", "book_night") and len(txt) < 8:
+        elif sub5 in ("facts50", "book_night", "unwritten_chapter") and len(txt) < 8:
             raise ValueError(
-                "Mode 5: для «77 фактов» или «книга на ночь» введите тему или название книги (от 8 символов)"
+                "Mode 5: для «77 фактов», «книга на ночь» или «The Unwritten Chapter» введите тему/название (от 8 символов)"
             )
         await checkpoint(control)
         from modes.mode5.pipeline import run_mode5_pipeline

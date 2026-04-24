@@ -103,6 +103,10 @@ const MODE11_STRUCTURES = [
   { key: 'hanging_gardens', label: '🌿 Висячие сады Семирамиды' },
 ];
 
+function isMode5AiSubMode(subMode) {
+  return subMode === 'book_night' || subMode === 'unwritten_chapter';
+}
+
 export default function Generate() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -152,12 +156,52 @@ export default function Generate() {
   const [mode5SegmentSeconds, setMode5SegmentSeconds] = useState(15);
   const [mode5HeaderTitle, setMode5HeaderTitle] = useState('');
   const [mode5SubMode, setMode5SubMode] = useState('manual');
+  const [mode5Ideas, setMode5Ideas] = useState([]);
+  const [mode5IdeasLoading, setMode5IdeasLoading] = useState(false);
+  const [mode5IdeaLaunchKey, setMode5IdeaLaunchKey] = useState('');
   useEffect(() => {
     if (mode !== 5) return;
-    if (mode5SubMode === 'book_night' && mode5SegmentSeconds < 30) {
+    if (
+      (mode5SubMode === 'book_night' || mode5SubMode === 'unwritten_chapter') &&
+      mode5SegmentSeconds < 30
+    ) {
       setMode5SegmentSeconds(30);
     }
   }, [mode, mode5SubMode, mode5SegmentSeconds]);
+  useEffect(() => {
+    if (mode !== 5 || !isMode5AiSubMode(mode5SubMode)) {
+      setMode5Ideas([]);
+    }
+  }, [mode, mode5SubMode]);
+  useEffect(() => {
+    let cancelled = false;
+    async function loadCachedIdeas() {
+      if (mode !== 5 || !isMode5AiSubMode(mode5SubMode)) return;
+      setMode5IdeasLoading(true);
+      setError('');
+      try {
+        const cached = await api.mode5CachedTopicIdeas(mode5SubMode, 8);
+        const rows = Array.isArray(cached?.ideas) ? cached.ideas : [];
+        if (cancelled) return;
+        if (rows.length > 0) {
+          setMode5Ideas(rows);
+          return;
+        }
+        const seed = `${mode5SubMode}:${new Date().toISOString().slice(0, 10)}`;
+        const generated = await api.mode5TopicIdeas(mode5SubMode, 8, seed);
+        if (cancelled) return;
+        setMode5Ideas(Array.isArray(generated?.ideas) ? generated.ideas : []);
+      } catch (e) {
+        if (!cancelled) setError(e.message || 'Не удалось загрузить темы');
+      } finally {
+        if (!cancelled) setMode5IdeasLoading(false);
+      }
+    }
+    loadCachedIdeas();
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, mode5SubMode]);
   // Mode 6: cartoon drama
   const [mode6NumCharacters, setMode6NumCharacters] = useState(3);
   // Mode 7: ASMR animal keyboard videos
@@ -425,12 +469,15 @@ export default function Generate() {
   }
 
   /* Mode 5: длинные видео — прямой запуск */
-  async function handleMode5Launch() {
-    const scriptTrim = mode5Script.trim();
+  async function handleMode5Launch(override = null) {
+    const scriptTrim = (override?.script ?? mode5Script).trim();
+    const headerTrim = (override?.header ?? mode5HeaderTitle).trim();
     if (!scriptTrim) {
       setError(
         mode5SubMode === 'outline'
           ? 'Введите краткое описание сюжета или задумки'
+          : mode5SubMode === 'unwritten_chapter'
+            ? 'Укажите тему для расследования на 30–50 минут'
           : mode5SubMode === 'book_night'
             ? 'Введите название книги (можно с автором)'
             : mode5SubMode === 'facts50'
@@ -445,10 +492,12 @@ export default function Generate() {
       );
       return;
     }
-    if ((mode5SubMode === 'facts50' || mode5SubMode === 'book_night') && scriptTrim.length < 8) {
+    if ((mode5SubMode === 'facts50' || mode5SubMode === 'book_night' || mode5SubMode === 'unwritten_chapter') && scriptTrim.length < 8) {
       setError(
         mode5SubMode === 'book_night'
           ? 'Для «книги на ночь» введите название книги (от 8 символов), можно с автором'
+          : mode5SubMode === 'unwritten_chapter'
+            ? 'Для режима «The Unwritten Chapter» укажите тему расследования (от 8 символов)'
           : 'Для режима «77 фактов» введите тему подлиннее (например: 77 фактов о Франции)',
       );
       return;
@@ -456,6 +505,7 @@ export default function Generate() {
     if (
       mode5SubMode !== 'facts50' &&
       mode5SubMode !== 'outline' &&
+      mode5SubMode !== 'unwritten_chapter' &&
       mode5SubMode !== 'book_night' &&
       scriptTrim.length < 80
     ) {
@@ -466,10 +516,16 @@ export default function Generate() {
     setStep('launching');
     try {
       const topicLine =
-        mode5SubMode === 'facts50' || mode5SubMode === 'outline' || mode5SubMode === 'book_night'
-          ? mode5HeaderTitle.trim() ||
+        isMode5AiSubMode(mode5SubMode)
+          ? headerTrim ||
             scriptTrim ||
-            (mode5SubMode === 'outline' ? 'Лонгрид по описанию' : mode5SubMode === 'book_night' ? 'Книга на ночь' : '77 фактов')
+            (mode5SubMode === 'outline'
+              ? 'Лонгрид по описанию'
+              : mode5SubMode === 'book_night'
+                ? 'Книга на ночь'
+                : mode5SubMode === 'unwritten_chapter'
+                  ? 'The Unwritten Chapter'
+                  : '77 фактов')
           : mode5HeaderTitle.trim() || 'Ручной long-form';
       const payload = {
         topic: topicLine,
@@ -487,7 +543,7 @@ export default function Generate() {
         mode5_chunk_seconds: mode5ChunkSeconds,
         mode5_segment_seconds: mode5SegmentSeconds,
         mode5_skip_final_assembly: true,
-        mode5_video_header_title: mode5HeaderTitle.trim(),
+        mode5_video_header_title: headerTrim,
         mode5_bible_mode: mode5SubMode === 'bible',
         mode5_sub_mode: mode5SubMode,
       };
@@ -505,6 +561,54 @@ export default function Generate() {
       setError(e.message);
       setStep('form');
     }
+  }
+
+  async function handleSuggestMode5Ideas() {
+    if (mode !== 5 || !isMode5AiSubMode(mode5SubMode)) return;
+    setError('');
+    setMode5IdeasLoading(true);
+    try {
+      const seed = `${mode5SubMode}:${new Date().toISOString()}`;
+      const res = await api.mode5TopicIdeas(mode5SubMode, 8, seed);
+      const rows = Array.isArray(res?.ideas) ? res.ideas : [];
+      if (!rows.length) throw new Error('Сервер не вернул идеи');
+      setMode5Ideas(rows);
+    } catch (e) {
+      setError(e.message || 'Не удалось предложить темы');
+    } finally {
+      setMode5IdeasLoading(false);
+    }
+  }
+
+  async function handleLaunchMode5FromIdea(idea, idx) {
+    if (!idea || typeof idea !== 'object') return;
+    const script = String(idea.topic || '').trim();
+    const header = String(idea.project_title || '').trim();
+    const ideaId = String(idea.idea_id || '').trim();
+    if (!script) {
+      setError('Идея пустая, попробуйте обновить список');
+      return;
+    }
+    const key = `${idx}-${script}`;
+    setMode5IdeaLaunchKey(key);
+    setMode5Script(script);
+    setMode5HeaderTitle(header);
+    if (ideaId) {
+      try {
+        await api.mode5ConsumeIdea(ideaId, 'clicked');
+      } catch (_) {
+        // non-blocking: even if status update fails, launch should continue
+      }
+    }
+    await handleMode5Launch({ script, header });
+    if (ideaId) {
+      try {
+        await api.mode5ConsumeIdea(ideaId, 'started');
+      } catch (_) {
+        // non-blocking
+      }
+    }
+    setMode5IdeaLaunchKey('');
   }
 
   /* Mode 6: cartoon drama — прямой запуск */
@@ -1019,7 +1123,7 @@ export default function Generate() {
                                   : mode === 13
                                     ? 'Загрузите длинное аудио: тембр слегка меняется фильтрами, текст извлекается Whisper по частям ~5 мин, картинки по ~30 с в едином стиле. Проверка превью, перегенерация отдельных слайдов, затем склейка в один ролик.'
                                     : mode === 5
-                                      ? 'Режим 5: «77 фактов» — тема → факты → короткая озвучка на клип. «План из описания» — описание → немного длинных частей. «Книга на ночь» — название книги → план по настоящему оглавлению (число частей как в книге) → спокойная озвучка блоками того же объёма, что один клип «77 фактов». Ручной — ваш текст по чанкам.'
+                                      ? 'Режим 5: «77 фактов» — тема → факты → короткая озвучка на клип. «План из описания» — описание → немного длинных частей. «Книга на ночь» — название книги → план по настоящему оглавлению (число частей как в книге) → спокойная озвучка блоками того же объёма, что один клип «77 фактов». «The Unwritten Chapter» — тема расследования → 5–7 документальных блоков на 30–50 минут. Ручной — ваш текст по чанкам.'
                                       : 'AI-агенты напишут сценарий, сгенерируют изображения и смонтируют видео.'}
               </p>
             </div>
@@ -1046,6 +1150,11 @@ export default function Generate() {
                         label: 'Книга на ночь',
                         hint: 'Название книги — план по реальному оглавлению; чем меньше верхних глав, тем длиннее текст на подглаву (при многих главах — ближе к одному клипу «77 фактов»)',
                       },
+                      {
+                        id: 'unwritten_chapter',
+                        label: 'The Unwritten Chapter',
+                        hint: 'Только тема — AI делает расследовательский лонгрид 30–50 минут в стиле архивного документального разбора',
+                      },
                     ].map(({ id, label, hint }) => (
                       <button
                         key={id}
@@ -1067,9 +1176,11 @@ export default function Generate() {
                   <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
                     {mode5SubMode === 'outline'
                       ? 'Краткое описание сюжета'
-                      : mode5SubMode === 'facts50' || mode5SubMode === 'book_night'
+                      : mode5SubMode === 'facts50' || mode5SubMode === 'book_night' || mode5SubMode === 'unwritten_chapter'
                         ? mode5SubMode === 'book_night'
                           ? 'Название книги'
+                          : mode5SubMode === 'unwritten_chapter'
+                            ? 'Тема расследования'
                           : 'Тема / заголовок'
                         : 'Текст для озвучки'}
                   </label>
@@ -1080,6 +1191,8 @@ export default function Generate() {
                         ? 'Например: 77 фактов о Франции — нейросеть придумает 77 интересных фактов и отдельный связный текст озвучки для каждого.'
                         : mode5SubMode === 'book_night'
                           ? 'Например: Семь навыков высокоэффективных людей, Стивен Кови — модель построит план по структуре книги и спокойно изложит суть по подглавам (их число — как в оглавлении, не фиксировано).'
+                          : mode5SubMode === 'unwritten_chapter'
+                            ? 'Например: Почему официальная версия Карибского кризиса скрывает реальные договоренности и влияние теневых переговоров. Укажите одну тему; сценарий 30–50 минут будет создан автоматически.'
                           : mode5SubMode === 'outline'
                             ? 'Например: Старый маяк на туманном острове. Смотритель живёт один, по вечерам зажигает лампу и слушает волны. Однажды к берегу прибивает странный предмет — не страшно, но меняет его рутину. Нужно именно описание, не одна фраза-название.'
                             : 'Вставьте сюда полный текст для озвучки. Система разобьёт его на чанки примерно по выбранной длительности и окна для картинок.'
@@ -1092,11 +1205,67 @@ export default function Generate() {
                       ? 'После запуска сначала генерируется сценарий (факты + тексты), затем 50 отдельных превью. Можно переозвучить любой фрагмент и собрать финальное видео кнопкой «Финальный монтаж».'
                       : mode5SubMode === 'book_night'
                         ? 'Сначала план по структуре выбранной книги, затем озвучка по каждой подглаве (объём блока — как у одного «факта» в режиме 77). Одна подглава = одно превью.'
+                        : mode5SubMode === 'unwritten_chapter'
+                          ? 'По одной теме генерируется расследовательский документальный сценарий: 5–7 блоков, микровыводы, подача в стиле архивного детектива, целевой объём 30–50 минут. Далее — обычный review превью по частям.'
                         : mode5SubMode === 'outline'
                           ? 'Сначала по вашему описанию строится план (главы и подглавы), затем — спокойные тексты под каждую подглаву. Число превью 10–18; длина блоков такая, чтобы в сумме выйти примерно на тот же объём озвучки, что у режима «77 фактов».'
                           : 'Текст берётся из этого поля. После старта — превью по чанкам: перегенерация кадров и переозвучка отдельных частей.'}
                   </p>
                 </div>
+                {isMode5AiSubMode(mode5SubMode) && (
+                  <div className="card p-5">
+                    <div className="flex items-center justify-between gap-3 mb-3">
+                      <div className="text-xs font-semibold text-[#71717a] uppercase tracking-wider">
+                        Идеи от нейросети
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleSuggestMode5Ideas}
+                        disabled={mode5IdeasLoading || step === 'launching'}
+                        className="btn-ghost text-sm px-3 py-2 flex items-center gap-2"
+                      >
+                        <RiRefreshLine className={mode5IdeasLoading ? 'animate-spin' : ''} />
+                        {mode5IdeasLoading ? 'Обновляю темы…' : 'Перегенерировать темы'}
+                      </button>
+                    </div>
+                    <p className="text-xs text-[#52525b] mb-3">
+                      Темы сохраняются и всегда подгружаются в этот блок. Нажмите на идею — тема и заголовок подставятся автоматически, запуск начнётся сразу.
+                    </p>
+                    {mode5Ideas.length > 0 ? (
+                      <div className="space-y-2">
+                        {mode5Ideas.map((idea, idx) => {
+                          const title = String(idea?.project_title || '').trim();
+                          const topicLine = String(idea?.topic || '').trim();
+                          const hook = String(idea?.hook || '').trim();
+                          const key = `${idx}-${topicLine}`;
+                          return (
+                            <button
+                              key={key}
+                              type="button"
+                              onClick={() => handleLaunchMode5FromIdea(idea, idx)}
+                              disabled={!topicLine || step === 'launching' || mode5IdeaLaunchKey === key}
+                              className="w-full text-left rounded-lg border border-[#2b2b35] hover:border-brand-600/40 px-3 py-3 transition-colors"
+                            >
+                              <div className="text-sm font-semibold text-[#f4f4fb]">
+                                {title || topicLine}
+                              </div>
+                              {title && (
+                                <div className="text-xs text-[#a1a1aa] mt-1">{topicLine}</div>
+                              )}
+                              {hook && (
+                                <div className="text-xs text-[#71717a] mt-1 line-clamp-2">{hook}</div>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-[#71717a]">
+                        Темы пока не загружены. Нажмите «Перегенерировать темы», чтобы получить новый набор.
+                      </p>
+                    )}
+                  </div>
+                )}
                 <div className="card p-5">
                   <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
                     Заголовок проекта
@@ -2861,7 +3030,7 @@ export default function Generate() {
                         <div className="text-sm font-medium text-[#e4e4f0] mb-2">Язык озвучки</div>
                         <div className="text-xs text-[#71717a] mb-2">Определяется автоматически по тексту</div>
                         <div className="mt-4 grid grid-cols-1 gap-4">
-                          {mode5SubMode !== 'facts50' && mode5SubMode !== 'outline' && mode5SubMode !== 'book_night' ? (
+                          {mode5SubMode !== 'facts50' && mode5SubMode !== 'outline' && mode5SubMode !== 'book_night' && mode5SubMode !== 'unwritten_chapter' ? (
                             <div>
                               <div className="text-sm font-medium text-[#e4e4f0] mb-2">Длина чанка</div>
                               <input
@@ -2882,6 +3051,10 @@ export default function Generate() {
                           ) : mode5SubMode === 'outline' ? (
                             <p className="text-xs text-[#71717a]">
                               В режиме «План из описания» в большое поле — краткое описание сюжета; одна подглава = одна часть превью. Длина текста на блок считается автоматически (мало частей — длиннее блок, много — короче), суммарно — около того же, что «77 фактов».
+                            </p>
+                          ) : mode5SubMode === 'unwritten_chapter' ? (
+                            <p className="text-xs text-[#71717a]">
+                              В режиме «The Unwritten Chapter» укажите только тему. Модель построит 5–7 расследовательских блоков под 30–50 минут и подготовит озвучку по частям. Длина чанка не задаётся.
                             </p>
                           ) : (
                             <p className="text-xs text-[#71717a]">
@@ -3004,9 +3177,11 @@ export default function Generate() {
                     !mode5Script.trim() ||
                     (mode5SubMode === 'facts50' && mode5Script.trim().length < 8) ||
                     (mode5SubMode === 'book_night' && mode5Script.trim().length < 8) ||
+                    (mode5SubMode === 'unwritten_chapter' && mode5Script.trim().length < 8) ||
                     (mode5SubMode === 'outline' && mode5Script.trim().length < MODE5_OUTLINE_MIN_BRIEF_CHARS) ||
                     (mode5SubMode !== 'facts50' &&
                       mode5SubMode !== 'book_night' &&
+                      mode5SubMode !== 'unwritten_chapter' &&
                       mode5SubMode !== 'outline' &&
                       mode5Script.trim().length < 80)
                   }
@@ -3019,6 +3194,8 @@ export default function Generate() {
                       ? 'Сгенерировать план и превью'
                       : mode5SubMode === 'book_night'
                         ? 'Сгенерировать книгу на ночь'
+                        : mode5SubMode === 'unwritten_chapter'
+                          ? 'Сгенерировать расследование'
                         : 'Запустить review long-form'}
                 </button>
               ) : mode === 13 ? (

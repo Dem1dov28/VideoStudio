@@ -201,7 +201,9 @@ def _mode13_hard_rules_suffix(*, output_format: str | None = None) -> str:
         f"Hard rules (every frame): {geo} "
         "All-ages only. No readable text, letters, captions, subtitles, UI, watermarks, or logos. "
         "No celebrity or politician likeness. Avoid compositions centered on open books, manuscript pages, "
-        "written scrolls, street signs, or screens meant to display words."
+        "written scrolls, street signs, or screens meant to display words. "
+        "One dominant scene only: no collage, no gallery wall, no contact sheet, no multi-panel split, no carousel of mini-photos. "
+        "Do not stage a reading desk or table-with-book as the central composition; prioritize lived environments, people, and actions."
     )
 
 
@@ -218,7 +220,8 @@ def _compose_image_prompt(
     custom_rules = ""
     if visual_bible and isinstance(visual_bible, dict):
         custom_rules = str(visual_bible.get("frame_rules") or "").strip()
-    use_flex_era = pol in ("facts50", VISUAL_POLICY_LONGFORM_FLEX, "book_night")
+    use_flex_era = pol in ("facts50", VISUAL_POLICY_LONGFORM_FLEX, "book_night", "unwritten_chapter", "mode5")
+    is_mode5_policy = pol in ("facts50", VISUAL_POLICY_LONGFORM_FLEX, "book_night", "unwritten_chapter", "mode5")
     era_rules = (custom_rules + " ") if custom_rules else f"{_FACTS50_ERA_FLEX_RULES} "
     if fmt == "horizontal":
         intro = (
@@ -241,10 +244,29 @@ def _compose_image_prompt(
             "Never make an open book, page spread, library shelf, manuscript, scroll, or e-reader the subject. "
             "Keep one cohesive series look across all frames: matching palette family, lighting mood, and lens feel. "
         )
+    unwritten_rules = ""
+    if pol == "unwritten_chapter":
+        unwritten_rules = (
+            "For archival investigation narration, prioritize evidence-first documentary scenes: declassified folders, maps, "
+            "archive rooms, witness environments, briefing tables, period-accurate interiors, and concrete locations tied to the claim. "
+            "Muted dark palette, restrained realism, no flashy cinematic neon, no generic heroic posters, no anachronistic objects. "
+        )
+    mode5_global_rules = ""
+    if is_mode5_policy:
+        mode5_global_rules = (
+            "For this long-form mode5 sequence, lock one coherent visual language across all frames for this single video "
+            "(same palette family, rendering style, and lighting logic). "
+            "Each frame must depict exactly one dominant full-frame scene, never a collage, gallery, contact sheet, split panel, or mini-photo grid. "
+            "Never center the composition on a book-on-table trope: no open book on desk, no staged reading table, no page spread hero shot. "
+            "Prefer varied lived scenes inferred from this exact segment meaning, and avoid repeating near-identical framing "
+            "or subject setup in adjacent frames."
+        )
     core = (
         f"{intro}"
         f"{scene_rules}"
         f"{book_night_rules}"
+        f"{unwritten_rules}"
+        f"{mode5_global_rules}"
         f"{era_rules}"
         f"Scene to illustrate: {concept_line}. "
         f"Art direction: {style_suffix}"
@@ -491,7 +513,7 @@ async def _build_image_prompt_async(
     cue = None
     if visual_bible and isinstance(visual_bible, dict):
         cue = (visual_bible.get("scene_cue") or "").strip() or None
-    if pol == "facts50" or pol == VISUAL_POLICY_LONGFORM_FLEX:
+    if pol in ("facts50", VISUAL_POLICY_LONGFORM_FLEX, "unwritten_chapter"):
         concept = await _segment_text_to_concept_facts50(segment_text, series_scene_cue=cue)
     else:
         concept = await _segment_text_to_concept(segment_text)

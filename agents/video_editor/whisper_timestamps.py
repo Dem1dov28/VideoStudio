@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,6 +24,8 @@ if TYPE_CHECKING:
 # Кэш модели внутри процесса (важно для Windows subprocess в mode4 assembler)
 _whisper_model = None
 _whisper_model_id: str = ""
+_whisper_model_lock = threading.Lock()
+_whisper_transcribe_lock = threading.Lock()
 
 
 def _try_load_model(name: str, device: str, compute_type: str):
@@ -43,76 +46,79 @@ def _get_whisper_model():
     global _whisper_model, _whisper_model_id
     if _whisper_model is not None:
         return _whisper_model
+    with _whisper_model_lock:
+        if _whisper_model is not None:
+            return _whisper_model
 
-    logger.info(
-        "[Whisper] Первая загрузка модели: при необходимости идёт скачивание с Hugging Face "
-        "(может занять несколько минут). Не перезагружайте uvicorn и не сохраняйте файлы в .venv — иначе загрузка прервётся."
-    )
-
-    from config import settings
-
-    override = (settings.whisper_model_size or "").strip()
-    if override in (
-        "tiny",
-        "base",
-        "small",
-        "medium",
-        "large-v2",
-        "large-v3",
-    ):
-        order = []
-        try:
-            import torch
-
-            if torch.cuda.is_available():
-                order.extend(
-                    [
-                        (override, "cuda", "float16"),
-                        (override, "cuda", "int8_float16"),
-                    ]
-                )
-        except ImportError:
-            pass
-        order.append((override, "cpu", "int8"))
-    else:
-        order = []
-        try:
-            import torch
-
-            if torch.cuda.is_available():
-                order.extend(
-                    [
-                        ("large-v3", "cuda", "float16"),
-                        ("large-v3", "cuda", "int8_float16"),
-                        ("medium", "cuda", "float16"),
-                    ]
-                )
-        except ImportError:
-            pass
-        order.extend(
-            [
-                ("medium", "cpu", "int8"),
-                ("small", "cpu", "int8"),
-                ("base", "cpu", "int8"),
-            ]
+        logger.info(
+            "[Whisper] Первая загрузка модели: при необходимости идёт скачивание с Hugging Face "
+            "(может занять несколько минут). Не перезагружайте uvicorn и не сохраняйте файлы в .venv — иначе загрузка прервётся."
         )
 
-    last_err: Exception | None = None
-    for name, dev, ct in order:
-        try:
-            m = _try_load_model(name, dev, ct)
-            _whisper_model = m
-            _whisper_model_id = f"{name}|{dev}|{ct}"
-            logger.info(f"[Whisper] Loaded model {_whisper_model_id} (max sync preset)")
-            return m
-        except Exception as e:
-            last_err = e
-            logger.debug(f"[Whisper] Skip {name} {dev} {ct}: {e}")
-            continue
+        from config import settings
 
-    if last_err:
-        logger.warning(f"[Whisper] No model loaded: {last_err}")
-    raise RuntimeError("faster-whisper: failed to load any model") from last_err
+        override = (settings.whisper_model_size or "").strip()
+        if override in (
+            "tiny",
+            "base",
+            "small",
+            "medium",
+            "large-v2",
+            "large-v3",
+        ):
+            order = []
+            try:
+                import torch
+
+                if torch.cuda.is_available():
+                    order.extend(
+                        [
+                            (override, "cuda", "float16"),
+                            (override, "cuda", "int8_float16"),
+                        ]
+                    )
+            except ImportError:
+                pass
+            order.append((override, "cpu", "int8"))
+        else:
+            order = []
+            try:
+                import torch
+
+                if torch.cuda.is_available():
+                    order.extend(
+                        [
+                            ("large-v3", "cuda", "float16"),
+                            ("large-v3", "cuda", "int8_float16"),
+                            ("medium", "cuda", "float16"),
+                        ]
+                    )
+            except ImportError:
+                pass
+            order.extend(
+                [
+                    ("medium", "cpu", "int8"),
+                    ("small", "cpu", "int8"),
+                    ("base", "cpu", "int8"),
+                ]
+            )
+
+        last_err: Exception | None = None
+        for name, dev, ct in order:
+            try:
+                m = _try_load_model(name, dev, ct)
+                _whisper_model = m
+                _whisper_model_id = f"{name}|{dev}|{ct}"
+                logger.info(f"[Whisper] Loaded model {_whisper_model_id} (max sync preset)")
+                return m
+            except Exception as e:
+                last_err = e
+                logger.debug(f"[Whisper] Skip {name} {dev} {ct}: {e}")
+                continue
+
+        if last_err:
+            logger.warning(f"[Whisper] No model loaded: {last_err}")
+        raise RuntimeError("faster-whisper: failed to load any model") from last_err
 
 
 def get_word_timestamps_from_video(
@@ -183,7 +189,8 @@ def get_word_timestamps_from_video(
             else:
                 transcribe_kw["vad_filter"] = False
 
-            segments, _info = model.transcribe(tmp_wav, **transcribe_kw)
+            with _whisper_transcribe_lock:
+                segments, _info = model.transcribe(tmp_wav, **transcribe_kw)
 
             word_timestamps: list[tuple[float, float]] = []
             tts_words: list[str] = []
@@ -281,7 +288,8 @@ def get_word_timestamps_from_audio_path(
         else:
             transcribe_kw["vad_filter"] = False
 
-        segments, _info = model.transcribe(tmp_wav, **transcribe_kw)
+        with _whisper_transcribe_lock:
+            segments, _info = model.transcribe(tmp_wav, **transcribe_kw)
 
         word_timestamps: list[tuple[float, float]] = []
         tts_words: list[str] = []

@@ -14,6 +14,8 @@ def test_mode13_hard_rules_suffix_horizontal():
     assert "Horizontal 16:9" in s
     assert "All-ages only" in s
     assert s.count("All-ages only") == 1
+    assert "no collage" in s.lower()
+    assert "table-with-book" in s.lower()
 
 
 def test_compose_image_prompt_includes_hard_rules_once():
@@ -58,6 +60,8 @@ def test_compose_longform_flex_skips_extra_scene_rules_block():
     )
     assert "Show one concrete scene from the spoken episode, not a symbolic collage" not in out
     assert out.count("All-ages only") == 1
+    assert "exactly one dominant full-frame scene" in out
+    assert "Never center the composition on a book-on-table trope" in out
 
 
 def test_fastgen_no_false_historical_lock_on_modern_self_help_copy():

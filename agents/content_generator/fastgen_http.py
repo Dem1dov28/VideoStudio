@@ -19,6 +19,7 @@ import re
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,13 @@ from config import settings
 
 _PROVIDER = "google_fx"
 _DATA_URI_RE = re.compile(r"^data:([^;]+);base64,(.+)$", re.DOTALL)
+
+# Повтор при HTTP 500 generation.content_policy («известные лица»): усиливаем анонимность сцены.
+_CONTENT_POLICY_IMAGE_RETRY_SUFFIX = (
+    "REGENERATION (content policy): do not depict any real public figure, celebrity, politician, athlete, or religious leader. "
+    "No recognizable face or body likeness. Prefer landscapes, objects, symbolic scenes, or tiny distant indistinct silhouettes; "
+    "if people are needed, use fully generic stylized characters with no facial features matching anyone real."
+)
 _FILE_REF_RE = re.compile(r"^file:[a-f0-9]{32}$")
 _MAX_INLINE_BYTES = 4 * 1024 * 1024  # ~4 MiB raw — дальше storage
 
@@ -74,6 +82,55 @@ def _build_headers() -> dict[str, str]:
     else:
         h["Authorization"] = f"Bearer {key}"
     return h
+
+
+def _content_policy_relaxed_image_prompt(prepared_prompt: str) -> str:
+    """Один раз дополняем уже подготовленный (prepare_fastgen_prompt_for_ui) промпт."""
+    base = (prepared_prompt or "").rstrip()
+    if not base:
+        return _CONTENT_POLICY_IMAGE_RETRY_SUFFIX
+    return f"{base}\n\n{_CONTENT_POLICY_IMAGE_RETRY_SUFFIX}"
+
+
+def _is_fastgen_content_policy_error(exc: BaseException) -> bool:
+    if isinstance(exc, VideoGenerationError):
+        ad = getattr(exc, "api_detail", None)
+        if isinstance(ad, dict):
+            code = str(ad.get("code") or "").strip().lower()
+            if code in {"generation.content_policy", "content_policy"}:
+                return True
+            err = str(ad.get("error") or "").lower()
+            if "prominent people" in err or "well-known individuals" in err:
+                return True
+    low = str(exc).lower()
+    return (
+        "content_policy" in low
+        or "prominent people" in low
+        or "well-known individuals" in low
+        or "цензура" in low
+    )
+
+
+async def _post_v2_images_resilient(
+    client: httpx.AsyncClient,
+    prepared_prompt: str,
+    build_body: Callable[[str], dict[str, Any]],
+) -> dict[str, Any]:
+    """До 2 попыток: при блокировке по известным лицам — тот же запрос с усиленным суффиксом."""
+    cur = prepared_prompt
+    for attempt in range(2):
+        try:
+            return await _post_v2_images(client, build_body(cur))
+        except VideoGenerationError as e:
+            if attempt == 0 and _is_fastgen_content_policy_error(e):
+                cur = _content_policy_relaxed_image_prompt(prepared_prompt)
+                logger.warning(
+                    "[FastGen HTTP] v2/images content_policy — retry with stricter anonymous-scene constraints ({})",
+                    e,
+                )
+                continue
+            raise
+    raise RuntimeError("[FastGen HTTP] _post_v2_images_resilient: unreachable")
 
 
 def _merge_into_parameters(params: dict[str, Any]) -> dict[str, Any]:
@@ -275,10 +332,12 @@ async def _post_v2_images(client: httpx.AsyncClient, body: dict[str, Any]) -> di
             detail = r.json()
         except Exception:
             detail = r.text[:500]
-        raise VideoGenerationError(f"v2/images HTTP {r.status_code}: {detail}")
+        api_d = detail if isinstance(detail, dict) else None
+        raise VideoGenerationError(f"v2/images HTTP {r.status_code}: {detail}", api_detail=api_d)
     data = r.json()
     if not data.get("success"):
-        raise VideoGenerationError(f"v2/images failed: {data!r}")
+        api_d = data if isinstance(data, dict) else None
+        raise VideoGenerationError(f"v2/images failed: {data!r}", api_detail=api_d)
     res = data.get("result")
     if not isinstance(res, str):
         raise VideoGenerationError(f"v2/images no result: {data!r}")
@@ -433,10 +492,16 @@ async def _generate_one_image(
         refs = refs[:3]
     if refs:
         ref_inputs = [await _image_input_for_path(client, p) for p in refs]
-        body = _v2_image_body_remix(full_prompt, ref_inputs)
+
+        def _body(cur: str) -> dict[str, Any]:
+            return _v2_image_body_remix(cur, ref_inputs)
+
     else:
-        body = _v2_image_body_generate(full_prompt)
-    out = await _post_v2_images(client, body)
+
+        def _body(cur: str) -> dict[str, Any]:
+            return _v2_image_body_generate(cur)
+
+    out = await _post_v2_images_resilient(client, full_prompt, _body)
     dest = _unique_frame_dest(output_dir, str(index) if index is not None else "0")
     dest.write_bytes(_decode_data_uri(out["result"]))
     return dest if dest.exists() else None
@@ -771,13 +836,20 @@ async def generate_images_chain_fastgen(
                     raise FastGenCancelled()
                 try:
                     if ref_idx is None:
-                        body = _v2_image_body_generate(full_prompt)
+
+                        def _b(cur: str) -> dict[str, Any]:
+                            return _v2_image_body_generate(cur)
+
+                        rjson = await _post_v2_images_resilient(client, full_prompt, _b)
                     else:
                         if ref_idx < 0 or ref_idx >= len(result):
                             raise ValueError(f"bad ref_idx {ref_idx} len={len(result)}")
                         inp = await _image_input_for_path(client, result[ref_idx])
-                        body = _v2_image_body_transform(full_prompt, inp)
-                    rjson = await _post_v2_images(client, body)
+
+                        def _b(cur: str) -> dict[str, Any]:
+                            return _v2_image_body_transform(cur, inp)
+
+                        rjson = await _post_v2_images_resilient(client, full_prompt, _b)
                     dest = _unique_frame_dest(output_dir, str(i))
                     dest.write_bytes(_decode_data_uri(rjson["result"]))
                     result.append(dest)
@@ -821,8 +893,11 @@ async def generate_images_chain_from_seed_fastgen(
                     raise FastGenCancelled()
                 try:
                     inp = await _image_input_for_path(client, ref_path)
-                    body = _v2_image_body_transform(full_prompt, inp)
-                    rjson = await _post_v2_images(client, body)
+
+                    def _b(cur: str) -> dict[str, Any]:
+                        return _v2_image_body_transform(cur, inp)
+
+                    rjson = await _post_v2_images_resilient(client, full_prompt, _b)
                     dest = _unique_frame_dest(output_dir, str(200 + i))
                     dest.write_bytes(_decode_data_uri(rjson["result"]))
                     chain.append(dest)

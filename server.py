@@ -685,7 +685,7 @@ class StartRequest(BaseModel):
     mode5_max_parallel_images: int = 10
     mode5_video_header_title: str | None = None
     mode5_bible_mode: bool = False
-    # manual | bible | facts50 | outline | book_night (legacy: mode5_bible_mode)
+    # manual | bible | facts50 | outline | book_night | unwritten_chapter (legacy: mode5_bible_mode)
     mode5_sub_mode: str = "manual"
     # Mode 6: viral cartoon drama
     mode6_num_characters: int = 3
@@ -756,7 +756,7 @@ class StartRequest(BaseModel):
         if v is None or (isinstance(v, str) and not str(v).strip()):
             return "manual"
         s = str(v).strip().lower()
-        if s in ("manual", "bible", "facts50", "outline", "book_night"):
+        if s in ("manual", "bible", "facts50", "outline", "book_night", "unwritten_chapter"):
             return s
         return "manual"
 
@@ -784,6 +784,29 @@ class Mode5RegenerateChunkBody(BaseModel):
     text: str
 
 
+class Mode5TopicIdeasBody(BaseModel):
+    sub_mode: str = "book_night"
+    limit: int = 8
+    seed: str | None = None
+
+    @field_validator("sub_mode", mode="before")
+    @classmethod
+    def _normalize_sub_mode(cls, v):  # noqa: ANN001
+        s = str(v or "").strip().lower()
+        if s in ("book_night", "unwritten_chapter"):
+            return s
+        raise ValueError("sub_mode must be book_night or unwritten_chapter")
+
+    @field_validator("limit", mode="before")
+    @classmethod
+    def _normalize_limit(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except Exception:
+            n = 8
+        return max(1, min(12, n))
+
+
 class Mode13VoicePreviewBody(BaseModel):
     """Предпрослушивание обработки голоса (первые ~45 с). path — файл из /api/upload/audio."""
 
@@ -801,6 +824,27 @@ class Mode13VoicePreviewBody(BaseModel):
     mud_cut: float = 0.0
     compression: float = 0.0
     max_seconds: float = 45.0
+
+
+class Mode5IdeaStatusBody(BaseModel):
+    idea_id: str
+    status: str = "clicked"
+
+    @field_validator("idea_id", mode="before")
+    @classmethod
+    def _normalize_idea_id(cls, v):  # noqa: ANN001
+        s = str(v or "").strip()
+        if not s:
+            raise ValueError("idea_id is required")
+        return s
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def _normalize_status(cls, v):  # noqa: ANN001
+        s = str(v or "").strip().lower()
+        if s in ("suggested", "clicked", "started", "completed", "failed", "archived"):
+            return s
+        raise ValueError("status must be suggested, clicked, started, completed, failed, or archived")
 
 
 def _safe_uploads_audio_path(path_str: str) -> Path | None:
@@ -823,7 +867,7 @@ def _effective_mode5_sub_mode(req: StartRequest) -> str:
     if not isinstance(raw, str):
         return "manual"
     s = raw.strip().lower()
-    if s not in ("manual", "bible", "facts50", "outline", "book_night"):
+    if s not in ("manual", "bible", "facts50", "outline", "book_night", "unwritten_chapter"):
         s = "manual"
     if s == "manual" and getattr(req, "mode5_bible_mode", False):
         return "bible"
@@ -892,7 +936,12 @@ def _validate_start_request(req: StartRequest) -> None:
                 400,
                 "Mode 5: для «77 фактов» введите тему или заголовок (от 8 символов).",
             )
-        elif sub5 not in ("facts50", "outline", "book_night") and len(txt) < 80:
+        elif sub5 == "unwritten_chapter" and len(txt) < 8:
+            raise HTTPException(
+                400,
+                "Mode 5: для «The Unwritten Chapter» укажите тему расследования (от 8 символов).",
+            )
+        elif sub5 not in ("facts50", "outline", "book_night", "unwritten_chapter") and len(txt) < 80:
             raise HTTPException(400, "Mode 5: вставьте полноценный текст для озвучки")
         lang5 = (getattr(req, "mode5_language", None) or getattr(req, "language", "auto") or "auto").strip().lower()
         if lang5 not in ("ru", "en", "auto", ""):
@@ -929,7 +978,7 @@ def _normalize_mode_specific_request(req: StartRequest) -> None:
         script_text = (req.mode5_script_text or "").strip()
         hdr = (req.mode5_video_header_title or "").strip()
         preferred_lang = (req.mode5_language or req.language or "auto").strip().lower() or "auto"
-        lang_blob = f"{script_text} {hdr}".strip() if sub5 in ("facts50", "outline", "book_night") else script_text
+        lang_blob = f"{script_text} {hdr}".strip() if sub5 in ("facts50", "outline", "book_night", "unwritten_chapter") else script_text
         req.language = detect_mode5_language(lang_blob, preferred_lang)
         req.mode5_language = req.language
         req.topic = (
@@ -942,6 +991,8 @@ def _normalize_mode_specific_request(req: StartRequest) -> None:
                 if sub5 == "outline"
                 else "Книга на ночь"
                 if sub5 == "book_night"
+                else "The Unwritten Chapter"
+                if sub5 == "unwritten_chapter"
                 else "Ручной long-form"
             )
         ).strip() or (
@@ -951,6 +1002,8 @@ def _normalize_mode_specific_request(req: StartRequest) -> None:
             if sub5 == "outline"
             else "Книга на ночь"
             if sub5 == "book_night"
+            else "The Unwritten Chapter"
+            if sub5 == "unwritten_chapter"
             else "Ручной long-form"
         )
 
@@ -1453,7 +1506,7 @@ async def mode5_review_state_ep(session_id: str):
 
 @app.post("/api/mode5/{session_id}/continue-generation")
 async def mode5_continue_generation_ep(session_id: str):
-    """Продолжить facts50 с последнего сохранённого этапа (TTS/картинки/слайсы на диске)."""
+    """Продолжить mode5 с последнего сохранённого этапа (TTS/картинки/слайсы на диске)."""
     from modes.mode5.pipeline import load_mode5_plan, mode5_resume_snapshot
 
     snap = mode5_resume_snapshot(session_id)
@@ -1518,6 +1571,54 @@ async def mode5_continue_generation_ep(session_id: str):
     task = asyncio.create_task(_run_mode5_resume_task(session_id, queue, control))
     _sessions[session_id]["task"] = task
     return {"session_id": session_id, "continuing": True}
+
+
+@app.post("/api/mode5/topic-ideas")
+async def mode5_topic_ideas_ep(body: Mode5TopicIdeasBody):
+    from agents.mode5_topic_ideas import suggest_mode5_topics
+
+    try:
+        ideas = await suggest_mode5_topics(body.sub_mode, body.limit, body.seed)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        logger.exception("[API /mode5/topic-ideas] failed")
+        raise HTTPException(500, f"Mode 5 ideas failed: {e}") from e
+    return {
+        "sub_mode": body.sub_mode,
+        "seed": body.seed,
+        "ideas": ideas,
+    }
+
+
+@app.get("/api/mode5/topic-ideas")
+async def mode5_topic_ideas_cached_ep(
+    sub_mode: str = Query(...),
+    limit: int = Query(8),
+):
+    from agents.mode5_topic_ideas import get_cached_mode5_topics
+
+    try:
+        ideas = get_cached_mode5_topics(sub_mode, limit)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {
+        "sub_mode": sub_mode,
+        "ideas": ideas,
+    }
+
+
+@app.post("/api/mode5/topic-ideas/consume")
+async def mode5_topic_ideas_consume_ep(body: Mode5IdeaStatusBody):
+    from agents.mode5_topic_ideas import update_mode5_idea_status
+
+    try:
+        ok = update_mode5_idea_status(body.idea_id, body.status)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    if not ok:
+        raise HTTPException(404, "idea_id not found")
+    return {"idea_id": body.idea_id, "status": body.status, "updated": True}
 
 
 @app.post("/api/mode13/{session_id}/assemble")
@@ -2254,6 +2355,12 @@ async def youtube_upload_short(body: YouTubeUploadBody):
             tags=tags,
             privacy_status=body.privacy_status,
         )
+    except TimeoutError as e:
+        logger.error(f"[YouTube] upload timeout: {e}")
+        raise HTTPException(
+            504,
+            "Загрузка в YouTube зависла по таймауту. Повтори попытку; если повторяется, переподключи OAuth и проверь сеть.",
+        ) from e
     except FileNotFoundError as e:
         raise HTTPException(404, str(e)) from e
     except HttpError as e:
@@ -2261,6 +2368,11 @@ async def youtube_upload_short(body: YouTubeUploadBody):
         logger.error(f"[YouTube] upload HttpError: {msg}")
         raise HTTPException(502, f"YouTube API: {msg}") from e
     except Exception as e:
+        if youtube_direct._is_transient_network_error(e):
+            raise HTTPException(
+                503,
+                "Временная сетевая ошибка при обращении к YouTube API (DNS/соединение). Повтори попытку через несколько секунд.",
+            ) from e
         logger.exception(f"[YouTube] upload failed: {e}")
         raise HTTPException(500, str(e)) from e
 
