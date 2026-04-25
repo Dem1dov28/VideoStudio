@@ -11,11 +11,13 @@ from modes.mode13.pipeline import (
 def test_mode13_hard_rules_suffix_horizontal():
     s = _mode13_hard_rules_suffix(output_format="horizontal")
     assert "Hard rules (every frame)" in s
-    assert "Horizontal 16:9" in s
+    assert "Horizontal widescreen" in s
     assert "All-ages only" in s
     assert s.count("All-ages only") == 1
-    assert "no collage" in s.lower()
+    assert "single uninterrupted frame" in s.lower()
     assert "table-with-book" in s.lower()
+    assert "16:9" not in s
+    assert "9:16" not in s
 
 
 def test_compose_image_prompt_includes_hard_rules_once():
@@ -31,6 +33,8 @@ def test_compose_image_prompt_includes_hard_rules_once():
     assert rules in out
     assert out.rsplit("\n\n", 1)[-1] == rules
     assert "Infer the IMPLIED ERA" in out
+    assert "16:9" not in out
+    assert "9:16" not in out
 
 
 def test_compose_with_visual_bible_custom_rules():
@@ -61,7 +65,7 @@ def test_compose_longform_flex_skips_extra_scene_rules_block():
     assert "Show one concrete scene from the spoken episode, not a symbolic collage" not in out
     assert out.count("All-ages only") == 1
     assert "exactly one dominant full-frame scene" in out
-    assert "Never center the composition on a book-on-table trope" in out
+    assert "No book-on-table hero shot" in out
 
 
 def test_fastgen_no_false_historical_lock_on_modern_self_help_copy():
@@ -78,3 +82,21 @@ def test_fastgen_still_adds_historical_lock_for_medieval_topic():
     p = "16:9 illustration of a medieval castle at dawn, stone walls, torches, no text."
     full = prepare_fastgen_prompt_for_ui(p)
     assert "AUTHENTIC HISTORICAL WORLD" in full
+
+
+def test_fastgen_enforces_single_full_frame_scene_for_all_modes():
+    p = "Stylized editorial portrait, dramatic light, no text."
+    full = prepare_fastgen_prompt_for_ui(p)
+    low = full.lower()
+    assert "hard visual override" in low
+    assert "one dominant full-frame image only" in low
+    assert "single uninterrupted scene in one frame" in low
+
+
+def test_fastgen_strips_explicit_collage_gallery_terms_from_user_prompt():
+    p = "Create a collage grid of 9 photos like a gallery carousel, cinematic."
+    full = prepare_fastgen_prompt_for_ui(p)
+    first_block = full.split("\n\n", 1)[0].lower()
+    assert "collage" not in first_block
+    assert "gallery" not in first_block
+    assert "carousel" not in first_block

@@ -189,7 +189,8 @@ def _merge_v4_request_body(body: dict[str, Any]) -> dict[str, Any]:
 def _normalize_google_fx_image_model() -> str:
     """
     FASTGEN_MODEL как в UI (value GEM_PIX_2 или подпись «Nano Banana Pro - Flow»)
-    → enum v2/v4 Flow: GEM_PIX_2 | IMAGEN_3_5 | NARWHAL (как в Playwright _select_ui_model).
+    → enum v2/v4 Flow: GEM_PIX_2 | NARWHAL.
+    IMAGEN_* intentionally disabled: forced fallback to GEM_PIX_2.
     """
     raw = (getattr(settings, "fastgen_model", None) or "GEM_PIX_2").strip()
     if not raw:
@@ -198,13 +199,27 @@ def _normalize_google_fx_image_model() -> str:
     if "NARWHAL" in compact or "BANANA_2" in compact or "NANO_BANANA_2" in compact:
         return "NARWHAL"
     if "IMAGEN" in compact or "IMAGEN4" in compact or "IMAGEN_4" in compact:
-        return "IMAGEN_3_5"
+        logger.warning("[FastGen HTTP] IMAGEN_* is disabled for images; forcing GEM_PIX_2")
+        return "GEM_PIX_2"
     if "GEM_PIX" in compact or "PIX_2" in compact or ("NANO" in compact and "PRO" in compact):
         return "GEM_PIX_2"
     u = raw.upper().replace(" ", "").replace("_", "")
     if u in ("GEMPIX2", "GEM_PIX_2"):
         return "GEM_PIX_2"
     return "GEM_PIX_2"
+
+
+def _resolve_image_model_for_prompt(prompt: str) -> str:
+    """
+    Mode5 (all submodes) must use GEM_PIX_2 (Nano Banana Pro - Flow) for v2 images.
+    We enforce this by pipeline mode and by explicit mode5 guard marker in prompt.
+    """
+    low = (prompt or "").lower()
+    if str(getattr(settings, "pipeline_mode", "") or "").strip().lower() == "mode5":
+        return "GEM_PIX_2"
+    if "hard override for mode5" in low or "mode5 sequence" in low or "for mode5" in low:
+        return "GEM_PIX_2"
+    return _normalize_google_fx_image_model()
 
 
 def _mime_for_path(path: Path) -> str:
@@ -277,7 +292,7 @@ def _v2_image_body_generate(prompt: str) -> dict[str, Any]:
     params: dict[str, Any] = {
         "prompt": prompt,
         "aspect_ratio": _image_aspect_enum(),
-        "model": _normalize_google_fx_image_model(),
+        "model": _resolve_image_model_for_prompt(prompt),
     }
     return {
         "provider": getattr(settings, "fastgen_http_media_provider", None) or _PROVIDER,
@@ -291,7 +306,7 @@ def _v2_image_body_transform(prompt: str, input_image: str) -> dict[str, Any]:
         "prompt": prompt,
         "input_image": input_image,
         "aspect_ratio": _image_aspect_enum(),
-        "model": _normalize_google_fx_image_model(),
+        "model": _resolve_image_model_for_prompt(prompt),
     }
     return {
         "provider": getattr(settings, "fastgen_http_media_provider", None) or _PROVIDER,
@@ -308,7 +323,7 @@ def _v2_image_body_remix(prompt: str, refs: list[str]) -> dict[str, Any]:
         "prompt": prompt,
         "reference_images": ref_objs,
         "aspect_ratio": _image_aspect_enum(),
-        "model": _normalize_google_fx_image_model(),
+        "model": _resolve_image_model_for_prompt(prompt),
     }
     return {
         "provider": getattr(settings, "fastgen_http_media_provider", None) or _PROVIDER,
@@ -518,8 +533,9 @@ async def _generate_one_video_v2(
     keyframes: bool,
     start_frame: Path | None,
     end_frame: Path | None,
+    video_aspect_ratio: str | None = None,
 ) -> Path | None:
-    aspect = _video_aspect_enum(None)
+    aspect = _video_aspect_enum(video_aspect_ratio)
     params_base: dict[str, Any] = {"prompt": full_prompt, "aspect_ratio": aspect}
     params = _merge_into_parameters(params_base)
     provider = getattr(settings, "fastgen_http_media_provider", None) or _PROVIDER
@@ -567,10 +583,11 @@ async def _generate_one_video(
     keyframes: bool = False,
     start_frame: Path | None = None,
     end_frame: Path | None = None,
+    video_aspect_ratio: str | None = None,
 ) -> Path | None:
     full_prompt = prepare_fastgen_prompt_for_ui(prompt)
-    aspect = _video_aspect_enum(None)
-    aspect_short = _video_aspect_v4_short(None)
+    aspect = _video_aspect_enum(video_aspect_ratio)
+    aspect_short = _video_aspect_v4_short(video_aspect_ratio)
     out = output_dir / f"clip_{index:03d}.mp4"
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -585,6 +602,7 @@ async def _generate_one_video(
             keyframes=keyframes,
             start_frame=start_frame,
             end_frame=end_frame,
+            video_aspect_ratio=video_aspect_ratio,
         )
 
     # ── v4: keyframes (Flow) ───────────────────────────────────────────────
@@ -1033,6 +1051,8 @@ async def generate_video_from_keyframes(
     start_frame_path: Path,
     end_frame_path: Path,
     index: int = 0,
+    *,
+    video_aspect_ratio: str | None = None,
 ) -> Path | None:
     _require_base()
     if not _api_key():
@@ -1050,4 +1070,5 @@ async def generate_video_from_keyframes(
             keyframes=True,
             start_frame=Path(start_frame_path),
             end_frame=Path(end_frame_path),
+            video_aspect_ratio=video_aspect_ratio,
         )

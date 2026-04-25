@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import re
+
 from config import settings
 
 # К fast-gen.ai: цензура «известные люди» — не подставляем имена, только визуальное описание.
@@ -20,6 +22,22 @@ _FASTGEN_HISTORICAL_LOCK_SUFFIX = (
     "Exclude all contemporary technology, office-like layouts, synthetic materials, electrical devices, and modern interior design. "
     "If people are reading, writing, teaching, trading, or planning, show parchment, scrolls, quills, wooden tables, "
     "stone interiors, oil lamps, and hand tools only."
+)
+
+_MULTI_IMAGE_BAN_PATTERNS = (
+    r"\bcollage\b",
+    r"\bcarousel\b",
+    r"\bgallery\b",
+    r"\bcontact[\s-]?sheet\b",
+    r"\b(?:multi|multiple)[-\s]?(?:panel|photo|image|frame|picture)s?\b",
+    r"\b(?:grid|mosaic)\b.{0,40}\b(?:photo|image|picture|frame)s?\b",
+    r"\b(?:photo|image|picture|frame)\s+grid\b",
+    r"\b9[\s-]?(?:photo|image|frame|picture)s?\b",
+)
+
+_FASTGEN_SINGLE_IMAGE_ENFORCER_SUFFIX = (
+    "Hard visual override: one dominant full-frame image only. "
+    "Use a single uninterrupted scene in one frame; avoid any tiled, segmented, or multi-view composition."
 )
 
 _HISTORICAL_HINTS = (
@@ -87,9 +105,13 @@ def _looks_historical_prompt(text: str) -> bool:
 def prepare_fastgen_prompt_for_ui(user_prompt: str) -> str:
     """Все текстовые промпты в FastGen (картинка и видео) проходят через это."""
     body = (user_prompt or "").strip()
+    if body:
+        for pattern in _MULTI_IMAGE_BAN_PATTERNS:
+            body = re.sub(pattern, " ", body, flags=re.IGNORECASE)
+        body = re.sub(r"\s+", " ", body).strip(" ,.;:-")
     if not body:
-        return _FASTGEN_NO_NAMES_SUFFIX
-    suffixes = [_FASTGEN_NO_NAMES_SUFFIX]
+        return "\n\n".join((_FASTGEN_SINGLE_IMAGE_ENFORCER_SUFFIX, _FASTGEN_NO_NAMES_SUFFIX))
+    suffixes = [_FASTGEN_SINGLE_IMAGE_ENFORCER_SUFFIX, _FASTGEN_NO_NAMES_SUFFIX]
     if _looks_historical_prompt(body):
         suffixes.append(_FASTGEN_HISTORICAL_LOCK_SUFFIX)
     return f"{body}\n\n" + "\n\n".join(suffixes)

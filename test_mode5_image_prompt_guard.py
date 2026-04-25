@@ -19,6 +19,7 @@ def test_mode5_prompt_guard_is_always_appended_even_when_not_flagged():
     out = _sanitize_mode5_image_prompt(raw)
     low = out.lower()
     assert "hard override for mode5" in low
+    assert "no text/ui/logos/watermarks in frame" in low
     assert "single traveler walking near the river" in low
 
 

@@ -7,6 +7,12 @@ from unittest.mock import patch
 
 
 class Mode5UnwrittenChapterTests(unittest.TestCase):
+    def test_mode5_output_format_defaults_to_horizontal(self):
+        from modes.mode5 import pipeline as mode5_pipeline
+
+        with patch.object(mode5_pipeline.settings, "mode5_video_format", None):
+            self.assertEqual(mode5_pipeline._mode5_output_format(), "horizontal")
+
     def test_regenerate_mode5_image_preserves_unwritten_block_anchors(self):
         from modes.mode5 import pipeline as mode5_pipeline
 
@@ -70,6 +76,61 @@ class Mode5UnwrittenChapterTests(unittest.TestCase):
             "Segment meaning:\nA clerk notices one missing page in the file.",
             captured["segment_text"],
         )
+
+    def test_unwritten_intro_video_forces_horizontal_aspect(self):
+        from modes.mode5 import pipeline as mode5_pipeline
+
+        plan = {
+            "sub_mode": "unwritten_chapter",
+            "style_suffix": "archival documentary style",
+            "chunks": [
+                {
+                    "index": 0,
+                    "segments": [
+                        {
+                            "s": 0,
+                            "text": "Intro segment",
+                            "image_prompt": "muted archive room",
+                            "image": "clips/mode5/img_c0_s0.jpg",
+                            "audio": "clips/mode5/seg_c0_s0.wav",
+                        }
+                    ],
+                }
+            ],
+        }
+        captured: dict[str, str] = {}
+
+        async def fake_generate_video_from_keyframes(*args, **kwargs):
+            captured["video_aspect_ratio"] = str(kwargs.get("video_aspect_ratio"))
+            output_dir = kwargs["output_dir"]
+            out = output_dir / "clip_000.mp4"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"mp4")
+            return out
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            session_dir = Path(tmp_dir)
+            img = session_dir / "clips/mode5/img_c0_s0.jpg"
+            wav = session_dir / "clips/mode5/seg_c0_s0.wav"
+            img.parent.mkdir(parents=True, exist_ok=True)
+            img.write_bytes(b"jpg")
+            wav.write_bytes(b"wav")
+
+            with (
+                patch.object(mode5_pipeline, "_session_dir", side_effect=lambda _sid: session_dir),
+                patch.object(mode5_pipeline.settings, "fastgen_http_base_url", "https://fast-gen.ai"),
+                patch.object(mode5_pipeline.settings, "mode5_video_format", "horizontal"),
+                patch(
+                    "agents.content_generator.fastgen_http.generate_video_from_keyframes",
+                    side_effect=fake_generate_video_from_keyframes,
+                ),
+            ):
+                asyncio.run(mode5_pipeline._ensure_mode5_looped_intro_video("sid", plan, force=True))
+
+        seg0 = plan["chunks"][0]["segments"][0]
+        self.assertEqual(captured.get("video_aspect_ratio"), "16:9")
+        self.assertEqual(seg0.get("asset_type"), "video")
+        self.assertTrue(str(seg0.get("video") or "").endswith("intro_loop_c0_s0.mp4"))
 
 
 if __name__ == "__main__":

@@ -144,8 +144,6 @@ SEG_SEC_DEFAULT = 15
 _WORDS_PER_MIN = {"ru": 135.0, "en": 150.0}
 _MIN_CHUNK_TEXT_LEN = 80
 _MIN_CHUNK_TEXT_LEN_FACTS50 = 40
-_MODE5_OUTPUT_FORMAT = "horizontal"
-_MODE5_IMAGE_ASPECT_RATIO = "16:9"
 _MODE5_VARIATION_SHOTS = (
     "wide establishing shot",
     "medium environmental shot",
@@ -178,12 +176,21 @@ _MODE5_PROMPT_BAN_PATTERNS = (
     r"\bbook on (?:a )?desk\b",
 )
 _MODE5_PROMPT_GUARD = (
-    "Hard override for mode5: render exactly one dominant full-frame scene with a single hero composition "
-    "(no collage, no gallery wall, no contact sheet, no split panel, no carousel, no mini-photo grid). "
-    "Do not use any reading trope: no open book, no page spread, no manuscript focus, no staged desk/table-with-book setup. "
-    "Keep one locked series art style for this video, but make each frame compositionally distinct from neighboring frames "
-    "(different camera angle, framing, subject arrangement, and location details)."
+    "Hard override for mode5: one dominant full-frame scene only. "
+    "Use a single uninterrupted composition in one frame; avoid tiled or segmented layouts. "
+    "No reading trope (open book, page spread, manuscript, desk-with-book). "
+    "No text/UI/logos/watermarks in frame. "
+    "Keep one series style, but vary camera angle/framing/subject setup between adjacent frames."
 )
+
+
+def _mode5_output_format() -> str:
+    fmt = str(getattr(settings, "mode5_video_format", "horizontal") or "horizontal").strip().lower()
+    return "horizontal" if fmt == "horizontal" else "vertical"
+
+
+def _mode5_image_aspect_ratio() -> str:
+    return "16:9" if _mode5_output_format() == "horizontal" else "9:16"
 
 
 def _mode5_parallel_images_cap() -> int:
@@ -245,7 +252,7 @@ def _mode5_dir(session_id: str) -> Path:
     return d
 
 
-def _write_mode5_placeholder_image(path: Path, *, aspect_ratio: str = _MODE5_IMAGE_ASPECT_RATIO) -> None:
+def _write_mode5_placeholder_image(path: Path, *, aspect_ratio: str | None = None) -> None:
     """
     Last-resort fallback: write a neutral placeholder frame so one failed image does not
     abort the entire already-generated pipeline.
@@ -253,7 +260,8 @@ def _write_mode5_placeholder_image(path: Path, *, aspect_ratio: str = _MODE5_IMA
     ff = resolve_ffmpeg_executable()
     if not ff:
         raise RuntimeError("ffmpeg not found for mode5 placeholder image fallback")
-    size = "1280x720" if str(aspect_ratio).strip() == "16:9" else "720x1280"
+    ratio = str(aspect_ratio or _mode5_image_aspect_ratio()).strip()
+    size = "1280x720" if ratio == "16:9" else "720x1280"
     path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         ff,
@@ -916,7 +924,7 @@ async def _generate_chunk_images(
         prompt = await _build_image_prompt_async(
             seg_prompt_text,
             style_suffix,
-            output_format=_MODE5_OUTPUT_FORMAT,
+            output_format=_mode5_output_format(),
             variation_hint=_segment_variation_hint(seg_idx, seg),
             extra_suffix="Fresh alternative composition, same art direction." if refresh_all else "",
             visual_policy=visual_policy,
@@ -927,7 +935,7 @@ async def _generate_chunk_images(
         img_path = session_root / seg["image"]
         async with sem:
             try:
-                await _generate_one_image(prompt, img_path, aspect_ratio=_MODE5_IMAGE_ASPECT_RATIO)
+                await _generate_one_image(prompt, img_path, aspect_ratio=_mode5_image_aspect_ratio())
                 seg["image_fallback"] = False
                 seg.pop("image_fallback_reason", None)
                 return seg, None
@@ -967,7 +975,7 @@ async def _generate_chunk_images(
                     shutil.copy2(fallback_src, target)
                     seg["image_fallback_reason"] = f"copied fallback: {type(err).__name__}"
                 else:
-                    _write_mode5_placeholder_image(target, aspect_ratio=_MODE5_IMAGE_ASPECT_RATIO)
+                    _write_mode5_placeholder_image(target, aspect_ratio=_mode5_image_aspect_ratio())
                     seg["image_fallback_reason"] = f"placeholder fallback: {type(err).__name__}"
                 seg["image_fallback"] = True
                 logger.warning(
@@ -1087,6 +1095,7 @@ async def _ensure_mode5_looped_intro_video(
             start_frame_path=img_path,
             end_frame_path=img_path,
             index=0,
+            video_aspect_ratio=_mode5_image_aspect_ratio(),
         )
         resolved = Path(video_path) if video_path else None
         if resolved and resolved.is_file():
@@ -1231,12 +1240,12 @@ async def _generate_mode5_sleep_tail_theme_images(
             prompt = await _build_image_prompt_async(
                 scene_hint,
                 style,
-                output_format=_MODE5_OUTPUT_FORMAT,
+                output_format=_mode5_output_format(),
                 extra_suffix="Gentle atmosphere for long rest viewing; avoid harsh contrast.",
                 visual_policy="facts50",
             )
             prompt = _sanitize_mode5_image_prompt(prompt)
-            await _generate_one_image(prompt, dest, aspect_ratio=_MODE5_IMAGE_ASPECT_RATIO)
+            await _generate_one_image(prompt, dest, aspect_ratio=_mode5_image_aspect_ratio())
         except Exception as e:
             logger.warning(f"[Mode5] sleep tail theme image {idx} failed: {e}")
         if dest.is_file():
@@ -1777,7 +1786,7 @@ async def run_mode5_pipeline(
             topic_input,
             list(facts_outline or []),
             script_clean,
-            output_format=_MODE5_OUTPUT_FORMAT,
+            output_format=_mode5_output_format(),
             control=control,
         )
         visual_bible = await derive_mode5_visual_bible(
@@ -1796,11 +1805,15 @@ async def run_mode5_pipeline(
             locked_series_style=None,
         )
         if visual_bible and (str(visual_bible.get("series_style") or "").strip()):
-            style_suffix = str(visual_bible["series_style"]).strip() + mode5_art_direction_tail_horizontal()
+            style_suffix = str(visual_bible["series_style"]).strip()
+            if _mode5_output_format() == "horizontal":
+                style_suffix += mode5_art_direction_tail_horizontal()
+            else:
+                style_suffix += " Maintain consistent vertical full-frame composition across the series."
         else:
             style_suffix = await _derive_style_suffix(
                 style_sample,
-                output_format=_MODE5_OUTPUT_FORMAT,
+                output_format=_mode5_output_format(),
                 visual_policy=_mode5_visual_policy(sm),
             )
             if not visual_bible or not str(visual_bible.get("frame_rules") or "").strip():
@@ -2466,7 +2479,7 @@ async def regenerate_mode5_image(
     prompt = await _build_image_prompt_async(
         seg_prompt_text,
         locked_style,
-        output_format=_MODE5_OUTPUT_FORMAT,
+        output_format=_mode5_output_format(),
         variation_hint=(
             f"Variation target for this regenerated frame: use a new camera angle and composition "
             f"compared to neighboring segments, while preserving the same global style."
@@ -2479,7 +2492,7 @@ async def regenerate_mode5_image(
     seg["image_prompt"] = prompt
     session_root = _session_dir(session_id)
     img_path = session_root / seg["image"]
-    await _generate_one_image(prompt, img_path, aspect_ratio=_MODE5_IMAGE_ASPECT_RATIO)
+    await _generate_one_image(prompt, img_path, aspect_ratio=_mode5_image_aspect_ratio())
     if _is_global_intro_segment(chunk_index, segment_index):
         await _ensure_mode5_looped_intro_video(session_id, plan, force=True)
     loop = asyncio.get_event_loop()

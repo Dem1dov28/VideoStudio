@@ -442,8 +442,8 @@ class Settings(BaseSettings):
 
     @property
     def mode5_video_resolution(self) -> tuple[int, int]:
-        """Разрешение mode 5 (по умолчанию vertical, как VIDEO_FORMAT)."""
-        fmt = getattr(self, "mode5_video_format", "vertical").strip().lower()
+        """Разрешение рендера mode 5 (по умолчанию horizontal)."""
+        fmt = getattr(self, "mode5_video_format", "horizontal").strip().lower()
         if fmt == "vertical":
             return (720, 1280) if self.video_quality == "720" else (1080, 1920)
         return (1280, 720) if self.video_quality == "720" else (1920, 1080)

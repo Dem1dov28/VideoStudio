@@ -40,11 +40,11 @@ VISUAL_POLICY_LONGFORM_FLEX = "longform_flex"
 
 _FALLBACK_STYLE = (
     "Unified cinematic digital illustration, cool teal and warm amber palette, soft diffused light, "
-    "vertical 9:16 portrait composition, painterly detail, editorial clarity."
+    "vertical portrait composition, painterly detail, editorial clarity."
 )
 _FALLBACK_STYLE_FASTGEN = (
     "Unified cinematic digital illustration, cool teal and warm amber palette, soft diffused light, "
-    "horizontal 16:9 landscape composition, painterly detail, editorial clarity."
+    "horizontal widescreen landscape composition, painterly detail, editorial clarity."
 )
 
 _NEUTRAL_SAFE_VISUAL_FALLBACK = (
@@ -193,17 +193,18 @@ def _mode13_hard_rules_suffix(*, output_format: str | None = None) -> str:
     """Единый блок жёстких ограничений — один раз в конце финального image prompt (без дублирования в intro/style tail)."""
     fmt = _normalize_output_format(output_format, default=settings.mode13_video_format)
     geo = (
-        "Horizontal 16:9 landscape format (not portrait)."
+        "Horizontal widescreen landscape format (not portrait)."
         if fmt == "horizontal"
-        else "Vertical 9:16 portrait format for short-form video."
+        else "Vertical portrait format for short-form video."
     )
     return (
         f"Hard rules (every frame): {geo} "
-        "All-ages only. No readable text, letters, captions, subtitles, UI, watermarks, or logos. "
-        "No celebrity or politician likeness. Avoid compositions centered on open books, manuscript pages, "
-        "written scrolls, street signs, or screens meant to display words. "
-        "One dominant scene only: no collage, no gallery wall, no contact sheet, no multi-panel split, no carousel of mini-photos. "
-        "Do not stage a reading desk or table-with-book as the central composition; prioritize lived environments, people, and actions."
+        "All-ages only. No readable text/UI/logos/watermarks. "
+        "No celebrity or politician likeness. "
+        "No text-bearing focal props (book pages, scrolls, signs, screens). "
+        "One dominant scene only: single uninterrupted frame, no tiled or segmented layout. "
+        "Treat any technical wording as metadata only, never as in-image typography. "
+        "Avoid table-with-book as hero composition; prioritize lived environments, people, and actions."
     )
 
 
@@ -225,7 +226,7 @@ def _compose_image_prompt(
     era_rules = (custom_rules + " ") if custom_rules else f"{_FACTS50_ERA_FLEX_RULES} "
     if fmt == "horizontal":
         intro = (
-            "16:9 single illustration — one concrete filmable scene from this spoken slice; "
+            "Single horizontal widescreen illustration — one concrete filmable scene from this spoken slice; "
             "not a poster, diagram, or infographic, and not a surface meant mainly to display words. "
         )
     else:
@@ -233,7 +234,7 @@ def _compose_image_prompt(
     scene_rules = ""
     if not (custom_rules or use_flex_era):
         scene_rules = (
-            "Show one concrete scene from the spoken episode, not a symbolic collage. "
+            "Show one concrete scene from the spoken episode. "
             "Prioritize the most filmable location, action, characters, and mood from this exact moment. "
         )
     book_night_rules = ""
@@ -254,12 +255,9 @@ def _compose_image_prompt(
     mode5_global_rules = ""
     if is_mode5_policy:
         mode5_global_rules = (
-            "For this long-form mode5 sequence, lock one coherent visual language across all frames for this single video "
-            "(same palette family, rendering style, and lighting logic). "
-            "Each frame must depict exactly one dominant full-frame scene, never a collage, gallery, contact sheet, split panel, or mini-photo grid. "
-            "Never center the composition on a book-on-table trope: no open book on desk, no staged reading table, no page spread hero shot. "
-            "Prefer varied lived scenes inferred from this exact segment meaning, and avoid repeating near-identical framing "
-            "or subject setup in adjacent frames."
+            "For this long-form mode5 sequence, keep one coherent visual language (palette/rendering/lighting) across frames. "
+            "Each frame must be a single dominant full-frame scene with uninterrupted composition. "
+            "No book-on-table hero shot. Vary framing and subject setup across adjacent frames."
         )
     core = (
         f"{intro}"
@@ -602,9 +600,9 @@ async def _derive_style_suffix(
     try:
         llm = make_llm(temperature=0.35)
         framing = (
-            "Frames are horizontal 16:9 landscape (not portrait)."
+            "Frames are horizontal widescreen landscape (not portrait)."
             if fmt == "horizontal"
-            else "Frames are vertical 9:16 portrait for short-form video."
+            else "Frames are vertical portrait for short-form video."
         )
         sys = SystemMessage(
             content=(
