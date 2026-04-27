@@ -92,8 +92,7 @@ RULES:
 - Total per subchapter: 450–800 words. Be substantial and detailed.
 - Calm, meditative documentary tone — story for falling asleep
 - Plain text only, no HTML/Markdown. Historical accuracy: NO invented facts
-- image_prompt: English, [Subject]+[Style]+[Lighting]+"horizontal 16:9 landscape, 4K photorealistic"
-- Use image_prompt ONLY where needs_new_image=true (first segment of subchapter)."""
+- Do not generate image prompts. The visual pipeline builds image prompts later."""
 
 COHERENCE_SYSTEM = """You are a COHERENCE CHECKER for long-form documentary scripts.
 Check: smooth transitions, no contradictions, references to previous content are correct.
@@ -217,12 +216,12 @@ Previous narration (for continuity, end naturally):
 Write 3–5 segments for this subchapter (150–200 words EACH — 6-hour sleep story, be substantial). Output JSON:
 {{
   "segments": [
-    {{ "narration_text": "...", "image_prompt": "..." or null }},
+    {{ "narration_text": "..." }},
     ...
   ]
 }}
 
-Language: {lang_note}. Plain text only. First segment of subchapter with needs_new_image=true MUST have image_prompt.""")
+Language: {lang_note}. Plain text only.""")
     ])
 
     chain = prompt | llm | StrOutputParser()
@@ -247,23 +246,17 @@ Language: {lang_note}. Plain text only. First segment of subchapter with needs_n
         data = json.loads(text)
     except json.JSONDecodeError as e:
         logger.warning(f"[ContentAgent] sub {subchapter['id']} JSON parse error: {e}, using raw")
-        img = f"Documentary scene for {subchapter['title']}, cinematic, horizontal 16:9 landscape, 4K photorealistic" if subchapter.get("needs_new_image") else None
-        data = {"segments": [{"narration_text": text, "image_prompt": img}]}
+        data = {"segments": [{"narration_text": text}]}
 
     new_segments = data.get("segments") or []
     for i, s in enumerate(new_segments):
         nt = (s.get("narration_text") or s.get("text") or "").strip()
         if not nt:
             continue
-        img = s.get("image_prompt")
-        if img is not None:
-            img = str(img).strip() or None
-        if subchapter.get("needs_new_image") and i == 0 and not img:
-            img = f"Documentary scene for {subchapter['title']}, cinematic, horizontal 16:9 landscape, 4K photorealistic"
         segments.append({
             "index": len(segments) + 1,
             "narration_text": nt,
-            "image_prompt": img,
+            "image_prompt": None,
         })
 
     logger.info(f"[ContentAgent] sub {subchapter['id']}: +{len([s for s in new_segments if (s.get('narration_text') or s.get('text', '')).strip()])} segments")
@@ -400,12 +393,6 @@ async def run_multi_agent_scenario(
 
     for i, s in enumerate(segments):
         s["index"] = i + 1
-
-    if not segments[0].get("image_prompt"):
-        segments[0]["image_prompt"] = (
-            f"Documentary style illustration of {topic}, "
-            "cinematic lighting, horizontal 16:9 landscape, 4K photorealistic"
-        )
 
     logger.success(f"[Mode5 Multi-Agent] Scenario: {len(segments)} segments, "
                   f"{sum(1 for s in segments if s.get('image_prompt'))} image points")

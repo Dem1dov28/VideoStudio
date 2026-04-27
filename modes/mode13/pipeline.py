@@ -217,13 +217,7 @@ def _compose_image_prompt(
     visual_bible: dict[str, Any] | None = None,
 ) -> str:
     fmt = _normalize_output_format(output_format, default=settings.mode13_video_format)
-    pol = (visual_policy or "").strip().lower()
-    custom_rules = ""
-    if visual_bible and isinstance(visual_bible, dict):
-        custom_rules = str(visual_bible.get("frame_rules") or "").strip()
-    use_flex_era = pol in ("facts50", VISUAL_POLICY_LONGFORM_FLEX, "book_night", "unwritten_chapter", "mode5")
-    is_mode5_policy = pol in ("facts50", VISUAL_POLICY_LONGFORM_FLEX, "book_night", "unwritten_chapter", "mode5")
-    era_rules = (custom_rules + " ") if custom_rules else f"{_FACTS50_ERA_FLEX_RULES} "
+    era_rules = f"{_FACTS50_ERA_FLEX_RULES} "
     if fmt == "horizontal":
         intro = (
             "Single horizontal widescreen illustration — one concrete filmable scene from this spoken slice; "
@@ -231,41 +225,15 @@ def _compose_image_prompt(
         )
     else:
         intro = "Single full-frame illustration for a vertical video slide. "
-    scene_rules = ""
-    if not (custom_rules or use_flex_era):
-        scene_rules = (
-            "Show one concrete scene from the spoken episode. "
-            "Prioritize the most filmable location, action, characters, and mood from this exact moment. "
-        )
-    book_night_rules = ""
-    if pol == "book_night":
-        book_night_rules = (
-            "For bedtime book-summary narration, illustrate lived scenes, places, and people implied by the idea "
-            "(habits, conversations, work, routines, reflection) instead of any physical book object. "
-            "Never make an open book, page spread, library shelf, manuscript, scroll, or e-reader the subject. "
-            "Keep one cohesive series look across all frames: matching palette family, lighting mood, and lens feel. "
-        )
-    unwritten_rules = ""
-    if pol == "unwritten_chapter":
-        unwritten_rules = (
-            "For archival investigation narration, prioritize evidence-first documentary scenes: declassified folders, maps, "
-            "archive rooms, witness environments, briefing tables, period-accurate interiors, and concrete locations tied to the claim. "
-            "Muted dark palette, restrained realism, no flashy cinematic neon, no generic heroic posters, no anachronistic objects. "
-        )
-    mode5_global_rules = ""
-    if is_mode5_policy:
-        mode5_global_rules = (
-            "For this long-form mode5 sequence, keep one coherent visual language (palette/rendering/lighting) across frames. "
-            "Each frame must be a single dominant full-frame scene with uninterrupted composition. "
-            "No book-on-table hero shot. Vary framing and subject setup across adjacent frames."
-        )
+    scene_rules = (
+        "Show one concrete scene from the spoken episode. "
+        "Prioritize the most filmable location, action, characters, and mood from this exact moment. "
+    )
     core = (
         f"{intro}"
         f"{scene_rules}"
-        f"{book_night_rules}"
-        f"{unwritten_rules}"
-        f"{mode5_global_rules}"
         f"{era_rules}"
+        "Scene requirements: one primary subject, one visible action, one concrete environment, clear time-of-day or lighting cue. "
         f"Scene to illustrate: {concept_line}. "
         f"Art direction: {style_suffix}"
     ).strip()
@@ -283,6 +251,149 @@ def _fast_scene_concept_from_raw(raw: str) -> str:
     """Без LLM: короткая вставка для промпта (быстрее, слабее контроль «книга с текстом»)."""
     snippet = " ".join((raw or "").split())[:240]
     return f"Thematic illustrated scene for this spoken passage: {snippet}"
+
+
+_ABSTRACT_CONCEPT_WORDS = (
+    "symbolic",
+    "metaphor",
+    "metaphorical",
+    "conceptual",
+    "abstract",
+    "mysterious atmosphere",
+    "dramatic scene",
+    "moody visual",
+    "generic",
+)
+
+_ACTION_HINT_WORDS = (
+    "standing",
+    "walking",
+    "looking",
+    "holding",
+    "examining",
+    "speaking",
+    "sitting",
+    "crossing",
+    "opening",
+    "placing",
+    "pointing",
+    "reading",
+    "writing",
+    "watching",
+    "gathering",
+    "searching",
+    "working",
+    "разглядывает",
+    "идет",
+    "стоит",
+    "сидит",
+    "держит",
+)
+
+_LOCATION_HINT_WORDS = (
+    "room",
+    "street",
+    "office",
+    "home",
+    "archive",
+    "desk",
+    "table",
+    "map",
+    "lab",
+    "city",
+    "field",
+    "forest",
+    "shore",
+    "workshop",
+    "station",
+    "interior",
+    "courtyard",
+    "landscape",
+)
+
+
+def _visual_concept_quality_issues(concept: str, *, visual_policy: str) -> list[str]:
+    low = (concept or "").lower()
+    issues: list[str] = []
+    if len(low.strip()) < 32:
+        issues.append("too short")
+    if any(w in low for w in _ABSTRACT_CONCEPT_WORDS):
+        issues.append("too abstract")
+    if not any(w in low for w in _ACTION_HINT_WORDS):
+        issues.append("no clear action")
+    if not any(w in low for w in _LOCATION_HINT_WORDS):
+        issues.append("no concrete location")
+    if visual_policy == "book_night" and any(
+        w in low for w in ("book cover", "open book", "page spread", "library shelf", "reading table")
+    ):
+        issues.append("book object is hero")
+    return issues
+
+
+def _strip_abstract_visual_words(concept: str) -> str:
+    out = concept or ""
+    for word in _ABSTRACT_CONCEPT_WORDS:
+        out = re.sub(rf"\b{re.escape(word)}\b", "concrete", out, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", out).strip(" ,.;:-")
+
+
+async def _repair_visual_concept_if_needed(
+    concept: str,
+    *,
+    segment_text: str,
+    visual_policy: str,
+    series_scene_cue: str | None,
+) -> str:
+    pol = (visual_policy or "").strip().lower()
+    cleaned = _strip_abstract_visual_words(concept)
+    issues = _visual_concept_quality_issues(cleaned, visual_policy=pol)
+    if not issues:
+        return cleaned
+    try:
+        cue = (series_scene_cue or "").strip()
+        policy_rules = ""
+        if pol == "book_night":
+            policy_rules = (
+                "For book_night, choose a lived human scene from the idea, not books/pages/libraries as the subject. "
+            )
+        elif pol == "unwritten_chapter":
+            policy_rules = (
+                "For The Unwritten Chapter, choose an evidence-first archival-investigation scene. "
+            )
+        sys = SystemMessage(
+            content=(
+                "Rewrite a weak image concept into ONE concrete English scene phrase, max 42 words. "
+                "Keep the future final prompt's series style untouched; only improve subject/action/location/time. "
+                "Must include: one primary subject, one visible action, one concrete environment, and lighting/time-of-day. "
+                "Prefer literal filmable scene from the excerpt over symbolism. "
+                f"{policy_rules}"
+                "No readable text, no logos, no celebrity likeness, no markdown."
+            )
+        )
+        hum = HumanMessage(
+            content=(
+                f"Visual policy: {pol or 'default'}\n"
+                f"Director cue: {cue or '(none)'}\n"
+                f"Weak concept issues: {', '.join(issues)}\n"
+                f"Weak concept:\n{cleaned}\n\n"
+                f"Narration excerpt:\n{(segment_text or '')[:900]}\n\n"
+                "Return only the improved concept phrase."
+            )
+        )
+        llm = make_llm(temperature=0.22, max_tokens=220)
+        resp = await asyncio.wait_for(llm.ainvoke([sys, hum]), timeout=45.0)
+        fixed = (getattr(resp, "content", None) or "").strip().strip('"').strip("'")
+        fixed = _strip_abstract_visual_words(fixed)
+        if len(fixed) >= 24 and not _visual_concept_quality_issues(fixed, visual_policy=pol):
+            return fixed[:520]
+        logger.warning(f"[Mode13] visual concept fixer kept original; issues={issues}, fixed={fixed[:120]}")
+    except Exception as e:
+        logger.warning(f"[Mode13] visual concept fixer skipped: {e}")
+    if "no clear action" in issues:
+        cleaned = f"{cleaned}, a generic figure quietly examining the scene"
+    if "no concrete location" in issues:
+        cleaned = f"{cleaned}, inside a believable real-world environment"
+    return cleaned[:520]
 
 
 def _parse_numbered_scene_phrases(text: str, n: int) -> list[str] | None:
@@ -304,10 +415,30 @@ def _parse_numbered_scene_phrases(text: str, n: int) -> list[str] | None:
     return [found[i] for i in range(1, n + 1)]
 
 
-async def _narration_to_visual_scene_brief_facts50(raw: str, *, series_scene_cue: str | None = None) -> str:
+async def _narration_to_visual_scene_brief_facts50(
+    raw: str,
+    *,
+    series_scene_cue: str | None = None,
+    visual_policy: str = "facts50",
+) -> str:
     """Бриф кадра: эпоха/сеттинг из смысла (современный нон-фикш, офис, наука — без замка по умолчанию)."""
     try:
         llm = make_llm(temperature=0.32)
+        pol = (visual_policy or "").strip().lower()
+        mode_rules = ""
+        if pol == "book_night":
+            mode_rules = (
+                "This excerpt belongs to a calm long-form book-night summary. Prefer intimate contemporary "
+                "human scenes (habit in action, reflection moment, workplace/home routine, quiet conversation) "
+                "over broad generic stock visuals. "
+                "No book covers, open pages, library shelf hero shots, or reading-table compositions as subject. "
+            )
+        elif pol == "unwritten_chapter":
+            mode_rules = (
+                "This excerpt belongs to an archival investigation documentary. Prefer evidence-first scenes "
+                "(archive room, declassified folders, map table, witness environment, period-accurate location trace), "
+                "restrained documentary realism, and grounded investigative mood over abstract symbolism. "
+            )
         sys = SystemMessage(
             content=(
                 "You write ONE English phrase (max 40 words) for a single photorealistic illustration frame in an educational "
@@ -324,6 +455,7 @@ async def _narration_to_visual_scene_brief_facts50(raw: str, *, series_scene_cue
                 "Do NOT default to castles, knights, or medieval Europe when the fact is broadly modern. "
                 "Describe place, time of day, weather if outdoors, lighting, and key concrete objects; generic people as roles, not celebrity names. "
                 "Prefer literal filmable scenes over symbolism; avoid generic stock-like shots unrelated to this exact line. "
+                f"{mode_rules}"
                 "No books, scrolls, newspapers, screens with readable text as the main subject. "
                 "Output only the phrase, no quotes."
             )
@@ -429,6 +561,7 @@ async def _segment_text_to_concept_facts50(
     segment_text: str,
     *,
     series_scene_cue: str | None = None,
+    visual_policy: str = "facts50",
 ) -> str:
     raw = (segment_text or "").strip()[:900]
     if not raw:
@@ -437,7 +570,11 @@ async def _segment_text_to_concept_facts50(
         return await _llm_safe_visual_subject(raw)
     if bool(getattr(settings, "mode13_scene_brief_skip_llm", False)):
         return _fast_scene_concept_from_raw(raw)
-    return await _narration_to_visual_scene_brief_facts50(raw, series_scene_cue=series_scene_cue)
+    return await _narration_to_visual_scene_brief_facts50(
+        raw,
+        series_scene_cue=series_scene_cue,
+        visual_policy=visual_policy,
+    )
 
 
 async def _resolve_concepts_for_seg_work(
@@ -507,20 +644,19 @@ async def _build_image_prompt_async(
     visual_policy: str = "default",
     visual_bible: dict[str, Any] | None = None,
 ) -> str:
-    pol = (visual_policy or "").strip().lower()
-    cue = None
-    if visual_bible and isinstance(visual_bible, dict):
-        cue = (visual_bible.get("scene_cue") or "").strip() or None
-    if pol in ("facts50", VISUAL_POLICY_LONGFORM_FLEX, "unwritten_chapter"):
-        concept = await _segment_text_to_concept_facts50(segment_text, series_scene_cue=cue)
-    else:
-        concept = await _segment_text_to_concept(segment_text)
+    concept = await _segment_text_to_concept(segment_text)
+    concept = await _repair_visual_concept_if_needed(
+        concept,
+        segment_text=segment_text,
+        visual_policy="default",
+        series_scene_cue=None,
+    )
     body = _compose_image_prompt(
         concept,
         style_suffix,
         output_format=output_format,
-        visual_policy=visual_policy,
-        visual_bible=visual_bible,
+        visual_policy="default",
+        visual_bible=None,
     )
     parts = [body]
     vh = (variation_hint or "").strip()

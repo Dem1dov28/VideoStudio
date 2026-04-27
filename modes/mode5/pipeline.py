@@ -27,21 +27,25 @@ from agents.video_editor.tts import plain_text_for_voiceapi_tts, synthesize
 from agents.video_editor.whisper_timestamps import get_word_timestamps_from_audio_path
 from config import settings
 from modes.mode13.pipeline import (
-    VISUAL_POLICY_LONGFORM_FLEX,
-    _build_image_prompt_async,
-    _derive_style_suffix,
     _ffmpeg_concat,
-    _generate_one_image,
+    _generate_one_image as _generate_one_image_mode13,
     _text_for_window,
     _windows_for_duration,
 )
-from modes.mode13.visual_bible import derive_mode5_visual_bible, mode5_art_direction_tail_horizontal
-from modes.mode5.facts50_visual_style import derive_facts50_unified_style_suffix
+from modes.mode5.prompt_builder import (
+    build_mode5_image_prompt,
+    mode5_style_id_for_sub_mode,
+    mode5_style_lock_for_sub_mode,
+    normalize_mode5_sub_mode,
+)
 from modes.mode5.video_assembler import assemble_mode5_video
 from utils.ffmpeg_resolve import require_ffmpeg_or_raise, resolve_ffmpeg_executable
 from utils.wav_pcm import slice_wav_time_range
 
 MODE5_PLAN = "mode5_plan.json"
+
+# Жёсткий потолок параллельных image-gen для MODE5 (см. лимиты провайдера).
+MODE5_PARALLEL_IMAGES_HARD_MAX = 10
 
 MODE5_CKPT_STUB = "stub"
 MODE5_CKPT_AFTER_TTS = "after_tts"
@@ -68,20 +72,6 @@ def _touch_mode5_checkpoint(plan: dict[str, Any], stage: str, **extra: Any) -> N
     if extra:
         payload["extra"] = {k: v for k, v in extra.items() if v is not None}
     plan["pipeline_checkpoint"] = payload
-
-
-def _mode5_visual_policy(sub_mode: str | None) -> str:
-    sm = (sub_mode or "").strip().lower()
-    if sm == "facts50":
-        return "facts50"
-    if sm == "book_night":
-        return "book_night"
-    if sm == "unwritten_chapter":
-        return "unwritten_chapter"
-    if sm == "outline":
-        return VISUAL_POLICY_LONGFORM_FLEX
-    # Manual/bible must still obey strict mode5 single-scene and anti-book rules.
-    return "mode5"
 
 
 def _unwritten_chunk_anchor_by_index(outline_doc: dict[str, Any] | None) -> dict[int, dict[str, str]]:
@@ -117,73 +107,17 @@ def _unwritten_chunk_anchor_by_index(outline_doc: dict[str, Any] | None) -> dict
     return out
 
 
-def _chunk_block_prompt_prefix(chunk: dict[str, Any] | None, explicit: str = "") -> str:
-    prefix = str(explicit or "").strip()
-    if prefix:
-        return prefix[:1000]
-    if not isinstance(chunk, dict):
-        return ""
-    parts = []
-    chapter_title = str(chunk.get("chapter_title") or "").strip()
-    subchapter_title = str(chunk.get("subchapter_title") or "").strip()
-    evidence_anchor = str(chunk.get("evidence_anchor") or "").strip()
-    visual_anchor = str(chunk.get("visual_anchor") or "").strip()
-    human_stakes = str(chunk.get("human_stakes") or "").strip()
-    if chapter_title or subchapter_title:
-        label = " — ".join([x for x in (chapter_title, subchapter_title) if x])
-        parts.append(f"Block title: {label}")
-    if evidence_anchor:
-        parts.append(f"Evidence anchor: {evidence_anchor}")
-    if visual_anchor:
-        parts.append(f"Visual anchor: {visual_anchor}")
-    if human_stakes:
-        parts.append(f"Human stakes: {human_stakes}")
-    return " | ".join(parts)[:1000]
 CHUNK_SEC_DEFAULT = 300
 SEG_SEC_DEFAULT = 15
 _WORDS_PER_MIN = {"ru": 135.0, "en": 150.0}
 _MIN_CHUNK_TEXT_LEN = 80
 _MIN_CHUNK_TEXT_LEN_FACTS50 = 40
-_MODE5_VARIATION_SHOTS = (
-    "wide establishing shot",
-    "medium environmental shot",
-    "close-up detail shot",
-    "over-the-shoulder perspective",
-    "low-angle cinematic shot",
-    "high-angle overview",
-    "rule-of-thirds side composition",
-    "foreground-depth layered composition",
-)
 _MODE5_INTRO_ANIMATION_DESCRIPTION = (
     "Animation direction: seamless loop, identical opening and closing frame, "
     "very subtle cinematic ambient motion, gentle parallax drift, no sudden cuts, "
-    "no fast camera moves, no flicker, no morphing artifacts."
+    "no fast camera moves, no flicker, no morphing artifacts, "
+    "no rubbery face deformation, no object warping, no temporal ghosting."
 )
-_MODE5_PROMPT_BAN_PATTERNS = (
-    r"\bcollage\b",
-    r"\bcarousel\b",
-    r"\bgallery\b",
-    r"\bcontact[\s-]?sheet\b",
-    r"\b(?:multi|multiple)[-\s]?(?:panel|photo|image|frame|picture)s?\b",
-    r"\b(?:grid|mosaic)\b.{0,40}\b(?:photo|image|picture|frame)s?\b",
-    r"\bopen book\b",
-    r"\bpage spread\b",
-    r"\bmanuscript\b",
-    r"\blibrary shelf\b",
-    r"\breading desk\b",
-    r"\btable with book\b",
-    r"\bbook on (?:a )?table\b",
-    r"\bbook on (?:a )?desk\b",
-)
-_MODE5_PROMPT_GUARD = (
-    "Hard override for mode5: one dominant full-frame scene only. "
-    "Use a single uninterrupted composition in one frame; avoid tiled or segmented layouts. "
-    "No reading trope (open book, page spread, manuscript, desk-with-book). "
-    "No text/UI/logos/watermarks in frame. "
-    "Keep one series style, but vary camera angle/framing/subject setup between adjacent frames."
-)
-
-
 def _mode5_output_format() -> str:
     fmt = str(getattr(settings, "mode5_video_format", "horizontal") or "horizontal").strip().lower()
     return "horizontal" if fmt == "horizontal" else "vertical"
@@ -194,8 +128,11 @@ def _mode5_image_aspect_ratio() -> str:
 
 
 def _mode5_parallel_images_cap() -> int:
-    v = int(getattr(settings, "mode5_max_parallel_images", 10) or 10)
-    return max(1, min(32, v))
+    v = int(
+        getattr(settings, "mode5_max_parallel_images", MODE5_PARALLEL_IMAGES_HARD_MAX)
+        or MODE5_PARALLEL_IMAGES_HARD_MAX
+    )
+    return max(1, min(MODE5_PARALLEL_IMAGES_HARD_MAX, v))
 
 
 def _clamp_mode5_parallel_images(value: int | None) -> int:
@@ -210,6 +147,55 @@ def _clamp_mode5_parallel_images(value: int | None) -> int:
     return min(cap, v)
 
 
+def _normalize_mode5_image_backend(value: str | None) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"api", "playwright", "auto"}:
+        return raw
+    if raw:
+        logger.warning(f"[Mode5] Unknown mode5 image backend={raw!r}, fallback to 'api'")
+    return "api"
+
+
+async def _generate_one_image(
+    prompt: str,
+    dest: Path,
+    *,
+    aspect_ratio: str | None = None,
+    image_backend: str | None = None,
+) -> Path:
+    """
+    Mode5-specific router for image backend:
+    - api        -> fastgen HTTP API
+    - playwright -> browser automation
+    - auto       -> legacy shared mode13 strategy
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    backend = _normalize_mode5_image_backend(
+        image_backend if image_backend is not None else getattr(settings, "mode5_image_backend", "api")
+    )
+
+    if backend == "auto":
+        return await _generate_one_image_mode13(prompt, dest, aspect_ratio=aspect_ratio)
+
+    if backend == "api":
+        from agents.content_generator import fastgen_http
+
+        paths = await fastgen_http.generate_images_fastgen([prompt], dest.parent, parallel=False)
+    else:  # backend == "playwright"
+        from agents.content_generator import fastgen_playwright
+
+        paths = await fastgen_playwright.generate_images_fastgen([prompt], dest.parent, parallel=False)
+
+    if not paths:
+        raise RuntimeError(f"[Mode5] Empty image result for backend={backend}")
+    src = Path(paths[0])
+    if not src.is_file():
+        raise RuntimeError(f"[Mode5] Generated image not found for backend={backend}: {src}")
+    if src.resolve() != dest.resolve():
+        shutil.move(str(src), str(dest))
+    return dest
+
+
 def _mode5_locked_style(plan: dict[str, Any]) -> str:
     locked = str(plan.get("style_lock") or "").strip()
     if locked:
@@ -222,24 +208,66 @@ def _mode5_locked_style(plan: dict[str, Any]) -> str:
     return base
 
 
-def _mode5_prompt_fingerprint(text: str) -> str:
-    tokens = [t for t in re.findall(r"[a-zA-Zа-яА-Я0-9]+", (text or "").lower()) if len(t) >= 4]
-    if not tokens:
-        return "neutral scene"
-    return " ".join(tokens[:6])
+def _ensure_mode5_style_lock(plan: dict[str, Any]) -> str:
+    mode_key = normalize_mode5_sub_mode(plan.get("sub_mode"))
+    expected = mode5_style_lock_for_sub_mode(mode_key)
+    locked = str(plan.get("style_lock") or "").strip()
+    if not locked:
+        locked = expected
+    plan["style_lock"] = locked
+    plan["style_suffix"] = locked
+    plan["style_id"] = mode5_style_id_for_sub_mode(mode_key)
+    return locked
+
+
+def _mode5_chunk_context_text(chunk: dict[str, Any], seg_idx: int, *, window: int = 1) -> str:
+    segments = list(chunk.get("segments") or [])
+    if not segments:
+        return ""
+    lo = max(0, seg_idx - max(0, int(window)))
+    hi = min(len(segments), seg_idx + max(0, int(window)) + 1)
+    out: list[str] = []
+    for i in range(lo, hi):
+        if i == seg_idx:
+            continue
+        txt = re.sub(r"\s+", " ", str(segments[i].get("text") or "").strip())
+        if txt:
+            out.append(txt[:280])
+    return " | ".join(out)[:900]
 
 
 def _sanitize_mode5_image_prompt(prompt: str) -> str:
-    original = (prompt or "").strip()
-    if not original:
-        return original
-    flagged = any(re.search(p, original, flags=re.IGNORECASE) for p in _MODE5_PROMPT_BAN_PATTERNS)
-    cleaned = original
-    if flagged:
-        for p in _MODE5_PROMPT_BAN_PATTERNS:
-            cleaned = re.sub(p, " ", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return f"{cleaned}\n\n{_MODE5_PROMPT_GUARD}"
+    cleaned = re.sub(r"\s+", " ", (prompt or "").strip())
+    if not cleaned:
+        return cleaned
+    forbidden_replacements = {
+        r"\bCURRENT_SEGMENT\b": "scene source",
+        r"\bCHUNK_CONTEXT\b": "continuity context",
+        r"\bMode profile\s*:[^.;]*(?:[.;]|$)": "",
+        r"\bLocked style id\s*:[^.;]*(?:[.;]|$)": "",
+        r"\bScene slots\s*:": "Scene construction:",
+        r"\bTechnical rules\s*:": "Frame rules:",
+        r"\bScene source\s*:": "The scene is based on",
+        r"\bContinuity context\s*:": "Nearby narration for continuity:",
+        r"\bMode-specific direction\s*:": "Visual direction:",
+        r"\bPriority rule\s*:": "",
+        r"\bAnti-abstract rule\s*:": "",
+        r"\bCritical single-scene rule\s*:": "",
+        r"\bScene construction\s*:": "Scene construction:",
+        r"\bQuality constraints\s*:": "Quality:",
+        r"\bFrame format\s*:": "Frame format:",
+    }
+    for pattern, repl in forbidden_replacements.items():
+        cleaned = re.sub(pattern, repl, cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.;:-")
+    hard_guard = (
+        "Final hard requirement for this Mode5 image is exactly one full-frame image, one continuous scene, one location, one moment; "
+        "no tiled layout, no side-by-side layout, no segmented layout, no panel layout, no small inset pictures. "
+        "Absolutely no visible text anywhere; no captions, labels, headings, letters, numbers, readable documents, UI, logos, or watermarks."
+    )
+    if "final hard requirement for this mode5 image" not in cleaned.lower():
+        cleaned = f"{cleaned}. {hard_guard}"
+    return cleaned
 
 
 def _session_dir(session_id: str) -> Path:
@@ -879,63 +907,39 @@ async def _generate_chunk_images(
     chunk: dict[str, Any],
     style_suffix: str,
     *,
+    sub_mode: str,
     max_parallel_images: int,
+    image_backend: str | None = None,
     refresh_all: bool = False,
-    visual_policy: str = "default",
-    visual_bible: dict[str, Any] | None = None,
-    block_prompt_prefix: str = "",
     on_segment_ready: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
 ) -> None:
     session_root = _session_dir(session_id)
     cap = _mode5_parallel_images_cap()
     sem = asyncio.Semaphore(max(1, min(cap, int(max_parallel_images or cap))))
-    chunk_index = int(chunk.get("index", -1))
-    prompt_prefix = _chunk_block_prompt_prefix(chunk, explicit=block_prompt_prefix)
+    chunk_index = int(chunk.get("index") or 0)
     segments = list(chunk.get("segments") or [])
 
-    def _segment_variation_hint(seg_idx: int, seg: dict[str, Any]) -> str:
-        s = int(seg.get("s", 0) or 0)
-        shot = _MODE5_VARIATION_SHOTS[(chunk_index + s) % len(_MODE5_VARIATION_SHOTS)]
-        alt = _MODE5_VARIATION_SHOTS[(chunk_index + s + 3) % len(_MODE5_VARIATION_SHOTS)]
-        total = max(1, len(segments))
-        recent_blocks: list[str] = []
-        for back in (1, 2):
-            prev_idx = seg_idx - back
-            if prev_idx < 0 or prev_idx >= len(segments):
-                continue
-            prev_seg = segments[prev_idx]
-            prev_s = int(prev_seg.get("s", prev_idx) or prev_idx)
-            prev_shot = _MODE5_VARIATION_SHOTS[(chunk_index + prev_s) % len(_MODE5_VARIATION_SHOTS)]
-            prev_fp = _mode5_prompt_fingerprint(str(prev_seg.get("text") or ""))
-            recent_blocks.append(f"seg {prev_idx + 1}: {prev_shot}, theme {prev_fp}")
-        avoid_recent = "; ".join(recent_blocks) if recent_blocks else "none"
-        return (
-            f"Variation target for this frame (segment {s + 1}/{total}): use {shot}; "
-            f"avoid repeating composition from neighboring segments; prefer a distinct camera setup such as {alt}; "
-            f"avoid reusing recent fingerprints ({avoid_recent}); "
-            "do not repeat the same subject-location-prop triad from the previous 2 frames; "
-            "keep the same global art direction and character/world continuity."
-        )
-
     async def _one(seg_idx: int, seg: dict[str, Any]) -> tuple[dict[str, Any], BaseException | None]:
-        seg_prompt_text = seg.get("text", "")
-        if prompt_prefix:
-            seg_prompt_text = f"{prompt_prefix}\n\nSegment meaning:\n{seg_prompt_text}"
-        prompt = await _build_image_prompt_async(
-            seg_prompt_text,
-            style_suffix,
+        seg_prompt_text = str(seg.get("text") or "")
+        chunk_context = _mode5_chunk_context_text(chunk, seg_idx, window=1)
+        prompt = build_mode5_image_prompt(
+            sub_mode=sub_mode,
+            segment_text=seg_prompt_text,
+            chunk_context=chunk_context,
+            style_lock=style_suffix,
             output_format=_mode5_output_format(),
-            variation_hint=_segment_variation_hint(seg_idx, seg),
-            extra_suffix="Fresh alternative composition, same art direction." if refresh_all else "",
-            visual_policy=visual_policy,
-            visual_bible=visual_bible,
         )
         prompt = _sanitize_mode5_image_prompt(prompt)
         seg["image_prompt"] = prompt
         img_path = session_root / seg["image"]
         async with sem:
             try:
-                await _generate_one_image(prompt, img_path, aspect_ratio=_mode5_image_aspect_ratio())
+                await _generate_one_image(
+                    prompt,
+                    img_path,
+                    aspect_ratio=_mode5_image_aspect_ratio(),
+                    image_backend=image_backend,
+                )
                 seg["image_fallback"] = False
                 seg.pop("image_fallback_reason", None)
                 return seg, None
@@ -1024,17 +1028,25 @@ def _build_mode5_intro_video_prompt(plan: dict[str, Any], seg0: dict[str, Any]) 
     style_tail = re.sub(r"\s+", " ", str(plan.get("style_suffix") or "").strip())
     style_tail = style_tail[:320]
 
+    block_title = re.sub(r"\s+", " ", str(seg0.get("overlay_title") or "").strip())[:180]
     parts = [
         "Create a loopable intro video from provided start/end keyframes.",
         _MODE5_INTRO_ANIMATION_DESCRIPTION,
+        "Keep one continuous shot for the full clip: no edits, no jump cuts, no shot changes.",
+        "Micro-motion only: subtle breathing atmosphere, tiny camera drift, gentle depth movement.",
     ]
+    if block_title:
+        parts.append(f"Intro block title context: {block_title}")
     if scene_text:
         parts.append(f"Scene context: {scene_text}")
     if source_image_prompt:
         parts.append(f"Visual source context: {source_image_prompt}")
     if style_tail:
         parts.append(f"Style guardrails: {style_tail}")
-    parts.append("Keep composition stable and realistic. Preserve identity and scene structure.")
+    parts.append(
+        "Keep composition stable and realistic. Preserve identity, props, geometry, and scene structure. "
+        "No readable text overlays, no logos, no UI elements."
+    )
     return " ".join(parts)
 
 
@@ -1223,7 +1235,7 @@ async def _generate_mode5_sleep_tail_theme_images(
     fallback_still: Path,
 ) -> list[Path]:
     """One thematic still per sleep-tail segment; fail-soft copies previous or fallback."""
-    style = _mode5_locked_style(plan)
+    style = _ensure_mode5_style_lock(plan)
     m5 = _mode5_dir(session_id)
     out: list[Path] = []
     prev_ok: Path | None = fallback_still if fallback_still.is_file() else None
@@ -1237,15 +1249,20 @@ async def _generate_mode5_sleep_tail_theme_images(
             "No text, no letters, no subtitles."
         )
         try:
-            prompt = await _build_image_prompt_async(
-                scene_hint,
-                style,
+            prompt = build_mode5_image_prompt(
+                sub_mode=normalize_mode5_sub_mode(plan.get("sub_mode")),
+                segment_text=scene_hint,
+                chunk_context="sleep tail thematic extension",
+                style_lock=style,
                 output_format=_mode5_output_format(),
-                extra_suffix="Gentle atmosphere for long rest viewing; avoid harsh contrast.",
-                visual_policy="facts50",
             )
             prompt = _sanitize_mode5_image_prompt(prompt)
-            await _generate_one_image(prompt, dest, aspect_ratio=_mode5_image_aspect_ratio())
+            await _generate_one_image(
+                prompt,
+                dest,
+                aspect_ratio=_mode5_image_aspect_ratio(),
+                image_backend=plan.get("image_backend"),
+            )
         except Exception as e:
             logger.warning(f"[Mode5] sleep tail theme image {idx} failed: {e}")
         if dest.is_file():
@@ -1612,16 +1629,15 @@ async def _revoice_chunk(
     else:
         chunk["segments"] = _segments_for_chunk(tts_plain, dur, segment_seconds, wts, words)
     _rebuild_chunk_segment_paths(session_id, chunk)
-    locked_style = _mode5_locked_style(plan)
+    locked_style = _ensure_mode5_style_lock(plan)
     await _generate_chunk_images(
         session_id,
         chunk,
         locked_style,
+        sub_mode=normalize_mode5_sub_mode(plan.get("sub_mode")),
         max_parallel_images=max_parallel_images,
+        image_backend=plan.get("image_backend"),
         refresh_all=True,
-        visual_policy=_mode5_visual_policy(str(plan.get("sub_mode"))),
-        visual_bible=plan.get("visual_bible") if isinstance(plan.get("visual_bible"), dict) else None,
-        block_prompt_prefix=_chunk_block_prompt_prefix(chunk),
     )
     _render_chunk_audio_slices(session_id, chunk)
     await _ensure_mode5_looped_intro_video(
@@ -1649,6 +1665,7 @@ async def run_mode5_pipeline(
     chunk_seconds: int = CHUNK_SEC_DEFAULT,
     segment_seconds: int = SEG_SEC_DEFAULT,
     max_parallel_images: int | None = None,
+    image_backend: str | None = None,
     video_header_title: str | None = None,
     bible_mode: bool = False,
     sub_mode: str = "manual",
@@ -1732,10 +1749,8 @@ async def run_mode5_pipeline(
             raise ValueError(
                 "Mode 5 (The Unwritten Chapter): укажите тему расследования (от 8 символов)."
             )
-        language = detect_mode5_language(
-            f"{topic_input} {(video_header_title or '').strip()}",
-            language,
-        )
+        # Product requirement: The Unwritten Chapter narration + TTS must always be English.
+        language = "en"
         from modes.mode5.unwritten_chapter_generator import generate_unwritten_chapter_script
 
         outline_doc, chunk_texts, script_clean = await generate_unwritten_chapter_script(
@@ -1766,8 +1781,13 @@ async def run_mode5_pipeline(
     session_root.mkdir(parents=True, exist_ok=True)
     _mode5_dir(session_id)
     mpi = _clamp_mode5_parallel_images(max_parallel_images)
+    ib = _normalize_mode5_image_backend(
+        image_backend if image_backend is not None else getattr(settings, "mode5_image_backend", "api")
+    )
 
-    logger.info(f"=== Mode 5 Pipeline | sub_mode={sm} | session={session_id} ===")
+    logger.info(
+        f"=== Mode 5 Pipeline | sub_mode={sm} | image_backend={ib} | session={session_id} ==="
+    )
     await checkpoint(control)
 
     if sm not in ("facts50", "outline", "book_night", "unwritten_chapter"):
@@ -1780,53 +1800,11 @@ async def run_mode5_pipeline(
             )
         logger.info(f"[Mode5] Planned {len(chunk_texts)} chunk(s) from manual script")
 
-    visual_bible: dict[str, Any] | None = None
-    if sm == "facts50":
-        style_suffix = await derive_facts50_unified_style_suffix(
-            topic_input,
-            list(facts_outline or []),
-            script_clean,
-            output_format=_mode5_output_format(),
-            control=control,
-        )
-        visual_bible = await derive_mode5_visual_bible(
-            narration_sample=(script_clean[:12000] if script_clean else topic_input),
-            sub_mode=sm,
-            topic_or_title=topic_input,
-            locked_series_style=style_suffix,
-        )
-    else:
-        style_sample = script_clean[:12000] if len(script_clean) > 12000 else script_clean
-        topic_line = (topic_input or (video_header_title or "") or "").strip()
-        visual_bible = await derive_mode5_visual_bible(
-            narration_sample=style_sample,
-            sub_mode=sm,
-            topic_or_title=topic_line,
-            locked_series_style=None,
-        )
-        if visual_bible and (str(visual_bible.get("series_style") or "").strip()):
-            style_suffix = str(visual_bible["series_style"]).strip()
-            if _mode5_output_format() == "horizontal":
-                style_suffix += mode5_art_direction_tail_horizontal()
-            else:
-                style_suffix += " Maintain consistent vertical full-frame composition across the series."
-        else:
-            style_suffix = await _derive_style_suffix(
-                style_sample,
-                output_format=_mode5_output_format(),
-                visual_policy=_mode5_visual_policy(sm),
-            )
-            if not visual_bible or not str(visual_bible.get("frame_rules") or "").strip():
-                visual_bible = None
-        if sm == "bible":
-            style_suffix = (
-                f"{style_suffix}. "
-                "Prioritize Biblical context for visual prompts: scripture-grounded settings, "
-                "ancient Judea and Near East environments, modest historically plausible clothing, "
-                "sacred atmosphere, symbolic but respectful Christian iconography, and avoid modern artifacts."
-            )
+    mode_key = normalize_mode5_sub_mode(sm)
+    style_suffix = mode5_style_lock_for_sub_mode(mode_key)
     style_suffix = re.sub(r"\s+", " ", (style_suffix or "").strip())
     style_lock = style_suffix
+    style_id = mode5_style_id_for_sub_mode(mode_key)
     await checkpoint(control)
 
     outline_labels: list[tuple[str, str]] = []
@@ -1869,6 +1847,7 @@ async def run_mode5_pipeline(
             "chunk_seconds": chunk_sec,
             "segment_seconds": seg_sec,
             "max_parallel_images": mpi,
+            "image_backend": ib,
             "header_title": header_stripped,
             "bible_mode": False,
             "sub_mode": sm,
@@ -1876,7 +1855,7 @@ async def run_mode5_pipeline(
             "facts_outline": facts_outline,
             "style_suffix": style_suffix,
             "style_lock": style_lock,
-            "visual_bible": visual_bible,
+            "style_id": style_id,
             "chunks": stub_chunks,
         }
         _save_mode5_plan(session_id, stub_plan, checkpoint=MODE5_CKPT_STUB)
@@ -1914,6 +1893,7 @@ async def run_mode5_pipeline(
             "chunk_seconds": chunk_sec,
             "segment_seconds": seg_sec,
             "max_parallel_images": mpi,
+            "image_backend": ib,
             "header_title": header_stripped,
             "bible_mode": sm == "bible",
             "sub_mode": sm,
@@ -1924,7 +1904,7 @@ async def run_mode5_pipeline(
             "outline_structure": outline_doc if sm in ("outline", "book_night", "unwritten_chapter") else None,
             "style_suffix": style_suffix,
             "style_lock": style_lock,
-            "visual_bible": visual_bible,
+            "style_id": style_id,
             "chunks": stub_chunks_lf,
         }
         _save_mode5_plan(session_id, stub_plan_lf, checkpoint=MODE5_CKPT_STUB)
@@ -1989,8 +1969,6 @@ async def run_mode5_pipeline(
 
         plan = load_mode5_plan(session_id)
         plan["chunks"] = chunks_plan
-        if visual_bible is not None:
-            plan["visual_bible"] = visual_bible
         _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_TTS)
 
         sem_img = asyncio.Semaphore(par)
@@ -2006,10 +1984,10 @@ async def run_mode5_pipeline(
                     session_id,
                     ch,
                     style_suffix,
+                    sub_mode=mode_key,
                     max_parallel_images=mpi,
+                    image_backend=plan.get("image_backend"),
                     refresh_all=True,
-                    visual_policy=_mode5_visual_policy(sm),
-                    visual_bible=visual_bible,
                 )
                 _save_mode5_plan(
                     session_id, plan, checkpoint=MODE5_CKPT_AFTER_IMAGES, chunk_index=idx
@@ -2034,8 +2012,6 @@ async def run_mode5_pipeline(
         sem_img = asyncio.Semaphore(1)
 
         plan = load_mode5_plan(session_id)
-        if visual_bible is not None:
-            plan["visual_bible"] = visual_bible
         chunks_plan = plan.get("chunks") or []
 
         async def _longform_pipeline_chunk(ci: int, chunk_text: str) -> None:
@@ -2086,11 +2062,10 @@ async def run_mode5_pipeline(
                     session_id,
                     ch_entry,
                     style_suffix,
+                    sub_mode=mode_key,
                     max_parallel_images=mpi,
+                    image_backend=plan.get("image_backend"),
                     refresh_all=True,
-                    visual_policy=_mode5_visual_policy(sm),
-                    visual_bible=visual_bible,
-                    block_prompt_prefix=str(ch_entry.get("block_prompt_prefix") or ""),
                 )
                 _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_IMAGES, chunk_index=ci)
                 await asyncio.to_thread(_render_chunk_audio_slices, session_id, ch_entry)
@@ -2137,11 +2112,10 @@ async def run_mode5_pipeline(
                     session_id,
                     ch_entry,
                     style_suffix,
+                    sub_mode=mode_key,
                     max_parallel_images=mpi,
+                    image_backend=plan.get("image_backend"),
                     refresh_all=True,
-                    visual_policy=_mode5_visual_policy(sm),
-                    visual_bible=visual_bible,
-                    block_prompt_prefix=str(ch_entry.get("block_prompt_prefix") or ""),
                     on_segment_ready=_on_seg_ready,
                 )
                 _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_IMAGES, chunk_index=ci)
@@ -2233,9 +2207,10 @@ async def resume_mode5_pipeline(
 
     plan = load_mode5_plan(session_id)
     sm = (plan.get("sub_mode") or "").strip().lower()
+    mode_key = normalize_mode5_sub_mode(sm)
     session_root = _session_dir(session_id)
     chunks = list(plan.get("chunks") or [])
-    style_suffix = _mode5_locked_style(plan)
+    style_suffix = _ensure_mode5_style_lock(plan)
     mpi = _clamp_mode5_parallel_images(plan.get("max_parallel_images"))
     language = str(plan.get("language") or "ru").strip() or "ru"
     stage = _checkpoint_stage(plan)
@@ -2319,11 +2294,10 @@ async def resume_mode5_pipeline(
                     session_id,
                     ch,
                     style_suffix,
+                    sub_mode=mode_key,
                     max_parallel_images=mpi,
+                    image_backend=plan.get("image_backend"),
                     refresh_all=False,
-                    visual_policy=_mode5_visual_policy(sm),
-                    visual_bible=plan.get("visual_bible") if isinstance(plan.get("visual_bible"), dict) else None,
-                    block_prompt_prefix=str(ch.get("block_prompt_prefix") or ""),
                     on_segment_ready=(
                         lambda _seg, cidx=ci: _save_mode5_plan(
                             session_id, plan, checkpoint=MODE5_CKPT_AFTER_IMAGES, chunk_index=cidx
@@ -2404,11 +2378,10 @@ async def resume_mode5_pipeline(
                     session_id,
                     ch,
                     style_suffix,
+                    sub_mode=mode_key,
                     max_parallel_images=mpi,
+                    image_backend=plan.get("image_backend"),
                     refresh_all=False,
-                    visual_policy=_mode5_visual_policy(sm),
-                    visual_bible=plan.get("visual_bible") if isinstance(plan.get("visual_bible"), dict) else None,
-                    block_prompt_prefix=str(ch.get("block_prompt_prefix") or ""),
                 )
                 _save_mode5_plan(
                     session_id, plan, checkpoint=MODE5_CKPT_AFTER_IMAGES, chunk_index=idx
@@ -2472,27 +2445,25 @@ async def regenerate_mode5_image(
         raise ValueError("Invalid segment_index")
     seg = segs[segment_index]
     seg_prompt_text = seg.get("text", "")
-    prompt_prefix = _chunk_block_prompt_prefix(chunk)
-    if prompt_prefix:
-        seg_prompt_text = f"{prompt_prefix}\n\nSegment meaning:\n{seg_prompt_text}"
-    locked_style = _mode5_locked_style(plan)
-    prompt = await _build_image_prompt_async(
-        seg_prompt_text,
-        locked_style,
+    locked_style = _ensure_mode5_style_lock(plan)
+    chunk_context = _mode5_chunk_context_text(chunk, segment_index, window=1)
+    prompt = build_mode5_image_prompt(
+        sub_mode=normalize_mode5_sub_mode(plan.get("sub_mode")),
+        segment_text=seg_prompt_text,
+        chunk_context=chunk_context,
+        style_lock=locked_style,
         output_format=_mode5_output_format(),
-        variation_hint=(
-            f"Variation target for this regenerated frame: use a new camera angle and composition "
-            f"compared to neighboring segments, while preserving the same global style."
-        ),
-        extra_suffix="Fresh alternative composition, same art direction.",
-        visual_policy=_mode5_visual_policy(str(plan.get("sub_mode"))),
-        visual_bible=plan.get("visual_bible") if isinstance(plan.get("visual_bible"), dict) else None,
     )
     prompt = _sanitize_mode5_image_prompt(prompt)
     seg["image_prompt"] = prompt
     session_root = _session_dir(session_id)
     img_path = session_root / seg["image"]
-    await _generate_one_image(prompt, img_path, aspect_ratio=_mode5_image_aspect_ratio())
+    await _generate_one_image(
+        prompt,
+        img_path,
+        aspect_ratio=_mode5_image_aspect_ratio(),
+        image_backend=plan.get("image_backend"),
+    )
     if _is_global_intro_segment(chunk_index, segment_index):
         await _ensure_mode5_looped_intro_video(session_id, plan, force=True)
     loop = asyncio.get_event_loop()

@@ -24,6 +24,7 @@ from modes.mode5.facts50_generator import (
     _MIN_NARRATION_CHARS,
     _NARRATION_BATCH as _FACTS50_NARRATION_BATCH,
 )
+from modes.mode5.narration_quality import adjacent_repetition_pairs
 from modes.mode5.outline_generator import (
     _count_subchapters,
     _flatten_outline,
@@ -51,6 +52,29 @@ _MAX_EVIDENCE_NARRATION_CHARS = 4500
 
 # Суммарная длина **озвучиваемого** текста как у «77 фактов» (факты50: 800–1500 на факт; берём верхнюю половину диапазона — модель часто недобирает).
 _FACTS50_REFERENCE_TOTAL_CHARS = int(FACTS50_TARGET * 1320)
+_LLM_NETWORK_RETRIES = 4
+_LLM_NETWORK_RETRY_BASE_DELAY_SEC = 1.2
+
+
+def _is_transient_llm_error(err: BaseException) -> bool:
+    name = type(err).__name__.lower()
+    text = f"{name} {err}".lower()
+    needles = (
+        "apiconnectionerror",
+        "connecterror",
+        "connection error",
+        "connectionerror",
+        "getaddrinfo failed",
+        "temporary failure in name resolution",
+        "dns",
+        "timeout",
+        "timed out",
+        "service unavailable",
+        "502",
+        "503",
+        "504",
+    )
+    return any(n in text for n in needles)
 
 
 def _narration_depth_scale(n_top_level_chapters: int) -> float:
@@ -222,6 +246,53 @@ async def _expand_book_night_narrations_to_target(
     return list(await asyncio.gather(*(_one(i, t) for i, t in enumerate(narrations))))
 
 
+async def _dedupe_book_night_neighboring_blocks(
+    items: list[str],
+    *,
+    flat_rows: list[dict[str, Any]],
+    lang_name: str,
+    book_query: str,
+) -> list[str]:
+    out = list(items)
+    pairs = adjacent_repetition_pairs(out, threshold=0.08)
+    if not pairs:
+        return out
+    for idx, score in pairs[: max(1, min(6, len(pairs)))]:
+        if idx <= 0 or idx >= len(out):
+            continue
+        row = flat_rows[idx] if idx < len(flat_rows) else {}
+        sys = SystemMessage(
+            content=(
+                f"You are a careful editor for calm book-night narration. Output language: {lang_name} only.\n"
+                "Rewrite ONLY the current subsection to reduce repeated wording and repeated thesis from the previous subsection. "
+                "Advance the argument by one concrete step tied to the current subsection title. Preserve meaning, tone, and approximate length. "
+                "Do not invent new book details, dates, studies, quotes, page numbers, dialogue, or anecdotes. "
+                "One continuous paragraph, no markdown."
+            )
+        )
+        hum = HumanMessage(
+            content=(
+                f"Book:\n{book_query}\n\n"
+                f"Current subsection:\n{row.get('chapter_title', '')} / {row.get('subchapter_title', '')}\n"
+                f"Plan:\n{row.get('coverage', '')}\n\n"
+                f"Previous subsection (do not repeat wording/thesis):\n{out[idx - 1][:2200]}\n\n"
+                f"Current subsection to rewrite (overlap score {score:.3f}):\n{out[idx][:2600]}\n\n"
+                "Return only the rewritten current subsection."
+            )
+        )
+        try:
+            llm = _scenario_llm(temperature=0.24, max_tokens=min(10000, 1200 + int(len(out[idx]) * 0.8)))
+            resp = await llm.ainvoke([sys, hum])
+            raw = resp.content if isinstance(resp.content, str) else str(resp.content)
+            candidate = _strip_code_fence_like(raw).strip().strip('"').strip("'")
+            if _spoken_plain_len(candidate) >= int(_spoken_plain_len(out[idx]) * 0.62):
+                out[idx] = candidate
+                logger.info(f"[Mode5 book_night] Deduped neighboring subsection {idx + 1} (overlap={score:.3f})")
+        except Exception as e:
+            logger.warning(f"[Mode5 book_night] Neighbor dedup skipped for subsection {idx + 1}: {e}")
+    return out
+
+
 def _scenario_llm(*, temperature: float = 0.4, **kwargs: Any):
     model = getattr(settings, "openrouter_scenario_model", None) or settings.openrouter_model
     return make_llm(temperature=temperature, model=model, **kwargs)
@@ -269,13 +340,56 @@ async def _invoke_json(
     temperature: float = 0.4,
     max_tokens: int | None = None,
 ) -> dict[str, Any]:
-    kw: dict[str, Any] = {}
-    if max_tokens is not None:
-        kw["max_tokens"] = max_tokens
-    llm = _scenario_llm(temperature=temperature, **kw)
-    msg = await llm.ainvoke([SystemMessage(content=system), HumanMessage(content=human)])
-    raw = msg.content if isinstance(msg.content, str) else str(msg.content)
-    return _parse_json_obj(raw)
+    attempts = [
+        (
+            system,
+            human,
+            temperature,
+        ),
+        (
+            system
+            + "\nCRITICAL: Return one valid JSON object only. No prose before JSON. No markdown fences. "
+            + "Escape all inner quotes inside strings correctly. Do not truncate strings.",
+            human + "\n\nReturn compact valid JSON only.",
+            max(0.0, float(temperature) - 0.12),
+        ),
+    ]
+    last_err: Exception | None = None
+    for idx, (sys_prompt, human_prompt, temp) in enumerate(attempts, 1):
+        for net_try in range(1, _LLM_NETWORK_RETRIES + 1):
+            kw: dict[str, Any] = {}
+            if max_tokens is not None:
+                kw["max_tokens"] = max_tokens
+            llm = _scenario_llm(temperature=temp, **kw)
+            try:
+                msg = await llm.ainvoke(
+                    [SystemMessage(content=sys_prompt), HumanMessage(content=human_prompt)]
+                )
+            except Exception as e:
+                last_err = e
+                if not _is_transient_llm_error(e) or net_try >= _LLM_NETWORK_RETRIES:
+                    raise
+                delay = _LLM_NETWORK_RETRY_BASE_DELAY_SEC * (2 ** (net_try - 1))
+                logger.warning(
+                    f"[Mode5 book_night] transient LLM error on attempt {idx}/{len(attempts)} "
+                    f"net_try={net_try}/{_LLM_NETWORK_RETRIES}: {type(e).__name__}: {e}. "
+                    f"Retry in {delay:.1f}s"
+                )
+                await asyncio.sleep(delay)
+                continue
+            raw = msg.content if isinstance(msg.content, str) else str(msg.content)
+            try:
+                return _parse_json_obj(raw)
+            except Exception as e:
+                last_err = e
+                preview = re.sub(r"\s+", " ", raw or "").strip()[:500]
+                logger.warning(
+                    f"[Mode5 book_night] JSON parse failed on attempt {idx}: {e}. Raw preview: {preview}"
+                )
+                break
+    if last_err is not None:
+        raise last_err
+    raise ValueError("Mode 5 (книга на ночь): empty JSON parse state")
 
 
 def _book_night_outline_ok(outline: dict[str, Any]) -> bool:
@@ -590,6 +704,7 @@ Style anchor (keep stable across batches): warm reflective narrator, gentle cade
 - This outline has **{n_chapters_final}** top-level book chapters. **Fewer chapters → longer, richer paragraphs per subsection** (more of the book per block); **more chapters → slightly shorter paragraphs** so the night rhythm stays calm. Follow the character and sentence targets below.
 - Tone: slow, warm, reflective — like a trusted narrator before sleep; NOT hype, NOT a book review with scores, NOT preaching.
 - Summarize **ideas and mental models** faithfully at the level of justified content above; do NOT invent long direct quotes or dialogue. Paraphrase principles calmly.
+- This subsection must not repeat the previous subsection's thesis; advance the book's argument by one concrete step tied to this subsection title.
 - Structure: **{sent_lo}–{sent_hi}** sentences. Mini-arc: introduce the idea → explain in plain language → why it matters → soft closing.
 - When helpful, mention this block's place in the journey (subsections {start_i + 1}–{end_i} of {n_total}).
 - Plain text only. Aim for roughly **{narr_lo}–{narr_hi} characters** of narration per subsection when the material allows — **this episode is sized like a full «{FACTS50_TARGET} facts» sleep video overall**, so each block must carry enough substance; if shorter, invisible padding is added server-side — do not pad with empty prose.
@@ -645,6 +760,12 @@ Style anchor (keep stable across batches): warm reflective narrator, gentle cade
         lang_name=lang_name,
         book_query=q,
         control=control,
+    )
+    narrations = await _dedupe_book_night_neighboring_blocks(
+        narrations,
+        flat_rows=flat_rows,
+        lang_name=lang_name,
+        book_query=q,
     )
     narrations = [_ensure_book_night_voiceapi_floor(x, language=lang) for x in narrations]
 

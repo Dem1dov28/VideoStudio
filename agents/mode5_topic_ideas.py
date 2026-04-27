@@ -140,21 +140,46 @@ def _normalize_candidate(raw: dict[str, Any], sub_mode: str) -> dict[str, str] |
 
 def _system_prompt_for(sub_mode: str) -> str:
     mode_line = {
-        "facts50": "Mode facts50: suggest broad factual themes suitable for 77 concise facts.",
-        "outline": "Mode outline: suggest high-concept story or documentary synopsis seeds.",
-        "book_night": "Mode book_night: suggest known book titles or clear book directions for calm long summaries.",
-        "unwritten_chapter": "Mode unwritten_chapter: suggest investigation themes for documentary archival style.",
+        "facts50": (
+            "Mode facts50: generate concrete factual themes suitable for 77 concise facts; avoid generic one-word topics."
+        ),
+        "outline": (
+            "Mode outline: generate strong long-form synopsis seeds with clear conflict/tension and development arc."
+        ),
+        "book_night": (
+            "Mode book_night: generate known nonfiction books (title + author when possible) or clear book direction "
+            "that can be summarized in calm long-form style."
+        ),
+        "unwritten_chapter": (
+            "Mode unwritten_chapter: generate investigation-ready themes with evidence trail potential "
+            "(archives, contradictions, witnesses, timeline forks)."
+        ),
     }.get(sub_mode, "Mode long-form.")
+    quality_rules = {
+        "book_night": (
+            "- Prefer real recognizable books or highly plausible specific title+author inputs.\n"
+            "- topic must be directly paste-ready into Mode 5 input, not abstract brainstorming.\n"
+            "- Avoid fiction novels unless explicitly globally known as analytical nonfiction."
+        ),
+        "unwritten_chapter": (
+            "- topic must imply a testable investigative angle (who/what/when contradiction), not vague mood.\n"
+            "- project_title should sound like a documentary episode, not clickbait.\n"
+            "- hook should hint at unresolved tension or missing chapter without conspiracy certainty."
+        ),
+    }.get(sub_mode, "- Keep ideas specific, launch-ready, and non-generic.")
     return (
         "You generate unique long-form video topic ideas for a creator app.\n"
         f"{mode_line}\n"
+        f"{quality_rules}\n"
         "Return ONLY valid JSON array. Each item must be an object:\n"
         '{"topic":"...", "project_title":"...", "hook":"..."}\n'
         "Rules:\n"
         "- Write in Russian.\n"
-        "- topic: clear input for generator field.\n"
-        "- project_title: short title for project header.\n"
-        "- hook: one short line why this idea is interesting.\n"
+        "- topic: clear launch-ready input for generator field.\n"
+        "- project_title: concise project header title (not repeating topic verbatim).\n"
+        "- hook: one specific line why this idea is interesting.\n"
+        "- Avoid generic filler words like 'тайны истории', 'интересные факты' without concrete subject.\n"
+        "- Keep each field compact and information-dense.\n"
         "- Avoid duplicates and close paraphrases of provided blocked topics.\n"
         "- No markdown, no numbering."
     )
@@ -171,7 +196,9 @@ async def _llm_candidates(sub_mode: str, count: int, blocked: list[str], seed: s
                     f"SEED={seed}\n"
                     f"Generate exactly {count} ideas for sub_mode={sub_mode}.\n"
                     "Blocked topics/titles (do not repeat):\n"
-                    f"{block_lines}\n"
+                    f"{block_lines}\n\n"
+                    "Quality bar: prefer specific, usable ideas over broad categories. "
+                    "Each item must be distinct by subject, angle, and wording."
                 )
             ),
         ]

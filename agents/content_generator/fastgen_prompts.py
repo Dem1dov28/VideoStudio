@@ -36,8 +36,13 @@ _MULTI_IMAGE_BAN_PATTERNS = (
 )
 
 _FASTGEN_SINGLE_IMAGE_ENFORCER_SUFFIX = (
-    "Hard visual override: one dominant full-frame image only. "
-    "Use a single uninterrupted scene in one frame; avoid any tiled, segmented, or multi-view composition."
+    "Final image requirement is one dominant full-frame image only. "
+    "Use a single uninterrupted scene in one frame; avoid any tiled layout, segmented layout, panel layout, or multi-view composition."
+)
+_FASTGEN_NO_TEXT_ENFORCER_SUFFIX = (
+    "Final text restriction is absolutely no visible text anywhere in the image. "
+    "No captions, labels, headings, letters, numbers, readable documents, UI, logos, watermarks, "
+    "presentation-style layout, or instruction-sheet appearance."
 )
 
 _HISTORICAL_HINTS = (
@@ -110,8 +115,10 @@ def prepare_fastgen_prompt_for_ui(user_prompt: str) -> str:
             body = re.sub(pattern, " ", body, flags=re.IGNORECASE)
         body = re.sub(r"\s+", " ", body).strip(" ,.;:-")
     if not body:
-        return "\n\n".join((_FASTGEN_SINGLE_IMAGE_ENFORCER_SUFFIX, _FASTGEN_NO_NAMES_SUFFIX))
-    suffixes = [_FASTGEN_SINGLE_IMAGE_ENFORCER_SUFFIX, _FASTGEN_NO_NAMES_SUFFIX]
+        return "\n\n".join(
+            (_FASTGEN_SINGLE_IMAGE_ENFORCER_SUFFIX, _FASTGEN_NO_TEXT_ENFORCER_SUFFIX, _FASTGEN_NO_NAMES_SUFFIX)
+        )
+    suffixes = [_FASTGEN_SINGLE_IMAGE_ENFORCER_SUFFIX, _FASTGEN_NO_TEXT_ENFORCER_SUFFIX, _FASTGEN_NO_NAMES_SUFFIX]
     if _looks_historical_prompt(body):
         suffixes.append(_FASTGEN_HISTORICAL_LOCK_SUFFIX)
     return f"{body}\n\n" + "\n\n".join(suffixes)

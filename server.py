@@ -176,6 +176,7 @@ async def _run_pipeline_task(
             mode5_segment_seconds=int(getattr(req, "mode5_segment_seconds", 15) or 15),
             mode5_skip_final_assembly=bool(getattr(req, "mode5_skip_final_assembly", True)),
             mode5_max_parallel_images=int(getattr(req, "mode5_max_parallel_images", 10) or 10),
+            mode5_image_backend=getattr(req, "mode5_image_backend", None),
             mode5_video_header_title=getattr(req, "mode5_video_header_title", None),
             mode5_bible_mode=bool(getattr(req, "mode5_bible_mode", False)),
             mode5_sub_mode=getattr(req, "mode5_sub_mode", "manual") or "manual",
@@ -683,6 +684,7 @@ class StartRequest(BaseModel):
     mode5_segment_seconds: int = 15
     mode5_skip_final_assembly: bool = True
     mode5_max_parallel_images: int = 10
+    mode5_image_backend: str | None = None  # api | playwright | auto
     mode5_video_header_title: str | None = None
     mode5_bible_mode: bool = False
     # manual | bible | facts50 | outline | book_night | unwritten_chapter (legacy: mode5_bible_mode)
@@ -759,6 +761,16 @@ class StartRequest(BaseModel):
         if s in ("manual", "bible", "facts50", "outline", "book_night", "unwritten_chapter"):
             return s
         return "manual"
+
+    @field_validator("mode5_image_backend", mode="before")
+    @classmethod
+    def _normalize_mode5_image_backend(cls, v):  # noqa: ANN001
+        if v is None or (isinstance(v, str) and not str(v).strip()):
+            return None
+        s = str(v).strip().lower()
+        if s in ("api", "playwright", "auto"):
+            return s
+        raise ValueError("mode5_image_backend must be api, playwright, auto, or null")
 
 
 class RegenerateClipIndexBody(BaseModel):

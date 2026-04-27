@@ -28,6 +28,7 @@ from modes.mode5.outline_generator import (
     _parse_json_obj,
     _scenario_llm,
 )
+from modes.mode5.narration_quality import adjacent_repetition_pairs
 from modes.mode5.text_length import spoken_plain_len
 
 _MIN_TOPIC_CHARS = 8
@@ -230,9 +231,10 @@ def _outline_blocks_valid(outline: dict[str, Any]) -> bool:
         sc = subs[0] if isinstance(subs[0], dict) else {}
         if not str(sc.get("micro_conclusion") or "").strip():
             return False
-        if not str(sc.get("visual_anchor") or "").strip():
-            return False
         if not str(sc.get("evidence_anchor") or "").strip():
+            return False
+        # visual_anchor is optional metadata; human_stakes is required by schema.
+        if not str(sc.get("human_stakes") or "").strip():
             return False
     return True
 
@@ -496,6 +498,51 @@ async def _expand_unwritten_narrations_to_target(
     return list(await asyncio.gather(*(_one(i, t) for i, t in enumerate(narrations))))
 
 
+async def _dedupe_unwritten_neighboring_blocks(
+    items: list[str],
+    *,
+    flat_rows: list[dict[str, Any]],
+    lang_name: str,
+    topic_query: str,
+) -> list[str]:
+    out = list(items)
+    pairs = adjacent_repetition_pairs(out, threshold=0.08)
+    if not pairs:
+        return out
+    for idx, score in pairs[: max(1, min(4, len(pairs)))]:
+        if idx <= 0 or idx >= len(out):
+            continue
+        row = flat_rows[idx] if idx < len(flat_rows) else {}
+        sys = SystemMessage(
+            content=(
+                f"You are a script editor for The Unwritten Chapter. Output language: {lang_name} only.\n"
+                "Rewrite ONLY the current block to reduce repetition with the previous block while preserving meaning, "
+                "facts, anchors, tone, and approximate length. Do not add new dates, names, statistics, quotes, or sources. "
+                "Keep one continuous voiceover paragraph. No markdown."
+            )
+        )
+        hum = HumanMessage(
+            content=(
+                f"Topic:\n{topic_query}\n\n"
+                f"Current block label:\n{row.get('chapter_title', '')} / {row.get('subchapter_title', '')}\n\n"
+                f"Previous block (do not repeat wording):\n{out[idx - 1][:2200]}\n\n"
+                f"Current block to rewrite (overlap score {score:.3f}):\n{out[idx][:2600]}\n\n"
+                "Return only the rewritten current block."
+            )
+        )
+        try:
+            llm = _scenario_llm(temperature=0.24, max_tokens=min(10000, 1200 + int(len(out[idx]) * 0.8)))
+            resp = await llm.ainvoke([sys, hum])
+            raw = resp.content if isinstance(resp.content, str) else str(resp.content)
+            candidate = _strip_code_fence_like(raw).strip().strip('"').strip("'")
+            if spoken_plain_len(candidate) >= int(spoken_plain_len(out[idx]) * 0.62):
+                out[idx] = candidate
+                logger.info(f"[Mode5 unwritten] Deduped neighboring block {idx + 1} (overlap={score:.3f})")
+        except Exception as e:
+            logger.warning(f"[Mode5 unwritten] Neighbor dedup skipped for block {idx + 1}: {e}")
+    return out
+
+
 async def generate_unwritten_chapter_script(
     topic: str,
     language: str,
@@ -545,10 +592,10 @@ Return ONLY valid JSON:
       "role_label": "string",
       "angle": "string",
       "evidence_anchor": "string — one concrete anchor (date / declassified memo / witness / place / record reference)",
-      "visual_anchor": "string — one concise visual anchor for frame planning",
       "human_stakes": "string — what people stand to lose or gain in this block",
       "micro_conclusion": "string",
-      "frame_description": "string"
+      "visual_anchor": "string — optional metadata, concise scene clue",
+      "frame_description": "string — optional metadata"
     }}
   ]
 }}
@@ -559,8 +606,8 @@ Hard constraints:
 - The whole episode should target {_MIN_TARGET_MINUTES}-{_MAX_TARGET_MINUTES} minutes (default around {_DEFAULT_TARGET_MINUTES} min).
 - Block order should progress from official version -> contradictions -> evidence -> human impact -> reveal -> modern context.
 - No shouting, no clickbait, no conspiracy certainty without nuance.
-- Every block must include concrete evidence_anchor + visual_anchor + human_stakes.
-- frame_description must describe archival/documentary visual in dark muted tones, no bright colors or UI text.{truthfulness}"""
+- Every block must include concrete evidence_anchor + human_stakes.
+- visual_anchor/frame_description are optional planning metadata and may be left empty.{truthfulness}"""
 
     human1 = f"Topic X for investigation:\n{topic_clean}{sources_outline}\n\nBuild the blocks JSON now."
 
@@ -597,7 +644,7 @@ Hard constraints:
             sys1
             + f"\nYour JSON had {n_blocks} blocks after normalization. "
             f"Fix ALL constraints: exactly {_MIN_BLOCKS}–{_MAX_BLOCKS} blocks; each block must have "
-            "evidence_anchor, visual_anchor, human_stakes, micro_conclusion (all non-empty strings)."
+            "evidence_anchor, human_stakes, micro_conclusion (all non-empty strings)."
         )
         await _try_repair(repair_sys, human1 + "\n\nReturn corrected JSON only.", 0.28)
 
@@ -643,6 +690,8 @@ Tone and delivery:
 - Moderate pace for narration (~145 words/minute target).
 - Use rhetorical questions, controlled repetition, and clean transitions.
 - Each block must contain 1-2 concrete factual anchors and end with a micro-conclusion + bridge to the next block.
+- Use the provided evidence_anchor, visual_anchor, human_stakes, and micro_conclusion naturally inside the narration once when they are present.
+- Do not invent new dates, memo IDs, names, statistics, long quotes, or archival references beyond the provided anchors and external snippets.
 - Do not include explicit visual labels like "КАДР:" / "FRAME:" in spoken text.
 - Keep narration text purely voiceover-ready; visual intent is already handled by planning metadata.
 {truthfulness}
@@ -661,7 +710,11 @@ with exactly {len(batch)} strings in the same order."""
             global_idx = start + i + 1
             lines.append(
                 f"{global_idx}. Block title: {row['chapter_title']}\n"
-                f"   Planning brief: {row.get('coverage') or '(none)'}"
+                f"   Planning brief: {row.get('coverage') or '(none)'}\n"
+                f"   Evidence anchor: {row.get('evidence_anchor') or '(none)'}\n"
+                f"   Visual anchor: {row.get('visual_anchor') or '(none)'}\n"
+                f"   Human stakes: {row.get('human_stakes') or '(none)'}\n"
+                f"   Required micro-conclusion: {row.get('micro_conclusion') or '(none)'}"
             )
         prev_tail = "\n\n".join([x for x in narrations[-2:] if str(x).strip()])
         prev_tail_block = (
@@ -750,6 +803,13 @@ Rules:
         return [_pad_narration(x) for x in arr]
 
     narrations = await _cohere_blocks(narrations)
+    narrations = await _dedupe_unwritten_neighboring_blocks(
+        narrations,
+        flat_rows=rows,
+        lang_name=lang_name,
+        topic_query=topic_clean,
+    )
+    narrations = [_pad_narration(x) for x in narrations]
 
     script_clean = "\n\n".join([x for x in narrations if str(x).strip()])
     logger.success(

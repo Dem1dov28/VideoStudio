@@ -180,8 +180,13 @@ class Settings(BaseSettings):
     mode5_tts_pitch: str = Field("-8Hz", alias="MODE5_TTS_PITCH")
     mode5_vkcloud_voice_model: str = Field("aidar", alias="MODE5_VKCLOUD_VOICE_MODEL")
     mode5_elevenlabs_voice_id: str = Field("ErXwobaYiN019PkySvjV", alias="MODE5_ELEVENLABS_VOICE_ID")
-    # Mode 5: максимальное число параллельных генераций картинок на окна.
-    mode5_max_parallel_images: int = Field(10, alias="MODE5_MAX_PARALLEL_IMAGES")
+    # Mode 5: максимальное число параллельных генераций картинок на окна (потолок в pipeline = 10).
+    mode5_max_parallel_images: int = Field(10, alias="MODE5_MAX_PARALLEL_IMAGES", ge=1, le=10)
+    # Mode 5: бэкенд генерации картинок.
+    # - "api"        -> только HTTP API (fastgen_http)
+    # - "playwright" -> только браузерный путь (fastgen_playwright)
+    # - "auto"       -> текущее автоповедение общего генератора
+    mode5_image_backend: str = Field("api", alias="MODE5_IMAGE_BACKEND")
     edge_tts_pitch: str = Field("+0Hz", alias="EDGE_TTS_PITCH")
     # Fade-in (s) в начале TTS — сглаживает «рваное» начало, особенно для EN
     tts_audio_fade_in: float = Field(0.12, alias="TTS_AUDIO_FADE_IN")

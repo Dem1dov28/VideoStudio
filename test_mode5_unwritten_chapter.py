@@ -13,7 +13,7 @@ class Mode5UnwrittenChapterTests(unittest.TestCase):
         with patch.object(mode5_pipeline.settings, "mode5_video_format", None):
             self.assertEqual(mode5_pipeline._mode5_output_format(), "horizontal")
 
-    def test_regenerate_mode5_image_preserves_unwritten_block_anchors(self):
+    def test_regenerate_mode5_image_uses_clean_segment_text_only(self):
         from modes.mode5 import pipeline as mode5_pipeline
 
         plan = {
@@ -42,9 +42,9 @@ class Mode5UnwrittenChapterTests(unittest.TestCase):
 
         captured: dict[str, str] = {}
 
-        async def fake_build_image_prompt_async(segment_text, style_suffix, **kwargs):
-            captured["segment_text"] = segment_text
-            captured["style_suffix"] = style_suffix
+        def fake_build_mode5_image_prompt(**kwargs):
+            captured["segment_text"] = str(kwargs.get("segment_text") or "")
+            captured["style_suffix"] = str(kwargs.get("style_lock") or "")
             return "prompt"
 
         async def fake_generate_one_image(prompt, img_path, aspect_ratio=None):
@@ -59,7 +59,7 @@ class Mode5UnwrittenChapterTests(unittest.TestCase):
             with (
                 patch.object(mode5_pipeline, "load_mode5_plan", side_effect=lambda session_id: deepcopy(plan)),
                 patch.object(mode5_pipeline, "_session_dir", side_effect=lambda session_id: session_dir),
-                patch.object(mode5_pipeline, "_build_image_prompt_async", side_effect=fake_build_image_prompt_async),
+                patch.object(mode5_pipeline, "build_mode5_image_prompt", side_effect=fake_build_mode5_image_prompt),
                 patch.object(mode5_pipeline, "_generate_one_image", side_effect=fake_generate_one_image),
                 patch.object(mode5_pipeline, "_ensure_mode5_looped_intro_video", side_effect=fake_ensure_intro),
                 patch.object(mode5_pipeline, "_build_chunk_preview_sync", side_effect=lambda session_id, chunk_index, plan_obj: None),
@@ -67,15 +67,57 @@ class Mode5UnwrittenChapterTests(unittest.TestCase):
             ):
                 asyncio.run(mode5_pipeline.regenerate_mode5_image("sid", 0, 0))
 
-        self.assertEqual(captured["style_suffix"], "archival documentary style")
-        self.assertIn("Block title: Archive Leak — First Contradiction", captured["segment_text"])
-        self.assertIn("Evidence anchor: Declassified memo, 1983", captured["segment_text"])
-        self.assertIn("Visual anchor: dusty archive room with folders", captured["segment_text"])
-        self.assertIn("Human stakes: the witness could lose his career", captured["segment_text"])
-        self.assertIn(
-            "Segment meaning:\nA clerk notices one missing page in the file.",
-            captured["segment_text"],
-        )
+        self.assertIn("muted dark palette", captured["style_suffix"].lower())
+        self.assertEqual(captured["segment_text"], "A clerk notices one missing page in the file.")
+
+    def test_regenerate_mode5_image_sends_no_prompt_metadata_to_image_api(self):
+        from modes.mode5 import pipeline as mode5_pipeline
+
+        plan = {
+            "sub_mode": "unwritten_chapter",
+            "chunks": [
+                {
+                    "index": 0,
+                    "segments": [
+                        {
+                            "s": 0,
+                            "text": "Investigators compare folders in a dim archive room.",
+                            "image": "clips/mode5/img_c0_s0.jpg",
+                            "audio": "clips/mode5/seg_c0_s0.wav",
+                        }
+                    ],
+                    "preview_relpath": "mode5_preview_000.mp4",
+                }
+            ],
+        }
+        captured: dict[str, str] = {}
+
+        async def fake_generate_one_image(prompt, img_path, aspect_ratio=None):
+            captured["prompt"] = prompt
+            img_path.parent.mkdir(parents=True, exist_ok=True)
+            img_path.write_bytes(b"ok")
+
+        async def fake_ensure_intro(*args, **kwargs):
+            return None
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            session_dir = Path(tmp_dir)
+            with (
+                patch.object(mode5_pipeline, "load_mode5_plan", side_effect=lambda session_id: deepcopy(plan)),
+                patch.object(mode5_pipeline, "_session_dir", side_effect=lambda session_id: session_dir),
+                patch.object(mode5_pipeline, "_generate_one_image", side_effect=fake_generate_one_image),
+                patch.object(mode5_pipeline, "_ensure_mode5_looped_intro_video", side_effect=fake_ensure_intro),
+                patch.object(mode5_pipeline, "_build_chunk_preview_sync", side_effect=lambda session_id, chunk_index, plan_obj: None),
+                patch.object(mode5_pipeline, "_save_mode5_plan", side_effect=lambda session_id, plan_obj, checkpoint=None, **extra: None),
+            ):
+                asyncio.run(mode5_pipeline.regenerate_mode5_image("sid", 0, 0))
+
+        prompt = captured["prompt"]
+        for marker in ("CURRENT_SEGMENT", "CHUNK_CONTEXT", "Mode profile", "Locked style id", "Technical rules"):
+            self.assertNotIn(marker, prompt)
+        low = prompt.lower()
+        self.assertIn("absolutely no visible text anywhere in the image", low)
+        self.assertIn("no tiled layout, no side-by-side layout, no segmented layout, no panel layout, no small inset pictures", low)
 
     def test_unwritten_intro_video_forces_horizontal_aspect(self):
         from modes.mode5 import pipeline as mode5_pipeline

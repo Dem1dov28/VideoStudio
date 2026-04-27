@@ -2,7 +2,6 @@
 
 from agents.content_generator.fastgen_scraper import prepare_fastgen_prompt_for_ui
 from modes.mode13.pipeline import (
-    VISUAL_POLICY_LONGFORM_FLEX,
     _compose_image_prompt,
     _mode13_hard_rules_suffix,
 )
@@ -37,35 +36,49 @@ def test_compose_image_prompt_includes_hard_rules_once():
     assert "9:16" not in out
 
 
-def test_compose_with_visual_bible_custom_rules():
-    bible = {
-        "frame_rules": "Contemporary office: laptops closed or angled away; warm daylight; no readable screens.",
-        "scene_cue": "Pick one beat from the narration.",
-        "series_style": "",
-    }
+def test_compose_ignores_visual_bible_custom_rules():
     out = _compose_image_prompt(
         "Team huddle before a whiteboard with no legible markings.",
         "Clean editorial illustration, muted corporate palette.",
         output_format="horizontal",
         visual_policy="default",
-        visual_bible=bible,
+        visual_bible={"frame_rules": "Custom rule that should not leak"},
     )
-    assert "Contemporary office" in out
+    assert "Custom rule that should not leak" not in out
     assert out.count("All-ages only") == 1
 
 
-def test_compose_longform_flex_skips_extra_scene_rules_block():
+def test_compose_longform_flex_uses_same_base_template():
     out = _compose_image_prompt(
         "A quiet home desk with a plant and mug.",
         "Cozy golden-hour domestic palette.",
         output_format="horizontal",
-        visual_policy=VISUAL_POLICY_LONGFORM_FLEX,
+        visual_policy="longform_flex",
         visual_bible=None,
     )
-    assert "Show one concrete scene from the spoken episode, not a symbolic collage" not in out
+    assert "Show one concrete scene from the spoken episode." in out
     assert out.count("All-ages only") == 1
-    assert "exactly one dominant full-frame scene" in out
-    assert "No book-on-table hero shot" in out
+    assert "For this long-form mode5 sequence" not in out
+
+
+def test_compose_prompt_has_no_legacy_mode5_phrases_for_any_policy():
+    legacy_markers = (
+        "Hard override for mode5",
+        "archival investigation narration",
+        "Prioritize Biblical context for visual prompts",
+        "book-summary narration",
+        "No book-on-table hero shot",
+    )
+    for policy in ("default", "facts50", "book_night", "unwritten_chapter", "mode5", "longform_flex"):
+        out = _compose_image_prompt(
+            "A calm evening street with two pedestrians crossing near a tram stop.",
+            "Muted cinematic palette, soft shadows.",
+            output_format="horizontal",
+            visual_policy=policy,
+            visual_bible={"frame_rules": "legacy injected rule"},
+        )
+        for marker in legacy_markers:
+            assert marker not in out
 
 
 def test_fastgen_no_false_historical_lock_on_modern_self_help_copy():
@@ -88,9 +101,11 @@ def test_fastgen_enforces_single_full_frame_scene_for_all_modes():
     p = "Stylized editorial portrait, dramatic light, no text."
     full = prepare_fastgen_prompt_for_ui(p)
     low = full.lower()
-    assert "hard visual override" in low
+    assert "final image requirement" in low
     assert "one dominant full-frame image only" in low
     assert "single uninterrupted scene in one frame" in low
+    assert "final text restriction" in low
+    assert "absolutely no visible text anywhere in the image" in low
 
 
 def test_fastgen_strips_explicit_collage_gallery_terms_from_user_prompt():

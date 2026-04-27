@@ -223,6 +223,11 @@ def _flatten_outline(outline: dict[str, Any]) -> list[dict[str, Any]]:
                     "sub_index": sj,
                     "subchapter_title": str(sc.get("title") or "").strip(),
                     "coverage": str(sc.get("coverage") or "").strip(),
+                    "evidence_anchor": str(sc.get("evidence_anchor") or "").strip(),
+                    "visual_anchor": str(sc.get("visual_anchor") or "").strip(),
+                    "human_stakes": str(sc.get("human_stakes") or "").strip(),
+                    "micro_conclusion": str(sc.get("micro_conclusion") or "").strip(),
+                    "frame_description": str(sc.get("frame_description") or "").strip(),
                 }
             )
     return rows

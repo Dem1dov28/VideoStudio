@@ -111,9 +111,20 @@ export function applyStartRequestToForm(req, f, options = {}) {
     if (Number.isFinite(ss) && ss >= 10) f.setMode5SegmentSeconds?.(Math.min(90, ss));
     const mpi = Number(req.mode5_max_parallel_images);
     if (Number.isFinite(mpi) && mpi >= 1) f.setMode5MaxParallelImages?.(Math.min(10, mpi));
+    const ib = String(req.mode5_image_backend || '').trim().toLowerCase();
+    if (ib === 'api' || ib === 'playwright' || ib === 'auto') f.setMode5ImageBackend?.(ib);
     if (typeof req.mode5_video_header_title === 'string') f.setMode5HeaderTitle?.(req.mode5_video_header_title);
     const sm5 = req.mode5_sub_mode;
-    if (sm5 === 'manual' || sm5 === 'bible' || sm5 === 'facts50' || sm5 === 'outline' || sm5 === 'book_night') f.setMode5SubMode?.(sm5);
+    if (
+      sm5 === 'manual' ||
+      sm5 === 'bible' ||
+      sm5 === 'facts50' ||
+      sm5 === 'outline' ||
+      sm5 === 'book_night' ||
+      sm5 === 'unwritten_chapter'
+    ) {
+      f.setMode5SubMode?.(sm5);
+    }
     else if (req.mode5_bible_mode === true) f.setMode5SubMode?.('bible');
     else f.setMode5SubMode?.('manual');
   }

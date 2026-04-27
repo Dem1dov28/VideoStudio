@@ -1,7 +1,7 @@
 """
 Mode 5 Scenario Writer — длинный сценарий (~1 час) для образовательного/документального видео.
 
-Структура: блоки (абзацы). Для каждого блока с логической сменой визуала — image_prompt.
+Структура: блоки (абзацы). Визуальные промпты генерируются только в mode5 pipeline.
 Озвучка — на русском или английском. Субтитров нет.
 """
 
@@ -57,8 +57,7 @@ Narration language: {lang_note}.
 
 ═══ ФОРМАТ ВЫВОДА ═══
 Разбивай на SEGMENTS. Каждый сегмент = 2–4 абзаца (150–200 слов).
-image_prompt — при смене визуала: новая сцена/локация, смена эпохи, новый персонаж.
-Новое изображение каждые 4–6 сегментов (≈60–80 image points для 6-часового видео).
+Не генерируй image_prompt: визуальный конвейер соберет его позже.
 
 Output JSON:
 {{
@@ -67,13 +66,11 @@ Output JSON:
     {{
       "index": 1,
       "narration_text": "Full paragraph(s) to be read aloud...",
-      "image_prompt": "English prompt for image" // or null to reuse previous
+      "image_prompt": null
     }},
     ...
   ]
 }}
-
-IMAGE PROMPT (image-gen-expert): [Subject] + [Style] + [Lighting] + [Composition]. Be specific. Add "horizontal 16:9 landscape, 4K photorealistic".
 
 NARRATION: Plain text only (no HTML, Markdown, URLs). Documentary tone. Each segment ends with a complete sentence.
 """
@@ -112,7 +109,7 @@ async def run_long_form_scenario_writer(
         f"ИСТОРИЧЕСКАЯ ТОЧНОСТЬ: Если тема связана с историей, событиями, биографиями — "
         f"НИЧЕГО НЕ ВЫДУМЫВАЙ. Только проверяемые факты. Спорное — формулируй осторожно.\n\n"
         f"Output valid JSON: 'title', 'segments'. MINIMUM 50 segments for 1-hour video (target 55–75). "
-        f"First segment MUST have image_prompt. New image every 4–6 segments (each new chapter = new image)."
+        f"Do not generate image prompts."
     )
 
     response = await llm.ainvoke([SystemMessage(content=system), msg])
@@ -150,13 +147,6 @@ async def run_long_form_scenario_writer(
 
     if not segments:
         raise ValueError("Scenario has no valid segments")
-
-    # Ensure first segment has image
-    if not segments[0].get("image_prompt"):
-        segments[0]["image_prompt"] = (
-            f"Documentary style illustration of {topic}, "
-            "cinematic lighting, horizontal 16:9 landscape, 4K photorealistic"
-        )
 
     logger.success(f"[Mode5] Scenario: {len(segments)} segments, "
                   f"{sum(1 for s in segments if s.get('image_prompt'))} image points")

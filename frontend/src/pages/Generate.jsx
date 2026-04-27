@@ -154,6 +154,7 @@ export default function Generate() {
   const [mode5Script, setMode5Script] = useState('');
   const [mode5ChunkSeconds, setMode5ChunkSeconds] = useState(300);
   const [mode5SegmentSeconds, setMode5SegmentSeconds] = useState(15);
+  const [mode5ImageBackend, setMode5ImageBackend] = useState('api'); // api | playwright | auto
   const [mode5HeaderTitle, setMode5HeaderTitle] = useState('');
   const [mode5SubMode, setMode5SubMode] = useState('manual');
   const [mode5Ideas, setMode5Ideas] = useState([]);
@@ -289,6 +290,7 @@ export default function Generate() {
       setMode5Script,
       setMode5ChunkSeconds,
       setMode5SegmentSeconds,
+      setMode5ImageBackend,
       setMode5HeaderTitle,
       setMode5SubMode,
       setMode6NumCharacters,
@@ -542,6 +544,7 @@ export default function Generate() {
         mode5_language: 'auto',
         mode5_chunk_seconds: mode5ChunkSeconds,
         mode5_segment_seconds: mode5SegmentSeconds,
+        mode5_image_backend: mode5ImageBackend,
         mode5_skip_final_assembly: true,
         mode5_video_header_title: headerTrim,
         mode5_bible_mode: mode5SubMode === 'bible',
@@ -1266,6 +1269,35 @@ export default function Generate() {
                     )}
                   </div>
                 )}
+                <div className="card p-5">
+                  <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
+                    Генерация изображений
+                  </label>
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    {[
+                      { id: 'api', label: 'API', hint: 'Быстрее и стабильнее: fastgen_http' },
+                      { id: 'playwright', label: 'Playwright', hint: 'Через браузер, как в старом mode12' },
+                      { id: 'auto', label: 'Auto', hint: 'Старое автоповедение (mode13 strategy)' },
+                    ].map(({ id, label, hint }) => (
+                      <button
+                        key={id}
+                        type="button"
+                        title={hint}
+                        onClick={() => setMode5ImageBackend(id)}
+                        className={`flex-1 py-2.5 px-3 rounded-lg text-sm font-medium text-left transition-all border ${
+                          mode5ImageBackend === id
+                            ? 'bg-brand-600/20 text-brand-400 border-brand-600/40'
+                            : 'text-[#71717a] hover:text-[#e4e4f0] border-[#27272f] hover:border-[#3f3f50]'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-[#52525b] mt-2">
+                    Выбор применяется к текущему запуску mode5 и сохраняется в истории запроса.
+                  </p>
+                </div>
                 <div className="card p-5">
                   <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
                     Заголовок проекта

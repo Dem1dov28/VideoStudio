@@ -1,26 +1,20 @@
-from modes.mode5.pipeline import _mode5_locked_style, _mode5_visual_policy, _sanitize_mode5_image_prompt
+from modes.mode5.pipeline import _mode5_locked_style, _sanitize_mode5_image_prompt
 
 
-def test_mode5_prompt_guard_removes_collage_and_book_trope():
-    raw = (
-        "Scene prompt: make a collage grid of 9 photos with an open book on table in center. "
-        "Art direction: cinematic."
-    )
+def test_mode5_prompt_sanitize_collapses_whitespace_only():
+    raw = "  Scene prompt   with   extra   spaces.  "
     out = _sanitize_mode5_image_prompt(raw)
-    low = out.lower()
-    assert "hard override for mode5" in low
-    assert "collage grid" not in low
-    assert "open book" not in low
-    assert "book on table" not in low
+    assert out.startswith("Scene prompt with extra spaces.")
+    assert "Final hard requirement for this Mode5 image" in out
 
 
-def test_mode5_prompt_guard_is_always_appended_even_when_not_flagged():
+def test_mode5_prompt_sanitize_does_not_append_legacy_guard():
     raw = "Single traveler walking near the river at dusk, cinematic atmosphere."
     out = _sanitize_mode5_image_prompt(raw)
     low = out.lower()
-    assert "hard override for mode5" in low
-    assert "no text/ui/logos/watermarks in frame" in low
     assert "single traveler walking near the river" in low
+    assert "hard override for mode5" not in low
+    assert "absolutely no visible text anywhere" in low
 
 
 def test_mode5_style_lock_keeps_original_style_suffix():
@@ -35,6 +29,24 @@ def test_mode5_style_lock_keeps_original_style_suffix():
     assert plan["style_suffix"] == "soft painterly realism"
 
 
-def test_mode5_visual_policy_covers_manual_and_bible_submodes():
-    assert _mode5_visual_policy("manual") == "mode5"
-    assert _mode5_visual_policy("bible") == "mode5"
+def test_mode5_prompt_sanitize_keeps_content_verbatim():
+    raw = "No collage and no open book references should be auto-removed now."
+    out = _sanitize_mode5_image_prompt(raw)
+    assert out.startswith(raw)
+
+
+def test_mode5_prompt_sanitize_removes_metadata_labels_and_enforces_single_image():
+    raw = (
+        "Mode profile: unwritten_chapter. Locked style id: archival_documentary_muted. "
+        "CURRENT_SEGMENT: investigators compare folders. CHUNK_CONTEXT: previous witness. "
+        "Technical rules: no readable text."
+    )
+    out = _sanitize_mode5_image_prompt(raw)
+    for marker in ("Mode profile", "Locked style id", "CURRENT_SEGMENT", "CHUNK_CONTEXT", "Technical rules"):
+        assert marker not in out
+    low = out.lower()
+    assert "investigators compare folders" in low
+    assert "previous witness" in low
+    assert "exactly one full-frame image" in low
+    assert "no tiled layout, no side-by-side layout, no segmented layout, no panel layout, no small inset pictures" in low
+    assert "absolutely no visible text anywhere" in low
