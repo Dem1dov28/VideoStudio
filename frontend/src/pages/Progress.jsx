@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -79,6 +79,8 @@ export default function Progress() {
   const [mode4AssemblyBusy, setMode4AssemblyBusy] = useState(false);
   const [mode4AssemblySubs, setMode4AssemblySubs] = useState(true);
   const [mode4RegenIdx, setMode4RegenIdx] = useState(null);
+  const [mode4TrimDrafts, setMode4TrimDrafts] = useState({});
+  const [mode4TrimSavingIdx, setMode4TrimSavingIdx] = useState(null);
   const [mode13AssemblyBusy, setMode13AssemblyBusy] = useState(false);
   const [mode13AssemblySubs, setMode13AssemblySubs] = useState(true);
   const [mode13RegenKey, setMode13RegenKey] = useState(null);
@@ -89,7 +91,26 @@ export default function Progress() {
   const [mode5Live, setMode5Live] = useState(null);
   const [mode5WaitUi, setMode5WaitUi] = useState(null);
   const [mode5ContinueBusy, setMode5ContinueBusy] = useState(false);
+  const [mode5LiveActionKey, setMode5LiveActionKey] = useState('');
+  const [mode5PolicyNote, setMode5PolicyNote] = useState('');
   const [streamNonce, setStreamNonce] = useState(0);
+  const errorRef = useRef('');
+  const isTransientReconnectError = useMemo(
+    () => /reconnecting|connection lost/i.test(String(error || '')),
+    [error],
+  );
+  const applyMode5Snapshot = (snap) => {
+    if (!snap || typeof snap !== 'object') return;
+    const normalized = { ...snap, session_id: snap.session_id || sid };
+    setMode5Live(normalized);
+    setDone((prev) => {
+      if (!prev) return normalized;
+      if (prev?.mode5_review_ready || normalized?.mode5_review_ready || prev?.mode === 5 || normalized?.mode5_sub_mode) {
+        return { ...prev, ...normalized };
+      }
+      return prev;
+    });
+  };
 
   useEffect(() => {
     setStreamNonce(0);
@@ -120,6 +141,8 @@ export default function Progress() {
       setMode5Live(null);
       setMode5WaitUi(null);
       setMode5ContinueBusy(false);
+      setMode5LiveActionKey('');
+      setMode5PolicyNote('');
     }
 
     let cancelled = false;
@@ -157,6 +180,9 @@ export default function Progress() {
       sid,
       (entry) => {
         if (!cancelled) {
+          if (String(errorRef.current || '').toLowerCase().includes('reconnecting')) {
+            setError('');
+          }
           setLogs((prev) => {
             const next = [...prev, entry];
             return next.length > MAX_LOG_LINES ? next.slice(-MAX_LOG_LINES) : next;
@@ -166,14 +192,22 @@ export default function Progress() {
       (result) => {
         if (!cancelled) {
           setDone({ ...result, session_id: result.session_id || sid });
+          setStatus('done');
         }
       },
       (err) => {
         if (!cancelled) {
-          setError(String(err));
+          const msg = String(err || '');
+          const low = msg.toLowerCase();
+          if (low.includes('reconnecting') || low.includes('polling mode')) {
+            setError(msg);
+            return;
+          }
+          setError(msg);
           setStatus('error');
         }
       },
+      { maxReconnectAttempts: 6, reconnectBaseMs: 1000 },
     );
 
     return () => {
@@ -183,20 +217,19 @@ export default function Progress() {
   }, [sid, streamNonce]);
 
   useEffect(() => {
-    if (done?.mode5_review_ready) setMode5Live(null);
-  }, [done?.mode5_review_ready]);
-
-  useEffect(() => {
     if (done?.mode5_review_ready || done?.video_path) setMode5WaitUi(null);
   }, [done?.mode5_review_ready, done?.video_path]);
 
   // Live incremental Mode 5 review: show new previews while generation is still running.
   useEffect(() => {
-    if (done?.mode5_review_ready) return;
     const pollMode5Partial =
-      status === 'running' ||
-      status === 'paused' ||
-      ((status === 'error' || status === 'cancelled') && done?.mode5_can_resume === true);
+      sessionMode === 5 &&
+      !done?.video_path &&
+      (
+        status === 'running' ||
+        status === 'paused' ||
+        ((status === 'error' || status === 'cancelled') && done?.mode5_can_resume === true)
+      );
     if (!pollMode5Partial) return;
     let cancelled = false;
     let timer = null;
@@ -218,7 +251,7 @@ export default function Progress() {
           setMode5WaitUi(null);
         }
         if (Array.isArray(snap?.mode5_clip_filenames) && snap.mode5_clip_filenames.length > 0) {
-          setMode5Live({ ...snap, session_id: snap.session_id || sid });
+          applyMode5Snapshot(snap);
           setSessionMode(5);
           if (snap?.topic) {
             setSessionTopic((prev) => prev || String(snap.topic));
@@ -242,7 +275,7 @@ export default function Progress() {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [sid, status, done?.mode5_review_ready, done?.mode5_can_resume]);
+  }, [sid, status, done?.mode5_can_resume, done?.video_path, sessionMode]);
 
   // Video URL(s) from result — один файл или несколько (Mode 4 bilingual)
   const videoUrls = useMemo(() => {
@@ -290,6 +323,10 @@ export default function Progress() {
   const mode5ReviewData = done?.mode5_review_ready ? done : mode5Live;
 
   useEffect(() => {
+    errorRef.current = error || '';
+  }, [error]);
+
+  useEffect(() => {
     if (done?.mode4_multiclip_ready && typeof done.mode4_show_subtitles === 'boolean') {
       setMode4AssemblySubs(done.mode4_show_subtitles);
     }
@@ -324,6 +361,29 @@ export default function Progress() {
       text: Array.isArray(done.mode4_segments) ? done.mode4_segments[i] : '',
     }));
   }, [done, sid, clipVersion]);
+  useEffect(() => {
+    if (!done?.mode4_multiclip_ready || !Array.isArray(done.mode4_clip_filenames)) return;
+    const trims = Array.isArray(done.mode4_clip_trims) ? done.mode4_clip_trims : [];
+    const byIndex = {};
+    trims.forEach((row) => {
+      const idx = Number(row?.index);
+      if (!Number.isInteger(idx) || idx < 0) return;
+      const s = Number(row?.start_sec);
+      const e = Number(row?.end_sec);
+      if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) return;
+      byIndex[idx] = { startSec: s, endSec: e };
+    });
+    setMode4TrimDrafts((prev) => {
+      const next = { ...prev };
+      done.mode4_clip_filenames.forEach((_fname, idx) => {
+        const fromPlan = byIndex[idx];
+        if (fromPlan) {
+          next[idx] = { ...(next[idx] || {}), ...fromPlan };
+        }
+      });
+      return next;
+    });
+  }, [done?.mode4_multiclip_ready, done?.mode4_clip_filenames, done?.mode4_clip_trims, done?.session_id]);
   const publishMeta = useMemo(() => resolvePublishingMeta(done?.publishing), [done?.publishing]);
 
   // Copy to clipboard helper
@@ -356,6 +416,16 @@ export default function Progress() {
     (status === 'running' ||
       status === 'paused' ||
       ((status === 'error' || status === 'cancelled') && done?.mode5_can_resume === true));
+  const mode5ImageProgressPercent =
+    Number.isFinite(mode5WaitUi?.segmentsTotal) &&
+    mode5WaitUi.segmentsTotal > 0 &&
+    Number.isFinite(mode5WaitUi?.segmentsImaged)
+      ? Math.max(0, Math.min(100, Math.round((mode5WaitUi.segmentsImaged / mode5WaitUi.segmentsTotal) * 100)))
+      : null;
+  const mode5EtaMin =
+    mode5ImageProgressPercent != null && mode5ImageProgressPercent > 0 && mode5ImageProgressPercent < 100
+      ? Math.max(1, Math.round(((100 - mode5ImageProgressPercent) / mode5ImageProgressPercent) * 8))
+      : null;
 
   return (
     <div className="max-w-2xl mx-auto px-6 py-10">
@@ -391,6 +461,8 @@ export default function Progress() {
               Number.isFinite(mode5WaitUi.segmentsImaged) && (
                 <p className="text-xs text-[#a1a1aa] mt-1.5">
                   Кадры на диске: {mode5WaitUi.segmentsImaged} / {mode5WaitUi.segmentsTotal}
+                  {mode5ImageProgressPercent != null ? <> · {mode5ImageProgressPercent}%</> : null}
+                  {mode5EtaMin != null ? <> · ETA ~{mode5EtaMin} мин</> : null}
                   {Number.isFinite(mode5WaitUi.chunksWithSegs) && mode5WaitUi.chunksWithSegs > 0 ? (
                     <>
                       {' '}
@@ -436,7 +508,7 @@ export default function Progress() {
       </div>
 
       {/* Pause / Resume / Cancel */}
-      {!done && !error && status !== 'cancelled' && (
+      {!done && (!error || isTransientReconnectError) && status !== 'cancelled' && (
         <div className="flex gap-2 mb-4">
           {status === 'running' && (
             <button
@@ -618,28 +690,96 @@ export default function Progress() {
               </p>
             )}
             <div className="px-4 pb-2">
-              <button
-                type="button"
-                disabled={mode5AssemblyBusy}
-                onClick={async () => {
-                  setMode5AssemblyBusy(true);
-                  setError('');
-                  try {
-                    const res = await api.mode5Assemble(sid);
-                    setDone({ ...res, session_id: res.session_id || sid });
-                    setMode5Live(null);
-                    setMode5WaitUi(null);
-                  } catch (e) {
-                    setError(e.message || 'Финальный монтаж не удался');
-                  } finally {
-                    setMode5AssemblyBusy(false);
-                  }
-                }}
-                className="btn-primary flex items-center justify-center gap-2 text-sm font-semibold py-3 w-full"
-              >
-                {mode5AssemblyBusy ? 'Монтаж…' : 'Финальный монтаж (склеить все части)'}
-              </button>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  disabled={mode5AssemblyBusy}
+                  onClick={async () => {
+                    setMode5AssemblyBusy(true);
+                    setError('');
+                    try {
+                      const res = await api.mode5Assemble(sid);
+                      setDone({ ...res, session_id: res.session_id || sid });
+                      setMode5Live(null);
+                      setMode5WaitUi(null);
+                    } catch (e) {
+                      setError(e.message || 'Финальный монтаж не удался');
+                    } finally {
+                      setMode5AssemblyBusy(false);
+                    }
+                  }}
+                  className="btn-primary flex items-center justify-center gap-2 text-sm font-semibold py-3 w-full"
+                >
+                  {mode5AssemblyBusy ? 'Монтаж…' : 'Финальный монтаж (склеить все части)'}
+                </button>
+                <button
+                  type="button"
+                  disabled={mode5LiveActionKey === 'rebuild-final'}
+                  onClick={async () => {
+                    setMode5LiveActionKey('rebuild-final');
+                    setError('');
+                    try {
+                      const res = await api.mode5LiveRebuildFinal(sid);
+                      setDone({ ...res, session_id: res.session_id || sid });
+                      if (res?.policy_decision) setMode5PolicyNote(`Policy: ${res.policy_decision}`);
+                    } catch (e) {
+                      setError(e.message || 'Live пересборка финала не удалась');
+                    } finally {
+                      setMode5LiveActionKey('');
+                    }
+                  }}
+                  className="btn-secondary text-sm py-3 px-3"
+                >
+                  Live Rebuild Final
+                </button>
+              </div>
+              {mode5PolicyNote ? (
+                <p className="mt-2 text-xs text-[#71717a]">{mode5PolicyNote}</p>
+              ) : null}
             </div>
+            {Array.isArray(mode5ReviewData?.mode5_live_events) && mode5ReviewData.mode5_live_events.length > 0 ? (
+              <div className="px-4 pb-2">
+                <p className="text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-2">Live events</p>
+                <div className="max-h-28 overflow-auto text-xs text-[#a1a1aa] space-y-1">
+                  {mode5ReviewData.mode5_live_events.slice(-8).reverse().map((ev, i) => (
+                    <div key={`${ev?.at || i}-${i}`}>
+                      {ev?.event || 'event'}{ev?.chunk_index != null ? ` · chunk ${ev.chunk_index + 1}` : ''}
+                      {ev?.segment_index != null ? ` · seg ${ev.segment_index + 1}` : ''}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            {Array.isArray(mode5ReviewData?.mode5_live_queue) && mode5ReviewData.mode5_live_queue.length > 0 ? (
+              <div className="px-4 pb-2">
+                <p className="text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-2">Live queue</p>
+                <div className="max-h-32 overflow-auto text-xs text-[#a1a1aa] space-y-1">
+                  {mode5ReviewData.mode5_live_queue.slice(-10).reverse().map((row, i) => (
+                    <div key={`${row?.action_id || i}-${i}`} className="border border-[#27272f] rounded-md px-2 py-1">
+                      <div className="text-[#d4d4d8]">
+                        {row?.action || 'action'} · {row?.status || 'unknown'}
+                        {row?.payload?.chunk_index != null ? ` · chunk ${Number(row.payload.chunk_index) + 1}` : ''}
+                        {row?.payload?.segment_index != null ? ` · seg ${Number(row.payload.segment_index) + 1}` : ''}
+                      </div>
+                      <div className="text-[#71717a] font-mono">id: {row?.action_id || 'n/a'}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            {Array.isArray(mode5ReviewData?.mode5_unfinished_actions) && mode5ReviewData.mode5_unfinished_actions.length > 0 ? (
+              <div className="px-4 pb-2">
+                <p className="text-xs font-semibold text-amber-400 uppercase tracking-wider mb-2">Needs attention</p>
+                <div className="text-xs text-amber-200/90 space-y-1">
+                  {mode5ReviewData.mode5_unfinished_actions.slice(0, 8).map((row, i) => (
+                    <div key={`${row?.chunk_index ?? i}-${i}`}>
+                      chunk {Number(row?.chunk_index ?? 0) + 1} · status {row?.status || 'unknown'}
+                      {row?.locked ? ' · locked' : ''}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
             <div className="p-4 flex flex-col gap-8">
               {mode5ReviewData.mode5_clip_filenames.map((rel, idx) => {
                 const base = mode5ReviewData.session_id || sid;
@@ -650,6 +790,27 @@ export default function Progress() {
                 const chunkIndex = meta?.index ?? idx;
                 const segments = Array.isArray(meta?.segments) ? meta.segments : [];
                 const draftValue = mode5ChunkDrafts[chunkIndex] ?? meta?.text ?? '';
+                const queuedActionsForChunk = Array.isArray(mode5ReviewData?.mode5_live_queue)
+                  ? mode5ReviewData.mode5_live_queue.filter((row) => Number(row?.payload?.chunk_index) === Number(chunkIndex))
+                  : [];
+                const lastChunkAction = queuedActionsForChunk.length > 0
+                  ? queuedActionsForChunk[queuedActionsForChunk.length - 1]
+                  : null;
+                const readyForFinal =
+                  (meta?.preview_status === 'ready' || !meta?.preview_status) &&
+                  !(Array.isArray(mode5ReviewData?.mode5_pending_rebuilds)
+                    ? mode5ReviewData.mode5_pending_rebuilds
+                    : []).includes(chunkIndex);
+                const statusCls =
+                  meta?.status === 'ready'
+                    ? 'text-emerald-400 border-emerald-500/40'
+                    : meta?.status === 'regenerating'
+                      ? 'text-amber-300 border-amber-500/40'
+                      : meta?.status === 'dirty'
+                        ? 'text-orange-300 border-orange-500/40'
+                        : meta?.status === 'paused'
+                          ? 'text-cyan-300 border-cyan-500/40'
+                          : 'text-[#a1a1aa] border-[#3f3f46]';
                 const partLabel = mode5ReviewData.mode5_sub_mode === 'facts50' ? 'Fact' : 'Часть';
                 const outlineHead =
                   (mode5ReviewData.mode5_sub_mode === 'outline' || mode5ReviewData.mode5_sub_mode === 'book_night' || mode5ReviewData.mode5_sub_mode === 'unwritten_chapter') &&
@@ -662,6 +823,14 @@ export default function Progress() {
                       {outlineHead || `${partLabel} ${idx + 1}`}
                       {meta?.duration_sec != null ? ` · ~${Math.round(meta.duration_sec)} с` : ''}
                       {segments.length > 0 ? ` · ${segments.length} кадров` : ''}
+                    </p>
+                    <p className="text-[11px] text-[#71717a] mb-2 flex flex-wrap items-center gap-2">
+                      <span className={`px-2 py-0.5 rounded border ${statusCls}`}>{meta?.status || 'pending'}</span>
+                      <span>v{meta?.version ?? 1}</span>
+                      <span>preview: {meta?.preview_status || 'pending'}</span>
+                      <span>
+                      {' '}ready_for_final: {readyForFinal ? 'yes' : 'no'} · queued_actions: {queuedActionsForChunk.length}
+                      </span>
                     </p>
                     <div className="flex justify-center bg-black p-3 rounded-lg mb-4">
                       <video controls className="max-h-[52vh] rounded-lg shadow-xl" style={{ maxWidth: '300px' }} key={url}>
@@ -725,6 +894,122 @@ export default function Progress() {
                                 ? 'Переозвучить эту подглаву'
                                 : 'Переозвучить этот чанк'}
                         </button>
+                        <button
+                          type="button"
+                          disabled={mode5LiveActionKey === `audio-${chunkIndex}`}
+                          className="btn-secondary text-sm"
+                          onClick={async () => {
+                            setMode5LiveActionKey(`audio-${chunkIndex}`);
+                            setError('');
+                            try {
+                              const res = await api.mode5LiveRegenerateAudio(sid, chunkIndex);
+                              if (res?.policy_decision) setMode5PolicyNote(`Policy: ${res.policy_decision}`);
+                              const snap = await api.mode5ReviewState(sid).catch(() => null);
+                              if (snap) applyMode5Snapshot(snap);
+                              setClipVersion((v) => v + 1);
+                            } catch (e) {
+                              setError(e.message || 'Live переозвучка не удалась');
+                            } finally {
+                              setMode5LiveActionKey('');
+                            }
+                          }}
+                        >
+                          Live Audio
+                        </button>
+                        <button
+                          type="button"
+                          disabled={mode5LiveActionKey === `preview-${chunkIndex}`}
+                          className="btn-secondary text-sm"
+                          onClick={async () => {
+                            setMode5LiveActionKey(`preview-${chunkIndex}`);
+                            setError('');
+                            try {
+                              const res = await api.mode5LiveRebuildChunkPreview(sid, chunkIndex);
+                              if (res?.policy_decision) setMode5PolicyNote(`Policy: ${res.policy_decision}`);
+                              const snap = await api.mode5ReviewState(sid).catch(() => null);
+                              if (snap) applyMode5Snapshot(snap);
+                              setClipVersion((v) => v + 1);
+                            } catch (e) {
+                              setError(e.message || 'Live rebuild clip не удался');
+                            } finally {
+                              setMode5LiveActionKey('');
+                            }
+                          }}
+                        >
+                          Rebuild Clip
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-secondary text-sm"
+                          onClick={async () => {
+                            setError('');
+                            try {
+                              const isLocked = Boolean(meta?.locked);
+                              const res = isLocked
+                                ? await api.mode5LiveResumeChunk(sid, chunkIndex)
+                                : await api.mode5LivePauseChunk(sid, chunkIndex);
+                              setMode5PolicyNote(isLocked ? 'Chunk resumed for background pipeline' : 'Chunk paused for live editing');
+                              const snap = await api.mode5ReviewState(sid).catch(() => null);
+                              if (snap) applyMode5Snapshot(snap);
+                              if (res?.chunk_meta) {
+                                setMode5Live((prev) => {
+                                  if (!prev || !Array.isArray(prev.mode5_chunks_meta)) return prev;
+                                  const metas = [...prev.mode5_chunks_meta];
+                                  if (chunkIndex >= 0 && chunkIndex < metas.length) metas[chunkIndex] = res.chunk_meta;
+                                  return { ...prev, mode5_chunks_meta: metas };
+                                });
+                              }
+                            } catch (e) {
+                              setError(e.message || 'Pause/resume chunk failed');
+                            }
+                          }}
+                        >
+                          {meta?.locked ? 'Resume Chunk' : 'Pause Chunk'}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-secondary text-sm"
+                          disabled={!lastChunkAction || mode5LiveActionKey === `retry-${chunkIndex}`}
+                          onClick={async () => {
+                            if (!lastChunkAction) return;
+                            setMode5LiveActionKey(`retry-${chunkIndex}`);
+                            setError('');
+                            try {
+                              const action = String(lastChunkAction.action || '');
+                              if (action === 'regenerate-image') {
+                                if (lastChunkAction?.payload?.segment_index == null) {
+                                  setError('Retry image action недоступен: не найден segment_index');
+                                  return;
+                                }
+                                await api.mode5LiveRegenerateImage(
+                                  sid,
+                                  chunkIndex,
+                                  Number(lastChunkAction?.payload?.segment_index),
+                                );
+                              } else if (action === 'regenerate-audio' || action === 'regenerate-chunk') {
+                                await api.mode5LiveRegenerateAudio(sid, chunkIndex);
+                              } else if (action === 'rebuild-chunk-preview') {
+                                await api.mode5LiveRebuildChunkPreview(sid, chunkIndex);
+                              } else if (action === 'pause-chunk') {
+                                await api.mode5LivePauseChunk(sid, chunkIndex);
+                              } else if (action === 'resume-chunk') {
+                                await api.mode5LiveResumeChunk(sid, chunkIndex);
+                              } else {
+                                setError('Для последнего действия retry пока не поддержан');
+                                return;
+                              }
+                              const snap = await api.mode5ReviewState(sid).catch(() => null);
+                              if (snap) applyMode5Snapshot(snap);
+                              setClipVersion((v) => v + 1);
+                            } catch (e) {
+                              setError(e.message || 'Retry last action failed');
+                            } finally {
+                              setMode5LiveActionKey('');
+                            }
+                          }}
+                        >
+                          Retry last action
+                        </button>
                       </div>
                     </div>
                     {segments.length > 0 ? (
@@ -740,7 +1025,10 @@ export default function Progress() {
                                 setMode5RegenImageKey(rk);
                                 setError('');
                                 try {
-                                  await api.mode5RegenerateImage(sid, chunkIndex, si);
+                                  const res = await api.mode5LiveRegenerateImage(sid, chunkIndex, si);
+                                  if (res?.policy_decision) setMode5PolicyNote(`Policy: ${res.policy_decision}`);
+                                  const snap = await api.mode5ReviewState(sid).catch(() => null);
+                                  if (snap) applyMode5Snapshot(snap);
                                   setClipVersion((v) => v + 1);
                                 } catch (e) {
                                   setError(e.message || 'Перегенерация кадра не удалась');
@@ -903,13 +1191,110 @@ export default function Progress() {
                       className="max-h-[52vh] rounded-lg shadow-xl"
                       style={{ maxWidth: '300px' }}
                       key={row.url}
+                      onLoadedMetadata={(e) => {
+                        const dur = Number(e.currentTarget?.duration || 0);
+                        if (!Number.isFinite(dur) || dur <= 0.2) return;
+                        setMode4TrimDrafts((prev) => {
+                          const cur = prev[row.index] || {};
+                          const startSec = Number.isFinite(cur.startSec) ? Math.max(0, Math.min(cur.startSec, dur - 0.12)) : 0;
+                          const endSec = Number.isFinite(cur.endSec) ? Math.max(startSec + 0.12, Math.min(cur.endSec, dur)) : dur;
+                          return { ...prev, [row.index]: { ...cur, durationSec: dur, startSec, endSec } };
+                        });
+                      }}
                     >
                       <source src={row.url} type="video/mp4" />
                     </video>
                   </div>
+                  {(() => {
+                    const td = mode4TrimDrafts[row.index] || {};
+                    const duration = Number(td.durationSec || 0);
+                    if (!Number.isFinite(duration) || duration <= 0.2) return null;
+                    const startSec = Number.isFinite(td.startSec) ? td.startSec : 0;
+                    const endSec = Number.isFinite(td.endSec) ? td.endSec : duration;
+                    const minGap = 0.12;
+                    return (
+                      <div className="mb-3 border border-[#27272f] rounded-lg p-3 bg-[#0f0f16]">
+                        <p className="text-xs text-[#a1a1aa] mb-2">Обрезка перед финальным монтажом</p>
+                        <div className="grid grid-cols-1 gap-2">
+                          <label className="text-xs text-[#a1a1aa]">
+                            Старт: {startSec.toFixed(2)}s
+                            <input
+                              type="range"
+                              min={0}
+                              max={Math.max(0, duration - minGap)}
+                              step={0.01}
+                              value={Math.min(startSec, endSec - minGap)}
+                              onChange={(e) => {
+                                const v = Number(e.target.value);
+                                setMode4TrimDrafts((prev) => {
+                                  const cur = prev[row.index] || {};
+                                  const ee = Number.isFinite(cur.endSec) ? cur.endSec : duration;
+                                  return { ...prev, [row.index]: { ...cur, durationSec: duration, startSec: Math.min(v, ee - minGap), endSec: ee } };
+                                });
+                              }}
+                              disabled={mode4AssemblyBusy}
+                              className="w-full mt-1"
+                            />
+                          </label>
+                          <label className="text-xs text-[#a1a1aa]">
+                            Конец: {endSec.toFixed(2)}s
+                            <input
+                              type="range"
+                              min={minGap}
+                              max={duration}
+                              step={0.01}
+                              value={Math.max(endSec, startSec + minGap)}
+                              onChange={(e) => {
+                                const v = Number(e.target.value);
+                                setMode4TrimDrafts((prev) => {
+                                  const cur = prev[row.index] || {};
+                                  const ss = Number.isFinite(cur.startSec) ? cur.startSec : 0;
+                                  return { ...prev, [row.index]: { ...cur, durationSec: duration, startSec: ss, endSec: Math.max(v, ss + minGap) } };
+                                });
+                              }}
+                              disabled={mode4AssemblyBusy}
+                              className="w-full mt-1"
+                            />
+                          </label>
+                        </div>
+                        <div className="flex gap-2 mt-2">
+                          <button
+                            type="button"
+                            className="btn-secondary text-xs"
+                            disabled={mode4TrimSavingIdx === row.index || mode4AssemblyBusy}
+                            onClick={async () => {
+                              setMode4TrimSavingIdx(row.index);
+                              setError('');
+                              try {
+                                const res = await api.mode4SetClipTrim(sid, row.index, startSec, endSec);
+                                const trims = Array.isArray(res?.clip_trims) ? res.clip_trims : [];
+                                setDone((prev) => (prev ? { ...prev, mode4_clip_trims: trims } : prev));
+                              } catch (e) {
+                                setError(e.message || 'Не удалось сохранить обрезку');
+                              } finally {
+                                setMode4TrimSavingIdx(null);
+                              }
+                            }}
+                          >
+                            {mode4TrimSavingIdx === row.index ? 'Сохраняю…' : 'Сохранить обрезку'}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-secondary text-xs"
+                            disabled={mode4AssemblyBusy}
+                            onClick={() => {
+                              setMode4TrimDrafts((prev) => ({ ...prev, [row.index]: { ...td, durationSec: duration, startSec: 0, endSec: duration } }));
+                            }}
+                          >
+                            Сброс
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })()}
                   <button
                     type="button"
-                    disabled={mode4RegenIdx === row.index || mode4AssemblyBusy}
+                    disabled={mode4RegenIdx === row.index || mode4AssemblyBusy || mode4TrimSavingIdx != null}
                     onClick={async () => {
                       setMode4RegenIdx(row.index);
                       setError('');
@@ -942,7 +1327,7 @@ export default function Progress() {
               </label>
               <button
                 type="button"
-                disabled={mode4AssemblyBusy}
+                disabled={mode4AssemblyBusy || mode4TrimSavingIdx != null}
                 onClick={async () => {
                   setMode4AssemblyBusy(true);
                   setError('');

@@ -18,6 +18,7 @@ from utils.json_parse import extract_first_json
 from utils.llm import make_llm
 
 from modes.mode5.facts50_generator import FACTS50_TARGET
+from modes.mode5.quality_gate import remediate_mode5_narrations
 
 _MIN_CHARS_VOICEAPI = 520
 # Ночной / медитативный лонгрид: немного частей превью, много текста в каждой.
@@ -453,6 +454,9 @@ Style anchor (keep stable across batches): quiet immersive narrator, descriptive
         narrations = narrations[: len(flat_rows)]
         narrations = [_pad_narration(x) for x in narrations]
 
+    if bool(getattr(settings, "mode5_quality_gate_enabled", True)):
+        narrations, quality_report = remediate_mode5_narrations(narrations, language=lang)
+        outline["quality_report"] = quality_report
     script_clean = "\n\n".join(narrations)
     logger.success(
         f"[Mode5 outline] Generated {len(outline.get('chapters') or [])} chapters, "

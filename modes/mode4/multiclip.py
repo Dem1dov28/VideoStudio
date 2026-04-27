@@ -15,6 +15,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from loguru import logger
+from moviepy import VideoFileClip
 
 from config import settings
 from modes.mode4.multiclip_fastgen import generate_parable_clips, regenerate_parable_clip
@@ -54,6 +55,51 @@ def load_quote_multiclip_plan(session_id: str) -> dict[str, Any]:
 def _save_quote_multiclip_plan(session_id: str, plan: dict[str, Any]) -> None:
     p = _session_dir(session_id) / QUOTE_MULTICLIP_PLAN
     p.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _load_clip_duration_sec(path: Path) -> float:
+    vc = VideoFileClip(str(path))
+    try:
+        return float(vc.duration or 0.0)
+    finally:
+        vc.close()
+
+
+def _normalize_clip_ranges_for_assemble(
+    plan: dict[str, Any],
+    paths: list[Path],
+) -> list[tuple[float, float] | None]:
+    trims_raw = plan.get("clip_trims")
+    by_index: dict[int, tuple[float, float]] = {}
+    if isinstance(trims_raw, list):
+        for row in trims_raw:
+            if not isinstance(row, dict):
+                continue
+            try:
+                idx = int(row.get("index"))
+                a = float(row.get("start_sec"))
+                b = float(row.get("end_sec"))
+            except Exception:
+                continue
+            if idx < 0:
+                continue
+            if b - a < 0.12:
+                continue
+            by_index[idx] = (a, b)
+    out: list[tuple[float, float] | None] = []
+    for i, p in enumerate(paths):
+        rr = by_index.get(i)
+        if rr is None:
+            out.append(None)
+            continue
+        dur = _load_clip_duration_sec(p)
+        if dur <= 0.2:
+            out.append(None)
+            continue
+        s = max(0.0, min(float(rr[0]), dur - 0.12))
+        e = max(s + 0.12, min(float(rr[1]), dur))
+        out.append((s, e))
+    return out
 
 
 def _refs_from_plan(plan: dict[str, Any]) -> list[Path]:
@@ -171,6 +217,7 @@ async def run_mode4_multiclip_pipeline(
     manual_segments: list[str] | None = None,
     skip_final_assembly: bool = True,
     subtitle_style: str = "karaoke",
+    location_steering_hint: str | None = None,
 ) -> dict[str, Any]:
     from pipeline_control import checkpoint, fastgen_cancel_event
 
@@ -197,6 +244,7 @@ async def run_mode4_multiclip_pipeline(
         subtitle_lang="ru",
         auto_detect_lang=False,
         source_russian_only=True,
+        location_steering_hint=location_steering_hint,
     )
     script_ru = (prompt_data.get("script_ru") or quote).strip()
     script_en = (prompt_data.get("script_en") or quote).strip()
@@ -250,6 +298,7 @@ async def run_mode4_multiclip_pipeline(
         "skip_final_assembly": bool(skip_final_assembly),
         "assembled": False,
         "subtitle_style": style,
+        "clip_trims": [],
     }
     try:
         _save_quote_multiclip_plan(session_id, plan_dict)
@@ -312,6 +361,7 @@ async def run_mode4_multiclip_pipeline(
             "mode4_multiclip_ready": True,
             "mode4_clip_filenames": [f"clip_{i:03d}.mp4" for i in range(len(valid))],
             "mode4_segments": segments,
+            "mode4_clip_trims": list(plan_dict.get("clip_trims") or []),
             "mode4_show_subtitles": bool(show_subtitles),
             "topic": topic_preview,
             "quote_caption": quote_caption_ru,
@@ -356,6 +406,7 @@ def assemble_mode4_multiclip_final_sync(
         if not p.is_file():
             raise FileNotFoundError(f"Нет файла {p.name} — сгенерируйте все фрагменты")
         paths.append(p)
+    clip_ranges = _normalize_clip_ranges_for_assemble(plan, paths)
 
     speech_lang = (plan.get("speech_lang") or "ru").strip().lower()
     if speech_lang not in ("ru", "en"):
@@ -408,6 +459,7 @@ def assemble_mode4_multiclip_final_sync(
         whisper_vad_filter=not plain_whisper,
         header_title=(str(header_title).strip() if header_title else None) or None,
         plain_timed_subtitles=plain_whisper,
+        clip_ranges=clip_ranges,
     )
 
     video_path = str(out_path.resolve())
@@ -477,3 +529,51 @@ async def regenerate_mode4_multiclip_clip(session_id: str, clip_index: int) -> d
     if not path:
         raise RuntimeError(f"FastGen не вернул клип {clip_index}")
     return {"ok": True, "index": clip_index, "filename": Path(path).name}
+
+
+def set_mode4_multiclip_clip_trim(
+    session_id: str,
+    clip_index: int,
+    *,
+    start_sec: float,
+    end_sec: float,
+) -> dict[str, Any]:
+    plan = load_quote_multiclip_plan(session_id)
+    segments = list(plan.get("segments") or [])
+    if clip_index < 0 or clip_index >= len(segments):
+        raise ValueError("Некорректный индекс клипа")
+    clip_path = _session_dir(session_id) / "clips" / f"clip_{clip_index:03d}.mp4"
+    if not clip_path.is_file():
+        raise FileNotFoundError(f"Нет файла {clip_path.name}")
+    dur = _load_clip_duration_sec(clip_path)
+    if dur <= 0.2:
+        raise ValueError("Некорректная длительность клипа")
+    s = max(0.0, min(float(start_sec), dur - 0.12))
+    e = max(s + 0.12, min(float(end_sec), dur))
+    trims = list(plan.get("clip_trims") or [])
+    out: list[dict[str, Any]] = []
+    replaced = False
+    for row in trims:
+        if not isinstance(row, dict):
+            continue
+        try:
+            idx = int(row.get("index"))
+        except Exception:
+            continue
+        if idx == clip_index:
+            out.append({"index": clip_index, "start_sec": round(s, 3), "end_sec": round(e, 3)})
+            replaced = True
+        else:
+            out.append(row)
+    if not replaced:
+        out.append({"index": clip_index, "start_sec": round(s, 3), "end_sec": round(e, 3)})
+    plan["clip_trims"] = sorted(out, key=lambda x: int(x.get("index", 0)))
+    _save_quote_multiclip_plan(session_id, plan)
+    return {
+        "ok": True,
+        "index": clip_index,
+        "start_sec": round(s, 3),
+        "end_sec": round(e, 3),
+        "duration_sec": round(dur, 3),
+        "clip_trims": list(plan.get("clip_trims") or []),
+    }

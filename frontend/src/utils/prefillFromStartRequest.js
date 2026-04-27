@@ -99,6 +99,9 @@ export function applyStartRequestToForm(req, f, options = {}) {
     }
     const st = req.mode4_subtitle_style;
     if (st === 'plain_whisper' || st === 'karaoke') f.setMode4SubtitleStyle?.(st);
+    const lh = typeof req.mode4_location_hint === 'string' ? req.mode4_location_hint.trim() : '';
+    f.setMode4LocationHint?.(lh);
+    f.setMode4LocationOptions?.(lh ? [lh] : []);
   }
 
   if (m === 5) {

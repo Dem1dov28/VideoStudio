@@ -48,6 +48,16 @@ const TOPICS_PRESETS = [
   'Как устроен человеческий мозг',
 ];
 
+const MODE4_LOCATION_FALLBACKS = [
+  'историческая библиотека с высокими окнами',
+  'каменная набережная с ветром и водой',
+  'внутренний двор старого университета',
+  'зал с колоннами и приглушенным светом',
+  'садовая аллея у старинного особняка',
+  'монастырский клуатр с аркадами',
+  'тихая терраса с видом на город',
+];
+
 /* ── toggle ──────────────────────────────────────────────────────────────── */
 function Toggle({ value, onChange }) {
   return (
@@ -104,7 +114,12 @@ const MODE11_STRUCTURES = [
 ];
 
 function isMode5AiSubMode(subMode) {
-  return subMode === 'book_night' || subMode === 'unwritten_chapter';
+  return (
+    subMode === 'facts50' ||
+    subMode === 'outline' ||
+    subMode === 'book_night' ||
+    subMode === 'unwritten_chapter'
+  );
 }
 
 export default function Generate() {
@@ -138,6 +153,11 @@ export default function Generate() {
   const [mode4ShowAuthorOnVideo, setMode4ShowAuthorOnVideo] = useState(true);
   const [mode4HeaderTitle, setMode4HeaderTitle] = useState('');
   const [mode4SubtitleStyle, setMode4SubtitleStyle] = useState('karaoke'); // 'karaoke' | 'plain_whisper'
+  const [mode4LocationOptions, setMode4LocationOptions] = useState([]);
+  const [mode4LocationLoading, setMode4LocationLoading] = useState(false);
+  const [mode4LocationHint, setMode4LocationHint] = useState('');
+  const mode4LocationReqKeyRef = useRef('');
+  const mode4LocationInFlightRef = useRef('');
 
   const mode4QuoteBlocks = useMemo(() => splitTextBlocks(mode4Quote), [mode4Quote]);
   const mode4Multiclip = mode4QuoteBlocks.length >= 2;
@@ -150,6 +170,42 @@ export default function Generate() {
     if (mode !== 4 || !mode4Multiclip || mode4OutputLang !== 'both') return;
     setMode4OutputLang('ru');
   }, [mode, mode4Multiclip, mode4OutputLang]);
+
+  useEffect(() => {
+    if (mode !== 4) return;
+    const name = mode4PersonName.trim();
+    if (name.length < 2) {
+      setMode4LocationOptions([]);
+      setMode4LocationHint('');
+      return;
+    }
+    const key = `${name}::${mode4Quote.trim().slice(0, 220)}`;
+    if (mode4LocationReqKeyRef.current === key) return;
+    const timer = setTimeout(async () => {
+      setMode4LocationLoading(true);
+      mode4LocationInFlightRef.current = key;
+      try {
+        const res = await api.mode4LocationOptions(name, mode4Quote.trim(), 7);
+        if (mode4LocationInFlightRef.current !== key) return;
+        const rows = Array.isArray(res?.locations)
+          ? res.locations.map((x) => String(x || '').trim()).filter(Boolean)
+          : [];
+        const safeRows = rows.length > 0 ? rows : MODE4_LOCATION_FALLBACKS;
+        setMode4LocationOptions(safeRows);
+        setMode4LocationHint((prev) => (prev && safeRows.includes(prev) ? prev : (safeRows[0] || '')));
+        mode4LocationReqKeyRef.current = key;
+      } catch (e) {
+        if (mode4LocationInFlightRef.current !== key) return;
+        setMode4LocationOptions(MODE4_LOCATION_FALLBACKS);
+        setMode4LocationHint((prev) => prev || MODE4_LOCATION_FALLBACKS[0]);
+      } finally {
+        if (mode4LocationInFlightRef.current === key) {
+          setMode4LocationLoading(false);
+        }
+      }
+    }, 450);
+    return () => clearTimeout(timer);
+  }, [mode, mode4PersonName, mode4Quote]);
   // Mode 5: ручной long-form
   const [mode5Script, setMode5Script] = useState('');
   const [mode5ChunkSeconds, setMode5ChunkSeconds] = useState(300);
@@ -287,6 +343,8 @@ export default function Generate() {
       setMode4ShowAuthorOnVideo,
       setMode4HeaderTitle,
       setMode4SubtitleStyle,
+      setMode4LocationHint,
+      setMode4LocationOptions,
       setMode5Script,
       setMode5ChunkSeconds,
       setMode5SegmentSeconds,
@@ -916,6 +974,7 @@ export default function Generate() {
         mode4_show_author_on_video: mode4ShowAuthorOnVideo,
         mode4_video_header_title: mode4HeaderTitle.trim() || null,
         mode4_subtitle_style: mode4SubtitleStyle,
+        mode4_location_hint: mode4LocationHint || null,
         mode4_multiclip: mode4Multiclip,
         mode4_segments: manualSegs && manualSegs.length >= 2 ? manualSegs : null,
         ...(mode4Multiclip ? { mode4_skip_final_assembly: true } : {}),
@@ -2634,6 +2693,38 @@ export default function Generate() {
                       </div>
                     </div>
                   ) : null}
+                </div>
+                <div className="card p-5">
+                  <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
+                    Локация для сцены
+                  </label>
+                  <p className="text-xs text-[#a1a1aa] mb-3">
+                    После ввода имени LLM подбирает подходящие варианты под персонажа и эпоху. Выберите, что ближе по настроению.
+                  </p>
+                  {mode4PersonName.trim().length < 2 ? (
+                    <p className="text-xs text-[#71717a]">Введите имя личности, чтобы получить варианты локаций.</p>
+                  ) : mode4LocationLoading ? (
+                    <p className="text-xs text-[#a1a1aa]">Подбираю варианты локаций…</p>
+                  ) : mode4LocationOptions.length > 0 ? (
+                    <div className="grid grid-cols-1 gap-2">
+                      {mode4LocationOptions.map((opt) => (
+                        <button
+                          key={opt}
+                          type="button"
+                          onClick={() => setMode4LocationHint(opt)}
+                          className={`text-left px-3 py-2 rounded-lg border text-sm transition-all ${
+                            mode4LocationHint === opt
+                              ? 'border-brand-500 bg-brand-600/15 ring-1 ring-brand-500/40 text-[#f4f4f5]'
+                              : 'border-[#27272f] bg-[#14141c] text-[#d4d4d8] hover:border-[#3f3f46]'
+                          }`}
+                        >
+                          {opt}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-amber-300">Не удалось получить варианты. Можно запускать, тогда сервер выберет сам.</p>
+                  )}
                 </div>
                 <div className="card p-5">
                   <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">

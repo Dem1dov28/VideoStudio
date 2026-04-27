@@ -34,6 +34,7 @@ from modes.mode5.outline_generator import (
     _pad_narrations_to_rows,
     _parse_json_obj,
 )
+from modes.mode5.quality_gate import remediate_mode5_narrations
 from utils.llm import make_llm
 
 from agents.fact_miner.fetch import gather_evidence
@@ -775,6 +776,9 @@ Style anchor (keep stable across batches): warm reflective narrator, gentle cade
         f"(reference ≈ {_FACTS50_REFERENCE_TOTAL_CHARS}, {n_total} blocks)"
     )
 
+    if bool(getattr(settings, "mode5_quality_gate_enabled", True)):
+        narrations, quality_report = remediate_mode5_narrations(narrations, language=lang)
+        outline["quality_report"] = quality_report
     script_clean = "\n\n".join(narrations)
     logger.success(
         f"[Mode5 book_night] {len(outline.get('chapters') or [])} book chapter(s), "

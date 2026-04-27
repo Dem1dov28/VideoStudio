@@ -53,14 +53,148 @@ MODE5_CKPT_AFTER_IMAGES = "after_images"
 MODE5_CKPT_AFTER_SLICES = "after_slices"
 MODE5_CKPT_AFTER_PREVIEWS = "after_previews"
 MODE5_CKPT_COMPLETED = "completed"
+_MODE5_STAGE_ORDER = [
+    MODE5_CKPT_STUB,
+    MODE5_CKPT_AFTER_TTS,
+    MODE5_CKPT_AFTER_IMAGES,
+    MODE5_CKPT_AFTER_SLICES,
+    MODE5_CKPT_AFTER_PREVIEWS,
+    MODE5_CKPT_COMPLETED,
+]
+_MODE5_STAGE_INDEX = {name: idx for idx, name in enumerate(_MODE5_STAGE_ORDER)}
 
 _mode5_plan_io_locks: dict[str, threading.Lock] = {}
+_mode5_plan_io_locks_guard = threading.Lock()
 
 
 def _mode5_plan_io_lock(session_id: str) -> threading.Lock:
-    if session_id not in _mode5_plan_io_locks:
-        _mode5_plan_io_locks[session_id] = threading.Lock()
-    return _mode5_plan_io_locks[session_id]
+    with _mode5_plan_io_locks_guard:
+        if session_id not in _mode5_plan_io_locks:
+            _mode5_plan_io_locks[session_id] = threading.Lock()
+        return _mode5_plan_io_locks[session_id]
+
+
+def _ensure_mode5_live_defaults(plan: dict[str, Any]) -> None:
+    if not isinstance(plan.get("live_queue"), list):
+        plan["live_queue"] = []
+    if not isinstance(plan.get("pending_rebuilds"), list):
+        plan["pending_rebuilds"] = []
+    if not isinstance(plan.get("live_events"), list):
+        plan["live_events"] = []
+    if not str(plan.get("live_policy") or "").strip():
+        plan["live_policy"] = "hybrid"
+    for ch in list(plan.get("chunks") or []):
+        if not isinstance(ch, dict):
+            continue
+        ch.setdefault("status", "pending")
+        ch.setdefault("version", 1)
+        ch.setdefault("audio_status", "pending")
+        ch.setdefault("images_status", "pending")
+        ch.setdefault("preview_status", "pending")
+        ch.setdefault("locked", False)
+        for seg in list(ch.get("segments") or []):
+            if not isinstance(seg, dict):
+                continue
+            seg.setdefault("image_version", 1)
+            seg.setdefault("audio_version", 1)
+            seg.setdefault("last_action", "auto")
+            seg.setdefault("dirty_reason", "")
+
+
+def _mode5_push_live_event(plan: dict[str, Any], event_type: str, **payload: Any) -> None:
+    _ensure_mode5_live_defaults(plan)
+    events = plan["live_events"]
+    events.append(
+        {
+            "event": event_type,
+            "at": datetime.now(timezone.utc).isoformat(),
+            **payload,
+        }
+    )
+    if len(events) > 300:
+        del events[:-300]
+
+
+def _mode5_queue_action(
+    plan: dict[str, Any], action: str, *, action_id: str | None = None, **payload: Any
+) -> tuple[str, bool]:
+    _ensure_mode5_live_defaults(plan)
+    req_id = str(action_id or "").strip()
+    if req_id:
+        for row in list(plan["live_queue"]):
+            if str(row.get("action_id") or "") == req_id:
+                return req_id, True
+    action_id_final = req_id or f"{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
+    plan["live_queue"].append(
+        {
+            "action_id": action_id_final,
+            "action": action,
+            "status": "applied",
+            "payload": payload,
+            "applied_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    if len(plan["live_queue"]) > 200:
+        plan["live_queue"] = plan["live_queue"][-200:]
+    return action_id_final, False
+
+
+def _mode5_find_action(plan: dict[str, Any], action_id: str | None) -> dict[str, Any] | None:
+    aid = str(action_id or "").strip()
+    if not aid:
+        return None
+    for row in reversed(list(plan.get("live_queue") or [])):
+        if str(row.get("action_id") or "") == aid:
+            return row
+    return None
+
+
+def _mode5_assert_duplicate_matches(
+    existing: dict[str, Any] | None,
+    *,
+    action: str,
+    chunk_index: int | None = None,
+    segment_index: int | None = None,
+) -> None:
+    if existing is None:
+        return
+    existing_action = str(existing.get("action") or "").strip()
+    payload = existing.get("payload") if isinstance(existing.get("payload"), dict) else {}
+    if existing_action != action:
+        raise ValueError("action_id already used for another action")
+    if chunk_index is not None and int(payload.get("chunk_index", -1)) != int(chunk_index):
+        raise ValueError("action_id already used for another chunk")
+    if segment_index is not None and int(payload.get("segment_index", -1)) != int(segment_index):
+        raise ValueError("action_id already used for another segment")
+
+
+def _update_mode5_plan_atomic(
+    session_id: str,
+    mutator: Callable[[dict[str, Any]], None],
+    *,
+    checkpoint: str | None = None,
+    **checkpoint_extra: Any,
+) -> dict[str, Any]:
+    with _mode5_plan_io_lock(session_id):
+        plan = load_mode5_plan(session_id)
+        _ensure_mode5_live_defaults(plan)
+        mutator(plan)
+        if checkpoint is not None:
+            chunk_scoped = checkpoint_extra.get("chunk_index") is not None
+            _validate_mode5_stage_transition(plan, checkpoint, chunk_scoped=chunk_scoped)
+            stage_for_write = _checkpoint_stage_for_write(
+                plan, checkpoint, chunk_scoped=chunk_scoped
+            )
+            _record_mode5_stage_metric(plan, stage_for_write)
+            _touch_mode5_checkpoint(plan, stage_for_write, **checkpoint_extra)
+        root = _session_dir(session_id)
+        root.mkdir(parents=True, exist_ok=True)
+        dst = root / MODE5_PLAN
+        tmp = root / f".{MODE5_PLAN}.tmp"
+        body = json.dumps(plan, ensure_ascii=False, indent=2)
+        tmp.write_text(body, encoding="utf-8")
+        tmp.replace(dst)
+        return plan
 
 
 def _touch_mode5_checkpoint(plan: dict[str, Any], stage: str, **extra: Any) -> None:
@@ -74,6 +208,76 @@ def _touch_mode5_checkpoint(plan: dict[str, Any], stage: str, **extra: Any) -> N
     plan["pipeline_checkpoint"] = payload
 
 
+def _record_mode5_stage_metric(plan: dict[str, Any], stage: str) -> None:
+    metrics = plan.get("mode5_metrics")
+    if not isinstance(metrics, dict):
+        metrics = {}
+        plan["mode5_metrics"] = metrics
+    now = time.time()
+    prev_stage = metrics.get("last_stage")
+    prev_ts = metrics.get("last_stage_ts")
+    per_stage = metrics.get("stage_seconds")
+    if not isinstance(per_stage, dict):
+        per_stage = {}
+        metrics["stage_seconds"] = per_stage
+    if isinstance(prev_stage, str) and isinstance(prev_ts, (int, float)):
+        delta = max(0.0, now - float(prev_ts))
+        per_stage[prev_stage] = round(float(per_stage.get(prev_stage, 0.0)) + delta, 3)
+    metrics["last_stage"] = stage
+    metrics["last_stage_ts"] = now
+    counts = metrics.get("stage_entries")
+    if not isinstance(counts, dict):
+        counts = {}
+        metrics["stage_entries"] = counts
+    counts[stage] = int(counts.get(stage, 0)) + 1
+
+
+def _validate_mode5_stage_transition(
+    plan: dict[str, Any], next_stage: str, *, chunk_scoped: bool = False
+) -> None:
+    prev = _checkpoint_stage(plan)
+    if next_stage not in _MODE5_STAGE_INDEX:
+        raise ValueError(f"Mode5 checkpoint transition invalid: unknown next stage {next_stage}")
+    if chunk_scoped:
+        # Chunk-level checkpoints may arrive out of order due to parallel processing.
+        return
+    if prev is None:
+        if next_stage != MODE5_CKPT_STUB:
+            raise ValueError(f"Mode5 checkpoint transition invalid: None -> {next_stage}")
+        return
+    if prev not in _MODE5_STAGE_INDEX:
+        raise ValueError(f"Mode5 checkpoint transition invalid: unknown previous stage {prev}")
+    # Allow idempotent saves of the same stage and forward-only progression.
+    if _MODE5_STAGE_INDEX[next_stage] < _MODE5_STAGE_INDEX[prev]:
+        raise ValueError(f"Mode5 checkpoint regression is not allowed: {prev} -> {next_stage}")
+
+
+def _checkpoint_stage_for_write(
+    plan: dict[str, Any], next_stage: str, *, chunk_scoped: bool = False
+) -> str:
+    if not chunk_scoped:
+        return next_stage
+    prev = _checkpoint_stage(plan)
+    if prev not in _MODE5_STAGE_INDEX:
+        return next_stage
+    # For chunk-scoped updates keep the furthest global stage reached so far.
+    if _MODE5_STAGE_INDEX[next_stage] < _MODE5_STAGE_INDEX[prev]:
+        return prev
+    return next_stage
+
+
+def _mode5_visual_policy(sub_mode: str | None) -> str:
+    sm = (sub_mode or "").strip().lower()
+    if sm == "facts50":
+        return "facts50"
+    if sm == "book_night":
+        return "book_night"
+    if sm == "unwritten_chapter":
+        return "unwritten_chapter"
+    if sm == "outline":
+        return VISUAL_POLICY_LONGFORM_FLEX
+    # Manual/bible must still obey strict mode5 single-scene and anti-book rules.
+    return "mode5"
 def _unwritten_chunk_anchor_by_index(outline_doc: dict[str, Any] | None) -> dict[int, dict[str, str]]:
     out: dict[int, dict[str, str]] = {}
     if not isinstance(outline_doc, dict):
@@ -346,8 +550,15 @@ def _save_mode5_plan(
 ) -> None:
     """Atomic JSON write; optional checkpoint touch in the same critical section (thread-safe)."""
     with _mode5_plan_io_lock(session_id):
+        _ensure_mode5_live_defaults(plan)
         if checkpoint is not None:
-            _touch_mode5_checkpoint(plan, checkpoint, **checkpoint_extra)
+            chunk_scoped = checkpoint_extra.get("chunk_index") is not None
+            _validate_mode5_stage_transition(plan, checkpoint, chunk_scoped=chunk_scoped)
+            stage_for_write = _checkpoint_stage_for_write(
+                plan, checkpoint, chunk_scoped=chunk_scoped
+            )
+            _record_mode5_stage_metric(plan, stage_for_write)
+            _touch_mode5_checkpoint(plan, stage_for_write, **checkpoint_extra)
         root = _session_dir(session_id)
         root.mkdir(parents=True, exist_ok=True)
         dst = root / MODE5_PLAN
@@ -840,9 +1051,22 @@ def _chunk_meta_public(ch: dict[str, Any]) -> dict[str, Any]:
                 "text": seg.get("text", ""),
                 "t0": seg.get("t0"),
                 "t1": seg.get("t1"),
+                "image": seg.get("image"),
+                "audio": seg.get("audio"),
+                "image_prompt": seg.get("image_prompt"),
+                "image_version": seg.get("image_version", 1),
+                "audio_version": seg.get("audio_version", 1),
+                "last_action": seg.get("last_action", "auto"),
+                "dirty_reason": seg.get("dirty_reason", ""),
             }
             for seg in (ch.get("segments") or [])
         ],
+        "status": ch.get("status", "pending"),
+        "version": ch.get("version", 1),
+        "audio_status": ch.get("audio_status", "pending"),
+        "images_status": ch.get("images_status", "pending"),
+        "preview_status": ch.get("preview_status", "pending"),
+        "locked": bool(ch.get("locked", False)),
     }
     ct = ch.get("chapter_title")
     st = ch.get("subchapter_title")
@@ -882,6 +1106,11 @@ def _result_payload(
         "mode5_clip_filenames": preview_filenames if review_ready else [],
         "mode5_chunks_meta": [_chunk_meta_public(ch) for ch in chunks] if review_ready else [],
         "mode5_sub_mode": plan.get("sub_mode") or "manual",
+        "mode5_metrics": plan.get("mode5_metrics") if isinstance(plan.get("mode5_metrics"), dict) else None,
+        "mode5_live_queue": plan.get("live_queue") if isinstance(plan.get("live_queue"), list) else [],
+        "mode5_live_events": plan.get("live_events") if isinstance(plan.get("live_events"), list) else [],
+        "mode5_live_policy": plan.get("live_policy") or "hybrid",
+        "mode5_pending_rebuilds": plan.get("pending_rebuilds") if isinstance(plan.get("pending_rebuilds"), list) else [],
     }
 
 
@@ -1225,6 +1454,51 @@ def _rebuild_mode5_missing_previews(session_id: str, plan: dict[str, Any]) -> in
         _save_mode5_plan(session_id, plan)
         logger.info("[Mode5] Rebuilt {} missing chunk preview(s)", rebuilt)
     return rebuilt
+
+
+async def _finalize_mode5_outputs(
+    session_id: str,
+    plan: dict[str, Any],
+    *,
+    skip_final_assembly: bool,
+    review_log_message: str,
+    done_log_message: str,
+) -> dict[str, Any]:
+    """
+    Shared idempotent final stage used by both run/resume branches.
+    """
+    session_root = _session_dir(session_id)
+    for ch in plan.get("chunks") or []:
+        ch["preview_ready"] = False
+    _save_mode5_plan(session_id, plan)
+
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(
+        None,
+        functools.partial(_build_all_chunk_previews_parallel, session_id, plan),
+    )
+    _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_PREVIEWS)
+
+    if skip_final_assembly:
+        _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_COMPLETED)
+        logger.success(f"{review_log_message} | session={session_id}")
+        return _attach_mode5_resume_flags_from_plan(
+            session_id, plan, _result_payload(session_id, plan, review_ready=True)
+        )
+
+    final_path = session_root / "video_mode5.mp4"
+    await loop.run_in_executor(None, functools.partial(_rebuild_mode5_missing_previews, session_id, plan))
+    preview_paths = [session_root / ch["preview_relpath"] for ch in (plan.get("chunks") or [])]
+    await loop.run_in_executor(None, lambda: _ffmpeg_concat(preview_paths, final_path))
+    final_path = await loop.run_in_executor(None, lambda: _append_mode5_sleep_tail(session_id, plan, final_path))
+    rel_final = _rel_session(session_root, final_path)
+    _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_COMPLETED)
+    logger.success(f"{done_log_message} | video={final_path}")
+    return _attach_mode5_resume_flags_from_plan(
+        session_id,
+        plan,
+        _result_payload(session_id, plan, review_ready=False, final_video=rel_final),
+    )
 
 
 async def _generate_mode5_sleep_tail_theme_images(
@@ -1592,6 +1866,13 @@ async def _revoice_chunk(
 ) -> dict[str, Any]:
     session_root = _session_dir(session_id)
     chunk = plan["chunks"][chunk_index]
+    _ensure_mode5_live_defaults(plan)
+    chunk["status"] = "regenerating"
+    chunk["audio_status"] = "regenerating"
+    chunk["images_status"] = "regenerating"
+    chunk["preview_status"] = "regenerating"
+    chunk["locked"] = True
+    _mode5_push_live_event(plan, "chunk_state_changed", chunk_index=chunk_index, status="regenerating")
     clean_text = re.sub(r"\s+", " ", (text or "").strip())
     min_len = (
         _MIN_CHUNK_TEXT_LEN_FACTS50 if (plan.get("sub_mode") or "").strip().lower() == "facts50" else _MIN_CHUNK_TEXT_LEN
@@ -1647,7 +1928,16 @@ async def _revoice_chunk(
     )
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, lambda: _build_chunk_preview_sync(session_id, chunk_index, plan))
-    _save_mode5_plan(session_id, plan)
+    chunk["status"] = "ready"
+    chunk["audio_status"] = "ready"
+    chunk["images_status"] = "ready"
+    chunk["preview_status"] = "ready"
+    chunk["locked"] = False
+    chunk["version"] = int(chunk.get("version") or 1) + 1
+    for seg in chunk.get("segments") or []:
+        seg["audio_version"] = int(seg.get("audio_version") or 1) + 1
+        seg["last_action"] = "regenerate_audio"
+        seg["dirty_reason"] = ""
     return {
         "ok": True,
         "chunk_index": chunk_index,
@@ -2148,37 +2438,12 @@ async def run_mode5_pipeline(
         await checkpoint(control)
         await _ensure_mode5_looped_intro_video(session_id, plan, force=False)
 
-    for ch in plan.get("chunks") or []:
-        ch["preview_ready"] = False
-    # Save early so the frontend can poll partial progress and already-ready previews.
-    _save_mode5_plan(session_id, plan)
-
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(
-        None,
-        functools.partial(_build_all_chunk_previews_parallel, session_id, plan),
-    )
-    _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_PREVIEWS)
-
-    if skip_final_assembly:
-        _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_COMPLETED)
-        logger.success(f"=== Mode 5 Pipeline REVIEW READY | session={session_id} ===")
-        return _attach_mode5_resume_flags_from_plan(
-            session_id, plan, _result_payload(session_id, plan, review_ready=True)
-        )
-
-    final_path = session_root / "video_mode5.mp4"
-    await loop.run_in_executor(None, functools.partial(_rebuild_mode5_missing_previews, session_id, plan))
-    preview_paths = [session_root / ch["preview_relpath"] for ch in (plan.get("chunks") or [])]
-    await loop.run_in_executor(None, lambda: _ffmpeg_concat(preview_paths, final_path))
-    final_path = await loop.run_in_executor(None, lambda: _append_mode5_sleep_tail(session_id, plan, final_path))
-    rel_final = _rel_session(session_root, final_path)
-    _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_COMPLETED)
-    logger.success(f"=== Mode 5 Pipeline DONE | video={final_path} ===")
-    return _attach_mode5_resume_flags_from_plan(
+    return await _finalize_mode5_outputs(
         session_id,
         plan,
-        _result_payload(session_id, plan, review_ready=False, final_video=rel_final),
+        skip_final_assembly=skip_final_assembly,
+        review_log_message="=== Mode 5 Pipeline REVIEW READY ===",
+        done_log_message="=== Mode 5 Pipeline DONE ===",
     )
 
 
@@ -2330,36 +2595,12 @@ async def resume_mode5_pipeline(
         _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_SLICES)
         await checkpoint(control)
 
-        for ch in plan.get("chunks") or []:
-            ch["preview_ready"] = False
-        _save_mode5_plan(session_id, plan)
-
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            functools.partial(_build_all_chunk_previews_parallel, session_id, plan),
-        )
-        _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_PREVIEWS)
-
-        if skip_final_assembly:
-            _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_COMPLETED)
-            logger.success(f"=== Mode 5 RESUME REVIEW READY | session={session_id} ===")
-            return _attach_mode5_resume_flags_from_plan(
-                session_id, plan, _result_payload(session_id, plan, review_ready=True)
-            )
-
-        final_path = session_root / "video_mode5.mp4"
-        await loop.run_in_executor(None, functools.partial(_rebuild_mode5_missing_previews, session_id, plan))
-        preview_paths = [session_root / ch["preview_relpath"] for ch in (plan.get("chunks") or [])]
-        await loop.run_in_executor(None, lambda: _ffmpeg_concat(preview_paths, final_path))
-        final_path = await loop.run_in_executor(None, lambda: _append_mode5_sleep_tail(session_id, plan, final_path))
-        rel_final = _rel_session(session_root, final_path)
-        _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_COMPLETED)
-        logger.success(f"=== Mode 5 RESUME DONE | video={final_path} ===")
-        return _attach_mode5_resume_flags_from_plan(
+        return await _finalize_mode5_outputs(
             session_id,
             plan,
-            _result_payload(session_id, plan, review_ready=False, final_video=rel_final),
+            skip_final_assembly=skip_final_assembly,
+            review_log_message="=== Mode 5 RESUME REVIEW READY ===",
+            done_log_message="=== Mode 5 RESUME DONE ===",
         )
 
     par = max(1, min(32, int(getattr(settings, "mode5_facts50_parallel", 10))))
@@ -2397,36 +2638,12 @@ async def resume_mode5_pipeline(
     _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_SLICES)
     await checkpoint(control)
 
-    for ch in plan.get("chunks") or []:
-        ch["preview_ready"] = False
-    _save_mode5_plan(session_id, plan)
-
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(
-        None,
-        functools.partial(_build_all_chunk_previews_parallel, session_id, plan),
-    )
-    _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_PREVIEWS)
-
-    if skip_final_assembly:
-        _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_COMPLETED)
-        logger.success(f"=== Mode 5 RESUME REVIEW READY | session={session_id} ===")
-        return _attach_mode5_resume_flags_from_plan(
-            session_id, plan, _result_payload(session_id, plan, review_ready=True)
-        )
-
-    final_path = session_root / "video_mode5.mp4"
-    await loop.run_in_executor(None, functools.partial(_rebuild_mode5_missing_previews, session_id, plan))
-    preview_paths = [session_root / ch["preview_relpath"] for ch in (plan.get("chunks") or [])]
-    await loop.run_in_executor(None, lambda: _ffmpeg_concat(preview_paths, final_path))
-    final_path = await loop.run_in_executor(None, lambda: _append_mode5_sleep_tail(session_id, plan, final_path))
-    rel_final = _rel_session(session_root, final_path)
-    _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_COMPLETED)
-    logger.success(f"=== Mode 5 RESUME DONE | video={final_path} ===")
-    return _attach_mode5_resume_flags_from_plan(
+    return await _finalize_mode5_outputs(
         session_id,
         plan,
-        _result_payload(session_id, plan, review_ready=False, final_video=rel_final),
+        skip_final_assembly=skip_final_assembly,
+        review_log_message="=== Mode 5 RESUME REVIEW READY ===",
+        done_log_message="=== Mode 5 RESUME DONE ===",
     )
 
 
@@ -2434,8 +2651,32 @@ async def regenerate_mode5_image(
     session_id: str,
     chunk_index: int,
     segment_index: int,
+    *,
+    action_id: str | None = None,
 ) -> dict[str, Any]:
     plan = load_mode5_plan(session_id)
+    _ensure_mode5_live_defaults(plan)
+    existing = _mode5_find_action(plan, action_id)
+    if existing is not None:
+        _mode5_assert_duplicate_matches(
+            existing,
+            action="regenerate-image",
+            chunk_index=chunk_index,
+            segment_index=segment_index,
+        )
+        chunks = plan.get("chunks") or []
+        if chunk_index < 0 or chunk_index >= len(chunks):
+            raise ValueError("Invalid chunk_index")
+        chunk = chunks[chunk_index]
+        return {
+            "ok": True,
+            "action_id": str(existing.get("action_id") or action_id),
+            "duplicate": True,
+            "chunk_index": chunk_index,
+            "segment_index": segment_index,
+            "preview_relpath": chunk.get("preview_relpath"),
+            "chunk_meta": _chunk_meta_public(chunk),
+        }
     chunks = plan.get("chunks") or []
     if chunk_index < 0 or chunk_index >= len(chunks):
         raise ValueError("Invalid chunk_index")
@@ -2444,6 +2685,11 @@ async def regenerate_mode5_image(
     if segment_index < 0 or segment_index >= len(segs):
         raise ValueError("Invalid segment_index")
     seg = segs[segment_index]
+    chunk["status"] = "dirty"
+    chunk["images_status"] = "regenerating"
+    chunk["preview_status"] = "dirty"
+    seg["last_action"] = "regenerate_image"
+    seg["dirty_reason"] = "image_regenerated_requires_preview_rebuild"
     seg_prompt_text = seg.get("text", "")
     locked_style = _ensure_mode5_style_lock(plan)
     chunk_context = _mode5_chunk_context_text(chunk, segment_index, window=1)
@@ -2458,22 +2704,65 @@ async def regenerate_mode5_image(
     seg["image_prompt"] = prompt
     session_root = _session_dir(session_id)
     img_path = session_root / seg["image"]
-    await _generate_one_image(
-        prompt,
-        img_path,
-        aspect_ratio=_mode5_image_aspect_ratio(),
-        image_backend=plan.get("image_backend"),
-    )
+    await _generate_one_image(prompt, img_path, aspect_ratio=_mode5_image_aspect_ratio())
+    seg["image_version"] = int(seg.get("image_version") or 1) + 1
     if _is_global_intro_segment(chunk_index, segment_index):
         await _ensure_mode5_looped_intro_video(session_id, plan, force=True)
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, lambda: _build_chunk_preview_sync(session_id, chunk_index, plan))
-    _save_mode5_plan(session_id, plan)
+    chunk["status"] = "ready"
+    chunk["images_status"] = "ready"
+    chunk["preview_status"] = "ready"
+    seg["dirty_reason"] = ""
+    pending = list(plan.get("pending_rebuilds") or [])
+    if chunk_index not in pending:
+        pending.append(chunk_index)
+    plan["pending_rebuilds"] = pending
+    queue_res: dict[str, Any] = {"action_id": "", "duplicate": False}
+
+    def _mutate(latest: dict[str, Any]) -> None:
+        chunks_latest = latest.get("chunks") or []
+        chunks_src = plan.get("chunks") or []
+        if chunk_index < 0 or chunk_index >= len(chunks_latest) or chunk_index >= len(chunks_src):
+            raise ValueError("Invalid chunk_index")
+        chunks_latest[chunk_index] = chunks_src[chunk_index]
+        pending_latest = set(int(x) for x in list(latest.get("pending_rebuilds") or []))
+        pending_latest.add(int(chunk_index))
+        latest["pending_rebuilds"] = sorted(pending_latest)
+        _mode5_push_live_event(
+            latest,
+            "image_generated",
+            chunk_index=chunk_index,
+            segment_index=segment_index,
+            image=str((chunks_src[chunk_index].get("segments") or [])[segment_index].get("image") or ""),
+        )
+        _mode5_push_live_event(
+            latest,
+            "preview_generated",
+            chunk_index=chunk_index,
+            preview_relpath=chunks_src[chunk_index].get("preview_relpath"),
+        )
+        _mode5_push_live_event(latest, "rebuild_required", chunk_index=chunk_index, target="final")
+        aid, dup = _mode5_queue_action(
+            latest,
+            "regenerate-image",
+            action_id=action_id,
+            chunk_index=chunk_index,
+            segment_index=segment_index,
+        )
+        queue_res["action_id"] = aid
+        queue_res["duplicate"] = dup
+
+    plan_latest = _update_mode5_plan_atomic(session_id, _mutate)
+    chunk_latest = (plan_latest.get("chunks") or [])[chunk_index]
     return {
         "ok": True,
+        "action_id": queue_res["action_id"],
+        "duplicate": bool(queue_res["duplicate"]),
         "chunk_index": chunk_index,
         "segment_index": segment_index,
-        "preview_relpath": chunk["preview_relpath"],
+        "preview_relpath": chunk_latest.get("preview_relpath"),
+        "chunk_meta": _chunk_meta_public(chunk_latest),
     }
 
 
@@ -2481,12 +2770,34 @@ async def regenerate_mode5_chunk(
     session_id: str,
     chunk_index: int,
     text: str,
+    *,
+    action_id: str | None = None,
 ) -> dict[str, Any]:
     plan = load_mode5_plan(session_id)
+    _ensure_mode5_live_defaults(plan)
+    existing = _mode5_find_action(plan, action_id)
+    if existing is not None:
+        _mode5_assert_duplicate_matches(
+            existing,
+            action="regenerate-chunk",
+            chunk_index=chunk_index,
+        )
+        chunks = plan.get("chunks") or []
+        if chunk_index < 0 or chunk_index >= len(chunks):
+            raise ValueError("Invalid chunk_index")
+        chunk = chunks[chunk_index]
+        return {
+            "ok": True,
+            "action_id": str(existing.get("action_id") or action_id),
+            "duplicate": True,
+            "chunk_index": chunk_index,
+            "preview_relpath": chunk.get("preview_relpath"),
+            "chunk_meta": _chunk_meta_public(chunk),
+        }
     chunks = plan.get("chunks") or []
     if chunk_index < 0 or chunk_index >= len(chunks):
         raise ValueError("Invalid chunk_index")
-    return await _revoice_chunk(
+    out = await _revoice_chunk(
         session_id,
         plan,
         chunk_index,
@@ -2497,6 +2808,290 @@ async def regenerate_mode5_chunk(
             int(raw) if (raw := plan.get("max_parallel_images")) is not None else None
         ),
     )
+    queue_res: dict[str, Any] = {"action_id": "", "duplicate": False}
+
+    def _mutate(latest: dict[str, Any]) -> None:
+        chunks_latest = latest.get("chunks") or []
+        chunks_src = plan.get("chunks") or []
+        if chunk_index < 0 or chunk_index >= len(chunks_latest) or chunk_index >= len(chunks_src):
+            raise ValueError("Invalid chunk_index")
+        chunks_latest[chunk_index] = chunks_src[chunk_index]
+        latest["pending_rebuilds"] = [x for x in (latest.get("pending_rebuilds") or []) if int(x) != int(chunk_index)]
+        _mode5_push_live_event(latest, "audio_generated", chunk_index=chunk_index)
+        _mode5_push_live_event(
+            latest,
+            "preview_generated",
+            chunk_index=chunk_index,
+            preview_relpath=chunks_src[chunk_index].get("preview_relpath"),
+        )
+        aid, dup = _mode5_queue_action(
+            latest, "regenerate-chunk", action_id=action_id, chunk_index=chunk_index
+        )
+        queue_res["action_id"] = aid
+        queue_res["duplicate"] = dup
+
+    plan_latest = _update_mode5_plan_atomic(session_id, _mutate)
+    chunk_latest = (plan_latest.get("chunks") or [])[chunk_index]
+    out["preview_relpath"] = chunk_latest.get("preview_relpath")
+    out["chunk_meta"] = _chunk_meta_public(chunk_latest)
+    out["action_id"] = queue_res["action_id"]
+    out["duplicate"] = bool(queue_res["duplicate"])
+    return out
+
+
+async def regenerate_mode5_audio(
+    session_id: str,
+    chunk_index: int,
+    *,
+    action_id: str | None = None,
+) -> dict[str, Any]:
+    plan = load_mode5_plan(session_id)
+    _ensure_mode5_live_defaults(plan)
+    existing = _mode5_find_action(plan, action_id)
+    if existing is not None:
+        _mode5_assert_duplicate_matches(
+            existing,
+            action="regenerate-audio",
+            chunk_index=chunk_index,
+        )
+        chunks = plan.get("chunks") or []
+        if chunk_index < 0 or chunk_index >= len(chunks):
+            raise ValueError("Invalid chunk_index")
+        chunk = chunks[chunk_index]
+        return {
+            "ok": True,
+            "action_id": str(existing.get("action_id") or action_id),
+            "duplicate": True,
+            "chunk_index": chunk_index,
+            "preview_relpath": chunk.get("preview_relpath"),
+            "chunk_meta": _chunk_meta_public(chunk),
+        }
+    chunks = plan.get("chunks") or []
+    if chunk_index < 0 or chunk_index >= len(chunks):
+        raise ValueError("Invalid chunk_index")
+    text = str(chunks[chunk_index].get("text") or "").strip()
+    if not text:
+        raise ValueError("Mode 5: empty chunk text for audio regenerate")
+    out = await _revoice_chunk(
+        session_id,
+        plan,
+        chunk_index,
+        text,
+        language=(plan.get("language") or "ru"),
+        segment_seconds=int(plan.get("segment_seconds") or SEG_SEC_DEFAULT),
+        max_parallel_images=_clamp_mode5_parallel_images(
+            int(raw) if (raw := plan.get("max_parallel_images")) is not None else None
+        ),
+    )
+    queue_res: dict[str, Any] = {"action_id": "", "duplicate": False}
+
+    def _mutate(latest: dict[str, Any]) -> None:
+        chunks_latest = latest.get("chunks") or []
+        chunks_src = plan.get("chunks") or []
+        if chunk_index < 0 or chunk_index >= len(chunks_latest) or chunk_index >= len(chunks_src):
+            raise ValueError("Invalid chunk_index")
+        chunks_latest[chunk_index] = chunks_src[chunk_index]
+        latest["pending_rebuilds"] = [x for x in (latest.get("pending_rebuilds") or []) if int(x) != int(chunk_index)]
+        _mode5_push_live_event(latest, "audio_generated", chunk_index=chunk_index)
+        _mode5_push_live_event(
+            latest,
+            "preview_generated",
+            chunk_index=chunk_index,
+            preview_relpath=chunks_src[chunk_index].get("preview_relpath"),
+        )
+        aid, dup = _mode5_queue_action(
+            latest, "regenerate-audio", action_id=action_id, chunk_index=chunk_index
+        )
+        queue_res["action_id"] = aid
+        queue_res["duplicate"] = dup
+
+    plan_latest = _update_mode5_plan_atomic(session_id, _mutate)
+    chunk_latest = (plan_latest.get("chunks") or [])[chunk_index]
+    out["preview_relpath"] = chunk_latest.get("preview_relpath")
+    out["chunk_meta"] = _chunk_meta_public(chunk_latest)
+    out["action_id"] = queue_res["action_id"]
+    out["duplicate"] = bool(queue_res["duplicate"])
+    return out
+
+
+async def rebuild_mode5_chunk_preview(
+    session_id: str,
+    chunk_index: int,
+    *,
+    action_id: str | None = None,
+) -> dict[str, Any]:
+    plan = load_mode5_plan(session_id)
+    _ensure_mode5_live_defaults(plan)
+    existing = _mode5_find_action(plan, action_id)
+    if existing is not None:
+        _mode5_assert_duplicate_matches(
+            existing,
+            action="rebuild-chunk-preview",
+            chunk_index=chunk_index,
+        )
+        chunks = plan.get("chunks") or []
+        if chunk_index < 0 or chunk_index >= len(chunks):
+            raise ValueError("Invalid chunk_index")
+        chunk = chunks[chunk_index]
+        return {
+            "ok": True,
+            "action_id": str(existing.get("action_id") or action_id),
+            "duplicate": True,
+            "chunk_index": chunk_index,
+            "preview_relpath": chunk.get("preview_relpath"),
+            "chunk_meta": _chunk_meta_public(chunk),
+        }
+    chunks = plan.get("chunks") or []
+    if chunk_index < 0 or chunk_index >= len(chunks):
+        raise ValueError("Invalid chunk_index")
+    chunk = chunks[chunk_index]
+    chunk["preview_status"] = "regenerating"
+    chunk["status"] = "regenerating"
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, lambda: _build_chunk_preview_sync(session_id, chunk_index, plan))
+    chunk["preview_status"] = "ready"
+    chunk["status"] = "ready"
+    chunk["version"] = int(chunk.get("version") or 1) + 1
+    pending = [x for x in (plan.get("pending_rebuilds") or []) if int(x) != int(chunk_index)]
+    plan["pending_rebuilds"] = pending
+    queue_res: dict[str, Any] = {"action_id": "", "duplicate": False}
+
+    def _mutate(latest: dict[str, Any]) -> None:
+        chunks_latest = latest.get("chunks") or []
+        chunks_src = plan.get("chunks") or []
+        if chunk_index < 0 or chunk_index >= len(chunks_latest) or chunk_index >= len(chunks_src):
+            raise ValueError("Invalid chunk_index")
+        chunks_latest[chunk_index] = chunks_src[chunk_index]
+        latest["pending_rebuilds"] = [x for x in (latest.get("pending_rebuilds") or []) if int(x) != int(chunk_index)]
+        _mode5_push_live_event(
+            latest,
+            "preview_generated",
+            chunk_index=chunk_index,
+            preview_relpath=chunks_src[chunk_index].get("preview_relpath"),
+        )
+        aid, dup = _mode5_queue_action(
+            latest, "rebuild-chunk-preview", action_id=action_id, chunk_index=chunk_index
+        )
+        queue_res["action_id"] = aid
+        queue_res["duplicate"] = dup
+
+    plan_latest = _update_mode5_plan_atomic(session_id, _mutate)
+    chunk_latest = (plan_latest.get("chunks") or [])[chunk_index]
+    return {
+        "ok": True,
+        "action_id": queue_res["action_id"],
+        "duplicate": bool(queue_res["duplicate"]),
+        "chunk_index": chunk_index,
+        "preview_relpath": chunk_latest.get("preview_relpath"),
+        "chunk_meta": _chunk_meta_public(chunk_latest),
+    }
+
+
+def set_mode5_chunk_lock(
+    session_id: str,
+    chunk_index: int,
+    locked: bool,
+    *,
+    action_id: str | None = None,
+) -> dict[str, Any]:
+    plan = load_mode5_plan(session_id)
+    _ensure_mode5_live_defaults(plan)
+    existing = _mode5_find_action(plan, action_id)
+    if existing is not None:
+        _mode5_assert_duplicate_matches(
+            existing,
+            action="pause-chunk" if locked else "resume-chunk",
+            chunk_index=chunk_index,
+        )
+        chunks = plan.get("chunks") or []
+        if chunk_index < 0 or chunk_index >= len(chunks):
+            raise ValueError("Invalid chunk_index")
+        chunk = chunks[chunk_index]
+        return {
+            "ok": True,
+            "action_id": str(existing.get("action_id") or action_id),
+            "duplicate": True,
+            "chunk_index": chunk_index,
+            "locked": bool(chunk.get("locked")),
+            "chunk_meta": _chunk_meta_public(chunk),
+        }
+    queued_action_id = {"value": ""}
+
+    def _mutate(latest: dict[str, Any]) -> None:
+        chunks_latest = latest.get("chunks") or []
+        if chunk_index < 0 or chunk_index >= len(chunks_latest):
+            raise ValueError("Invalid chunk_index")
+        chunk_latest = chunks_latest[chunk_index]
+        chunk_latest["locked"] = bool(locked)
+        chunk_latest["status"] = "paused" if locked else "ready"
+        _mode5_push_live_event(
+            latest,
+            "chunk_state_changed",
+            chunk_index=chunk_index,
+            status=chunk_latest["status"],
+        )
+        queued_action_id["value"], _ = _mode5_queue_action(
+            latest,
+            "pause-chunk" if locked else "resume-chunk",
+            action_id=action_id,
+            chunk_index=chunk_index,
+        )
+
+    plan_latest = _update_mode5_plan_atomic(session_id, _mutate)
+    chunk = (plan_latest.get("chunks") or [])[chunk_index]
+    return {
+        "ok": True,
+        "action_id": queued_action_id["value"],
+        "duplicate": False,
+        "chunk_index": chunk_index,
+        "locked": bool(locked),
+        "chunk_meta": _chunk_meta_public(chunk),
+    }
+
+
+def rebuild_mode5_final_sync(session_id: str, *, action_id: str | None = None) -> dict[str, Any]:
+    plan = load_mode5_plan(session_id)
+    _ensure_mode5_live_defaults(plan)
+    existing = _mode5_find_action(plan, action_id)
+    if existing is not None:
+        _mode5_assert_duplicate_matches(existing, action="rebuild-final")
+        session_root = _session_dir(session_id)
+        final_path = session_root / "video_mode5.mp4"
+        rel = _rel_session(session_root, final_path) if final_path.is_file() else None
+        out = _result_payload(session_id, plan, review_ready=not bool(rel), final_video=rel)
+        out["action_id"] = str(existing.get("action_id") or action_id)
+        out["duplicate"] = True
+        return out
+    session_root = _session_dir(session_id)
+    _rebuild_mode5_missing_previews(session_id, plan)
+    previews = [session_root / ch["preview_relpath"] for ch in (plan.get("chunks") or [])]
+    for p in previews:
+        if not p.is_file():
+            raise FileNotFoundError(f"Missing preview for final rebuild: {p}")
+    final_path = session_root / "video_mode5.mp4"
+    _ffmpeg_concat(previews, final_path)
+    final_path = _append_mode5_sleep_tail(session_id, plan, final_path)
+    rel = _rel_session(session_root, final_path)
+    queue_res: dict[str, Any] = {"action_id": "", "duplicate": False}
+
+    def _mutate(latest: dict[str, Any]) -> None:
+        latest["pending_rebuilds"] = []
+        _mode5_push_live_event(
+            latest, "final_generated", chunk_index=None, video_path=rel
+        )
+        aid, dup = _mode5_queue_action(
+            latest, "rebuild-final", action_id=action_id, video_path=rel
+        )
+        queue_res["action_id"] = aid
+        queue_res["duplicate"] = dup
+
+    plan_latest = _update_mode5_plan_atomic(
+        session_id, _mutate, checkpoint=MODE5_CKPT_COMPLETED
+    )
+    out = _result_payload(session_id, plan_latest, review_ready=False, final_video=rel)
+    out["action_id"] = queue_res["action_id"]
+    out["duplicate"] = bool(queue_res["duplicate"])
+    return out
 
 
 def assemble_mode5_final_sync(session_id: str) -> dict[str, Any]:
@@ -2523,16 +3118,28 @@ def mode5_status_from_plan(session_id: str) -> dict[str, Any]:
     Used by /api/pipeline/{sid}/status for History -> Progress navigation after restart.
     """
     plan = load_mode5_plan(session_id)
+    _ensure_mode5_live_defaults(plan)
     session_root = _session_dir(session_id)
     final_path = session_root / "video_mode5.mp4"
+    has_dirty = any(
+        str(ch.get("status") or "") in {"dirty", "regenerating"} or bool(ch.get("locked"))
+        for ch in list(plan.get("chunks") or [])
+    )
+    has_pending_rebuilds = bool(list(plan.get("pending_rebuilds") or []))
     if final_path.is_file():
-        rel = _rel_session(session_root, final_path)
-        return _attach_mode5_resume_flags_from_plan(
-            session_id, plan, _result_payload(session_id, plan, review_ready=False, final_video=rel)
-        )
-    return _attach_mode5_resume_flags_from_plan(
+        # If content became dirty after final build, do not report final as authoritative.
+        if not has_dirty and not has_pending_rebuilds:
+            rel = _rel_session(session_root, final_path)
+            out = _attach_mode5_resume_flags_from_plan(
+                session_id, plan, _result_payload(session_id, plan, review_ready=False, final_video=rel)
+            )
+            out["mode5_runtime_status"] = "done"
+            return out
+    out = _attach_mode5_resume_flags_from_plan(
         session_id, plan, _result_payload(session_id, plan, review_ready=True)
     )
+    out["mode5_runtime_status"] = "running" if (has_dirty or has_pending_rebuilds) else "done"
+    return out
 
 
 def mode5_review_snapshot(session_id: str) -> dict[str, Any]:
@@ -2544,6 +3151,7 @@ def mode5_review_snapshot(session_id: str) -> dict[str, Any]:
     except FileNotFoundError:
         return _mode5_review_pending_snapshot(session_id)
     session_root = _session_dir(session_id)
+    _ensure_mode5_live_defaults(plan)
     chunks = list(plan.get("chunks") or [])
     ready_chunks: list[dict[str, Any]] = []
     for ch in chunks:
@@ -2551,7 +3159,8 @@ def mode5_review_snapshot(session_id: str) -> dict[str, Any]:
         if not rel:
             continue
         p = session_root / rel
-        if p.is_file() or bool(ch.get("preview_ready")):
+        ch["preview_ready"] = bool(p.is_file())
+        if p.is_file():
             ready_chunks.append(ch)
     payload = _result_payload(session_id, {**plan, "chunks": ready_chunks}, review_ready=bool(ready_chunks))
     payload["mode5_total_chunks"] = len(chunks)
@@ -2561,6 +3170,15 @@ def mode5_review_snapshot(session_id: str) -> dict[str, Any]:
     payload["mode5_can_resume"] = bool(snap.get("can_resume"))
     payload["mode5_checkpoint_stage"] = snap.get("stage")
     payload["mode5_resume_reason"] = snap.get("reason") or None
+    payload["mode5_unfinished_actions"] = [
+        {
+            "chunk_index": int(ch.get("index") or 0),
+            "status": str(ch.get("status") or "pending"),
+            "locked": bool(ch.get("locked")),
+        }
+        for ch in chunks
+        if str(ch.get("status") or "") in {"regenerating", "dirty"} or bool(ch.get("locked"))
+    ]
     prog = _mode5_progress_hint_payload(session_root, plan)
     payload.update(prog)
     return payload

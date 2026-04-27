@@ -395,6 +395,7 @@ async def run_quote_prompt_agent(
     subtitle_lang: str = "ru",
     auto_detect_lang: bool = False,
     source_russian_only: bool = False,
+    location_steering_hint: str | None = None,
 ) -> dict:
     """
     Анализирует фото личности и цитату, возвращает промпты для видео.
@@ -437,7 +438,7 @@ async def run_quote_prompt_agent(
         "Запрещено в EN-версии выдумывать другую внешность."
     ) if source_russian_only and bilingual else ""
 
-    location_steering = _pick_location_steering_hint()
+    location_steering = " ".join((location_steering_hint or "").split()).strip() or _pick_location_steering_hint()
     speech_hint = _speech_language_user_hint(
         quote,
         bilingual=bilingual,

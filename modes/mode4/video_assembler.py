@@ -272,6 +272,7 @@ def _assemble_mode4_impl(
     whisper_vad_filter: bool = True,
     header_title: str | None = None,
     plain_timed_subtitles: bool = False,
+    clip_ranges: list[tuple[float, float] | None] | None = None,
 ) -> Path:
     """Внутренняя реализация — вызывается в subprocess на Windows."""
     from agents.video_editor.whisper_timestamps import get_word_timestamps_from_video
@@ -303,6 +304,8 @@ def _assemble_mode4_impl(
             else None
         )
         subclip_range: tuple[float, float] | None = None
+        if clip_ranges and i < len(clip_ranges) and clip_ranges[i] is not None:
+            subclip_range = clip_ranges[i]
         if sub and sub.strip() and not static_subtitles and whisper_script:
             wt, tw = get_word_timestamps_from_video(
                 path,
@@ -459,6 +462,7 @@ def _run_in_process(
     whisper_vad_filter: bool,
     header_title: str | None,
     plain_timed_subtitles: bool,
+    clip_ranges: list[tuple[float, float] | None] | None,
 ) -> None:
     try:
         _assemble_mode4_impl(
@@ -473,6 +477,7 @@ def _run_in_process(
             whisper_vad_filter=whisper_vad_filter,
             header_title=header_title,
             plain_timed_subtitles=plain_timed_subtitles,
+            clip_ranges=clip_ranges,
         )
     except Exception as e:
         err_q.put(e)
@@ -491,6 +496,7 @@ def assemble_mode4_video(
     whisper_vad_filter: bool = True,
     header_title: str | None = None,
     plain_timed_subtitles: bool = False,
+    clip_ranges: list[tuple[float, float] | None] | None = None,
 ) -> Path:
     """
     Собирает видео. На Windows — в subprocess (избегаем WinError 32 с temp-файлами).
@@ -517,6 +523,7 @@ def assemble_mode4_video(
                 whisper_vad_filter,
                 header_title,
                 plain_timed_subtitles,
+                clip_ranges,
             ),
         )
         p.start()
@@ -536,5 +543,6 @@ def assemble_mode4_video(
             whisper_vad_filter=whisper_vad_filter,
             header_title=header_title,
             plain_timed_subtitles=plain_timed_subtitles,
+            clip_ranges=clip_ranges,
         )
     return output_path

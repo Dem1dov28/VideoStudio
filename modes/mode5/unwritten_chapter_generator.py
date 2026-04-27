@@ -30,6 +30,8 @@ from modes.mode5.outline_generator import (
 )
 from modes.mode5.narration_quality import adjacent_repetition_pairs
 from modes.mode5.text_length import spoken_plain_len
+from modes.mode5.quality_gate import remediate_mode5_narrations
+from utils.retry_policy import retry_async
 
 _MIN_TOPIC_CHARS = 8
 _MIN_BLOCKS = 5
@@ -113,37 +115,35 @@ async def _invoke_json(
     ]
     last_err: Exception | None = None
     for idx, (sys_prompt, human_prompt, temp) in enumerate(attempts, 1):
-        for net_try in range(1, _LLM_NETWORK_RETRIES + 1):
-            llm_kw: dict[str, Any] = {}
-            if max_tokens is not None:
-                llm_kw["max_tokens"] = max_tokens
-            llm = _scenario_llm(temperature=temp, **llm_kw)
-            try:
-                msg = await llm.ainvoke(
+        llm_kw: dict[str, Any] = {}
+        if max_tokens is not None:
+            llm_kw["max_tokens"] = max_tokens
+        llm = _scenario_llm(temperature=temp, **llm_kw)
+        try:
+            msg = await retry_async(
+                lambda: llm.ainvoke(
                     [SystemMessage(content=sys_prompt), HumanMessage(content=human_prompt)]
-                )
-            except Exception as e:
-                last_err = e
-                if not _is_transient_llm_error(e) or net_try >= _LLM_NETWORK_RETRIES:
-                    raise
-                delay = _LLM_NETWORK_RETRY_BASE_DELAY_SEC * (2 ** (net_try - 1))
-                logger.warning(
-                    f"[Mode5 unwritten] transient LLM error on attempt {idx}/{len(attempts)} "
-                    f"net_try={net_try}/{_LLM_NETWORK_RETRIES}: {type(e).__name__}: {e}. "
-                    f"Retry in {delay:.1f}s"
-                )
-                await asyncio.sleep(delay)
-                continue
-            raw = msg.content if isinstance(msg.content, str) else str(msg.content)
-            try:
-                return _parse_json_obj(raw)
-            except Exception as e:
-                last_err = e
-                preview = re.sub(r"\s+", " ", raw or "").strip()[:500]
-                logger.warning(
-                    f"[Mode5 unwritten] JSON parse failed on attempt {idx}: {e}. Raw preview: {preview}"
-                )
-                break
+                ),
+                operation_name=f"mode5_unwritten_llm_attempt_{idx}",
+                attempts=_LLM_NETWORK_RETRIES,
+                base_delay_sec=_LLM_NETWORK_RETRY_BASE_DELAY_SEC,
+                max_delay_sec=12.0,
+                jitter_sec=0.35,
+                is_retryable=_is_transient_llm_error,
+            )
+        except Exception as e:
+            last_err = e
+            raise
+        raw = msg.content if isinstance(msg.content, str) else str(msg.content)
+        try:
+            return _parse_json_obj(raw)
+        except Exception as e:
+            last_err = e
+            preview = re.sub(r"\s+", " ", raw or "").strip()[:500]
+            logger.warning(
+                f"[Mode5 unwritten] JSON parse failed on attempt {idx}: {e}. Raw preview: {preview}"
+            )
+            continue
     if last_err is not None:
         raise last_err
     raise ValueError("Mode 5 (The Unwritten Chapter): empty JSON parse state")
@@ -810,6 +810,9 @@ Rules:
         topic_query=topic_clean,
     )
     narrations = [_pad_narration(x) for x in narrations]
+    if bool(getattr(settings, "mode5_quality_gate_enabled", True)):
+        narrations, quality_report = remediate_mode5_narrations(narrations, language=lang)
+        outline["quality_report"] = quality_report
 
     script_clean = "\n\n".join([x for x in narrations if str(x).strip()])
     logger.success(

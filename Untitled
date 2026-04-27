@@ -1,3 +1,0 @@
-cd "d:\Proga\Startups\VideoEditor"
-.\.venv\Scripts\Activate.ps1
-uvicorn server:app --reload --port 8000

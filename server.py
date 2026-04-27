@@ -170,6 +170,7 @@ async def _run_pipeline_task(
             mode4_multiclip=getattr(req, "mode4_multiclip", False),
             mode4_segments=getattr(req, "mode4_segments", None),
             mode4_skip_final_assembly=getattr(req, "mode4_skip_final_assembly", True),
+            mode4_location_hint=getattr(req, "mode4_location_hint", None),
             mode5_script_text=getattr(req, "mode5_script_text", None),
             mode5_language=getattr(req, "mode5_language", None),
             mode5_chunk_seconds=int(getattr(req, "mode5_chunk_seconds", 300) or 300),
@@ -238,6 +239,7 @@ async def _run_pipeline_task(
             "mode4_clip_filenames": result.get("mode4_clip_filenames"),
             "mode4_show_subtitles": result.get("mode4_show_subtitles"),
             "mode4_segments": result.get("mode4_segments"),
+            "mode4_clip_trims": result.get("mode4_clip_trims"),
             "mode5_review_ready": result.get("mode5_review_ready"),
             "mode5_clip_filenames": result.get("mode5_clip_filenames"),
             "mode5_chunks_meta": result.get("mode5_chunks_meta"),
@@ -677,6 +679,7 @@ class StartRequest(BaseModel):
     mode4_multiclip: bool = False
     mode4_segments: list[str] | None = None
     mode4_skip_final_assembly: bool = True
+    mode4_location_hint: str | None = None
     # Mode 5: ручной long-form текст -> ElevenLabs -> review before final assembly
     mode5_script_text: str | None = None
     mode5_language: str | None = None
@@ -777,8 +780,37 @@ class RegenerateClipIndexBody(BaseModel):
     index: int
 
 
+class Mode4ClipTrimBody(BaseModel):
+    index: int
+    start_sec: float
+    end_sec: float
+
+
 class AssembleClipsBody(BaseModel):
     show_subtitles: bool | None = None
+
+
+class Mode4LocationIdeasBody(BaseModel):
+    person_name: str
+    quote: str | None = None
+    limit: int = 7
+
+    @field_validator("person_name", mode="before")
+    @classmethod
+    def _normalize_person_name(cls, v):  # noqa: ANN001
+        s = " ".join(str(v or "").split()).strip()
+        if len(s) < 2:
+            raise ValueError("person_name is required")
+        return s
+
+    @field_validator("limit", mode="before")
+    @classmethod
+    def _normalize_limit(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except Exception:
+            n = 7
+        return max(3, min(12, n))
 
 
 class Mode13RegenerateSegmentBody(BaseModel):
@@ -789,11 +821,18 @@ class Mode13RegenerateSegmentBody(BaseModel):
 class Mode5RegenerateImageBody(BaseModel):
     chunk_index: int
     segment_index: int
+    action_id: str | None = None
 
 
 class Mode5RegenerateChunkBody(BaseModel):
     chunk_index: int
     text: str
+    action_id: str | None = None
+
+
+class Mode5ChunkIndexBody(BaseModel):
+    chunk_index: int
+    action_id: str | None = None
 
 
 class Mode5TopicIdeasBody(BaseModel):
@@ -817,6 +856,10 @@ class Mode5TopicIdeasBody(BaseModel):
         except Exception:
             n = 8
         return max(1, min(12, n))
+
+
+class Mode5LiveFinalBody(BaseModel):
+    action_id: str | None = None
 
 
 class Mode13VoicePreviewBody(BaseModel):
@@ -1112,6 +1155,21 @@ async def upload_audio(file: UploadFile = File(...)):
         raise HTTPException(500, str(e)) from e
 
 
+@app.post("/api/mode4/location-options")
+async def mode4_location_options(body: Mode4LocationIdeasBody):
+    from modes.mode4.location_options import suggest_mode4_locations
+
+    try:
+        options = await suggest_mode4_locations(
+            person_name=body.person_name,
+            quote=(body.quote or "").strip(),
+            limit=int(body.limit),
+        )
+        return {"locations": options}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
 @app.get("/api/upload/audio-serve")
 async def serve_upload_audio(path: str = Query(..., description="Абсолютный путь из ответа upload/audio")):
     """Раздача загруженного WAV для <audio src> в UI."""
@@ -1331,7 +1389,7 @@ async def get_status(session_id: str):
             result = mode5_status_from_plan(session_id)
             return {
                 "session_id": session_id,
-                "status": "done",
+                "status": result.get("mode5_runtime_status") or "done",
                 "result": result,
                 "error": None,
                 "topic": result.get("topic", ""),
@@ -1396,6 +1454,28 @@ async def mode4_regenerate_clip_ep(session_id: str, body: RegenerateClipIndexBod
         raise HTTPException(500, str(e)) from e
 
 
+@app.post("/api/mode4/{session_id}/set-clip-trim")
+async def mode4_set_clip_trim_ep(session_id: str, body: Mode4ClipTrimBody):
+    from modes.mode4.multiclip import set_mode4_multiclip_clip_trim
+
+    try:
+        result = set_mode4_multiclip_clip_trim(
+            session_id,
+            body.index,
+            start_sec=float(body.start_sec),
+            end_sec=float(body.end_sec),
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+    sess = _sessions.get(session_id)
+    if sess and isinstance(sess.get("result"), dict):
+        sess["result"]["mode4_clip_trims"] = result.get("clip_trims") or []
+    return result
+
+
 @app.post("/api/mode4/{session_id}/assemble")
 async def mode4_assemble_ep(session_id: str, body: AssembleClipsBody):
     from modes.mode4.multiclip import assemble_mode4_multiclip_final_sync
@@ -1424,6 +1504,7 @@ async def mode4_assemble_ep(session_id: str, body: AssembleClipsBody):
         r.pop("mode4_clip_filenames", None)
         r.pop("mode4_show_subtitles", None)
         r.pop("mode4_segments", None)
+        r.pop("mode4_clip_trims", None)
     return result
 
 
@@ -1444,7 +1525,9 @@ async def mode5_regenerate_image_ep(session_id: str, body: Mode5RegenerateImageB
     from modes.mode5.pipeline import regenerate_mode5_image
 
     try:
-        return await regenerate_mode5_image(session_id, body.chunk_index, body.segment_index)
+        return await regenerate_mode5_image(
+            session_id, body.chunk_index, body.segment_index, action_id=body.action_id
+        )
     except FileNotFoundError as e:
         raise HTTPException(404, str(e)) from e
     except ValueError as e:
@@ -1456,7 +1539,9 @@ async def mode5_regenerate_chunk_ep(session_id: str, body: Mode5RegenerateChunkB
     from modes.mode5.pipeline import regenerate_mode5_chunk
 
     try:
-        result = await regenerate_mode5_chunk(session_id, body.chunk_index, body.text)
+        result = await regenerate_mode5_chunk(
+            session_id, body.chunk_index, body.text, action_id=body.action_id
+        )
     except FileNotFoundError as e:
         raise HTTPException(404, str(e)) from e
     except ValueError as e:
@@ -1504,6 +1589,176 @@ async def mode5_assemble_ep(session_id: str):
         if isinstance(result.get("mode5_sub_mode"), str):
             r["mode5_sub_mode"] = result["mode5_sub_mode"]
     return result
+
+
+@app.post("/api/mode5/{session_id}/live/regenerate-image")
+async def mode5_live_regenerate_image_ep(session_id: str, body: Mode5RegenerateImageBody):
+    from modes.mode5.pipeline import regenerate_mode5_image
+
+    try:
+        result = await regenerate_mode5_image(
+            session_id, body.chunk_index, body.segment_index, action_id=body.action_id
+        )
+        result["policy_decision"] = "background"
+        return result
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.post("/api/mode5/{session_id}/live/regenerate-audio")
+async def mode5_live_regenerate_audio_ep(session_id: str, body: Mode5ChunkIndexBody):
+    from modes.mode5.pipeline import regenerate_mode5_audio, load_mode5_plan
+
+    try:
+        load_mode5_plan(session_id)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    sess = _sessions.get(session_id)
+    paused = False
+    if isinstance(sess, dict) and sess.get("status") == "running":
+        ctrl = sess.get("control") or {}
+        pause_event = ctrl.get("pause_event")
+        if pause_event is not None:
+            pause_event.clear()
+            sess["status"] = "paused"
+            paused = True
+    try:
+        result = await regenerate_mode5_audio(
+            session_id, body.chunk_index, action_id=body.action_id
+        )
+        result["policy_decision"] = "paused_automatically" if paused else "background"
+        return result
+    except FileNotFoundError as e:
+        if paused and isinstance(sess, dict):
+            ctrl = sess.get("control") or {}
+            pe = ctrl.get("pause_event")
+            if pe is not None:
+                pe.set()
+            sess["status"] = "running"
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        if paused and isinstance(sess, dict):
+            ctrl = sess.get("control") or {}
+            pe = ctrl.get("pause_event")
+            if pe is not None:
+                pe.set()
+            sess["status"] = "running"
+        raise HTTPException(400, str(e)) from e
+
+
+@app.post("/api/mode5/{session_id}/live/rebuild-chunk-preview")
+async def mode5_live_rebuild_chunk_preview_ep(session_id: str, body: Mode5ChunkIndexBody):
+    from modes.mode5.pipeline import rebuild_mode5_chunk_preview, load_mode5_plan
+
+    try:
+        load_mode5_plan(session_id)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    sess = _sessions.get(session_id)
+    paused = False
+    if isinstance(sess, dict) and sess.get("status") == "running":
+        ctrl = sess.get("control") or {}
+        pause_event = ctrl.get("pause_event")
+        if pause_event is not None:
+            pause_event.clear()
+            sess["status"] = "paused"
+            paused = True
+    try:
+        result = await rebuild_mode5_chunk_preview(
+            session_id, body.chunk_index, action_id=body.action_id
+        )
+        result["policy_decision"] = "paused_automatically" if paused else "background"
+        return result
+    except FileNotFoundError as e:
+        if paused and isinstance(sess, dict):
+            ctrl = sess.get("control") or {}
+            pe = ctrl.get("pause_event")
+            if pe is not None:
+                pe.set()
+            sess["status"] = "running"
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        if paused and isinstance(sess, dict):
+            ctrl = sess.get("control") or {}
+            pe = ctrl.get("pause_event")
+            if pe is not None:
+                pe.set()
+            sess["status"] = "running"
+        raise HTTPException(400, str(e)) from e
+
+
+@app.post("/api/mode5/{session_id}/live/rebuild-final")
+async def mode5_live_rebuild_final_ep(session_id: str, body: Mode5LiveFinalBody):
+    from modes.mode5.pipeline import rebuild_mode5_final_sync, load_mode5_plan
+
+    try:
+        load_mode5_plan(session_id)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    sess = _sessions.get(session_id)
+    paused = False
+    if isinstance(sess, dict) and sess.get("status") == "running":
+        ctrl = sess.get("control") or {}
+        pause_event = ctrl.get("pause_event")
+        if pause_event is not None:
+            pause_event.clear()
+            sess["status"] = "paused"
+            paused = True
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(
+            None, functools.partial(rebuild_mode5_final_sync, session_id, action_id=body.action_id)
+        )
+        if isinstance(sess, dict):
+            sess_result = sess.get("result")
+            if isinstance(sess_result, dict):
+                sess_result["video_path"] = result.get("video_path")
+                sess_result["video_paths"] = result.get("video_paths")
+                sess_result["mode5_review_ready"] = False
+        result["policy_decision"] = "paused_automatically" if paused else "background"
+        return result
+    except FileNotFoundError as e:
+        if paused and isinstance(sess, dict):
+            ctrl = sess.get("control") or {}
+            pe = ctrl.get("pause_event")
+            if pe is not None:
+                pe.set()
+            sess["status"] = "running"
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        if paused and isinstance(sess, dict):
+            ctrl = sess.get("control") or {}
+            pe = ctrl.get("pause_event")
+            if pe is not None:
+                pe.set()
+            sess["status"] = "running"
+        raise HTTPException(400, str(e)) from e
+
+
+@app.post("/api/mode5/{session_id}/live/pause-chunk")
+async def mode5_live_pause_chunk_ep(session_id: str, body: Mode5ChunkIndexBody):
+    from modes.mode5.pipeline import set_mode5_chunk_lock
+
+    try:
+        return set_mode5_chunk_lock(session_id, body.chunk_index, True, action_id=body.action_id)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.post("/api/mode5/{session_id}/live/resume-chunk")
+async def mode5_live_resume_chunk_ep(session_id: str, body: Mode5ChunkIndexBody):
+    from modes.mode5.pipeline import set_mode5_chunk_lock
+
+    try:
+        return set_mode5_chunk_lock(session_id, body.chunk_index, False, action_id=body.action_id)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 @app.get("/api/mode5/{session_id}/review-state")

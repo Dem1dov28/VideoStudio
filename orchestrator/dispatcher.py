@@ -55,6 +55,7 @@ async def _run_pipeline_wrapped(
     mode4_multiclip: bool = False,
     mode4_segments: list[str] | None = None,
     mode4_skip_final_assembly: bool = True,
+    mode4_location_hint: str | None = None,
     mode5_script_text: str | None = None,
     mode5_language: str | None = None,
     mode5_chunk_seconds: int = 300,
@@ -296,6 +297,7 @@ async def _run_pipeline_wrapped(
                 else None
             ),
             skip_final_assembly_multiclip=bool(mode4_skip_final_assembly),
+            location_steering_hint=(mode4_location_hint or "").strip() or None,
         )
 
     # Mode 3: Восстановление домов
@@ -407,6 +409,7 @@ async def run_pipeline(
     mode4_multiclip: bool = False,
     mode4_segments: list[str] | None = None,
     mode4_skip_final_assembly: bool = True,
+    mode4_location_hint: str | None = None,
     mode5_script_text: str | None = None,
     mode5_language: str | None = None,
     mode5_chunk_seconds: int = 300,
@@ -454,17 +457,9 @@ async def run_pipeline(
     control: dict | None = None,
 ) -> dict[str, Any]:
     """Route to the appropriate pipeline by mode with session context."""
-    # Bind session_id к глобальному logger для всех логов пайплайна
-    # Это гарантирует, что все вызовы logger.info() внутри пайплайнов получат session_id
+    # Use contextual logger binding per request to avoid global logger races.
     session_id = session_id or str(int(time.time() * 1000))
-    bound_logger = logger.bind(session_id=session_id)
-    
-    # Временно заменяем глобальный logger на bound_logger
-    import loguru
-    original_logger = loguru.logger
-    loguru.logger = bound_logger
-    
-    try:
+    with logger.contextualize(session_id=session_id):
         return await _run_pipeline_wrapped(
             topic=topic,
             num_scenes=num_scenes,
@@ -495,6 +490,7 @@ async def run_pipeline(
             mode4_multiclip=mode4_multiclip,
             mode4_segments=mode4_segments,
             mode4_skip_final_assembly=mode4_skip_final_assembly,
+            mode4_location_hint=mode4_location_hint,
             mode5_script_text=mode5_script_text,
             mode5_language=mode5_language,
             mode5_chunk_seconds=mode5_chunk_seconds,
@@ -541,6 +537,3 @@ async def run_pipeline(
             mode13_voice_compression=mode13_voice_compression,
             control=control,
         )
-    finally:
-        # Восстанавливаем оригинальный logger
-        loguru.logger = original_logger

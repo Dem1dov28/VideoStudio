@@ -43,6 +43,7 @@ async def run_mode4_pipeline(
     multiclip: bool = False,
     multiclip_segments: list[str] | None = None,
     skip_final_assembly_multiclip: bool = True,
+    location_steering_hint: str | None = None,
 ) -> dict[str, Any]:
     """
     Запуск пайплайна «Цитата + фото личности» → video_ru.mp4 и/или video_en.mp4.
@@ -84,6 +85,7 @@ async def run_mode4_pipeline(
             manual_segments=multiclip_segments,
             skip_final_assembly=skip_final_assembly_multiclip,
             subtitle_style=subtitle_style,
+            location_steering_hint=location_steering_hint,
         )
 
     output_dir = settings.videos_dir / session_id / "clips"
@@ -115,6 +117,7 @@ async def run_mode4_pipeline(
         subtitle_lang="ru",
         auto_detect_lang=False,
         source_russian_only=True,
+        location_steering_hint=location_steering_hint,
     )
     script_ru = (prompt_data.get("script_ru") or quote).strip()
     script_en = (prompt_data.get("script_en") or quote).strip()

@@ -37,6 +37,7 @@ function reportClientError(message, url = '') {
 }
 
 const DEBUG_API = false; // Включить для отладки API
+const makeActionId = () => `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
 async function request(path, opts = {}) {
   const url = `${BASE}${path}`;
@@ -75,7 +76,10 @@ async function request(path, opts = {}) {
         msg = JSON.stringify(msg);
       }
       reportClientError(`${res.status}: ${msg}`, path);
-      throw Object.assign(new Error(msg || 'Request failed'), { status: res.status });
+      throw Object.assign(new Error(msg || 'Request failed'), {
+        status: res.status,
+        alreadyReported: true,
+      });
     }
 
     if (res.status === 204) return null;
@@ -86,7 +90,7 @@ async function request(path, opts = {}) {
       console.log(`[API] ${path} body preview:`, preview + (text.length > 200 ? '...' : ''));
     }
 
-    if (!ct.includes('application/json')) {
+    if (!/json|\+json/i.test(ct)) {
       if (DEBUG_API) console.error(`[API] ${path} НЕ JSON! Получен:`, text.slice(0, 300));
       reportClientError(`Expected JSON, got ${ct}`, path);
       throw new Error(`Сервер вернул HTML вместо JSON. Проверь маршрутизацию.`);
@@ -106,7 +110,44 @@ async function request(path, opts = {}) {
       throw timeoutError;
     }
     if (DEBUG_API) console.error(`[API] ${path} catch:`, e);
-    reportClientError(e.message || String(e), path);
+    if (!e?.alreadyReported) {
+      reportClientError(e.message || String(e), path);
+    }
+    throw e;
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+async function requestForm(path, formData, opts = {}) {
+  const url = `${BASE}${path}`;
+  const { timeoutMs = 0, ...fetchOpts } = opts;
+  const controller = new AbortController();
+  const timeoutId =
+    timeoutMs > 0
+      ? setTimeout(() => controller.abort(new DOMException('Request timeout', 'AbortError')), timeoutMs)
+      : null;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      body: formData,
+      ...fetchOpts,
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const raw = await res.text().catch(() => '');
+      let msg = raw || res.statusText || 'Upload failed';
+      try {
+        const parsed = raw ? JSON.parse(raw) : {};
+        msg = parsed.detail || parsed.message || msg;
+      } catch {
+        // keep text fallback
+      }
+      throw Object.assign(new Error(String(msg)), { status: res.status });
+    }
+    return await res.json();
+  } catch (e) {
+    reportClientError(e?.message || String(e), path);
     throw e;
   } finally {
     if (timeoutId) clearTimeout(timeoutId);
@@ -117,20 +158,12 @@ export const api = {
   uploadImage:        (file)       => {
     const fd = new FormData();
     fd.append('file', file);
-    return fetch((import.meta.env.VITE_API_URL || '') + '/api/upload/image', {
-      method: 'POST',
-      body: fd,
-      headers: {},
-    }).then(r => r.ok ? r.json() : r.json().then(e => { throw new Error(e.detail || 'Upload failed'); }));
+    return requestForm('/api/upload/image', fd);
   },
   uploadAudio:        (file)       => {
     const fd = new FormData();
     fd.append('file', file);
-    return fetch((import.meta.env.VITE_API_URL || '') + '/api/upload/audio', {
-      method: 'POST',
-      body: fd,
-      headers: {},
-    }).then(r => r.ok ? r.json() : r.json().then(e => { throw new Error(e.detail || 'Upload failed'); }));
+    return requestForm('/api/upload/audio', fd);
   },
   /** Короткий WAV с фильтрами пресета (предпрослушивание mode 13). */
   mode13VoicePreview: async (body) => {
@@ -152,12 +185,22 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ index }),
     }),
+  mode4SetClipTrim: (sid, index, startSec, endSec) =>
+    request(`/api/mode4/${sid}/set-clip-trim`, {
+      method: 'POST',
+      body: JSON.stringify({ index, start_sec: startSec, end_sec: endSec }),
+    }),
   mode4Assemble: (sid, showSubtitles = undefined) =>
     request(`/api/mode4/${sid}/assemble`, {
       method: 'POST',
       body: JSON.stringify(
         showSubtitles === undefined ? {} : { show_subtitles: showSubtitles },
       ),
+    }),
+  mode4LocationOptions: (personName, quote = '', limit = 7) =>
+    request('/api/mode4/location-options', {
+      method: 'POST',
+      body: JSON.stringify({ person_name: personName, quote, limit }),
     }),
   mode13RegenerateSegment: (sid, chunkIndex, segmentIndex) =>
     request(`/api/mode13/${sid}/regenerate-segment`, {
@@ -185,6 +228,40 @@ export const api = {
     request(`/api/mode5/${sid}/continue-generation`, {
       method: 'POST',
       body: JSON.stringify({}),
+    }),
+  mode5LiveRegenerateImage: (sid, chunkIndex, segmentIndex, actionId = makeActionId()) =>
+    request(`/api/mode5/${sid}/live/regenerate-image`, {
+      method: 'POST',
+      body: JSON.stringify({ chunk_index: chunkIndex, segment_index: segmentIndex, action_id: actionId }),
+      timeoutMs: 120000,
+    }),
+  mode5LiveRegenerateAudio: (sid, chunkIndex, actionId = makeActionId()) =>
+    request(`/api/mode5/${sid}/live/regenerate-audio`, {
+      method: 'POST',
+      body: JSON.stringify({ chunk_index: chunkIndex, action_id: actionId }),
+      timeoutMs: 120000,
+    }),
+  mode5LiveRebuildChunkPreview: (sid, chunkIndex, actionId = makeActionId()) =>
+    request(`/api/mode5/${sid}/live/rebuild-chunk-preview`, {
+      method: 'POST',
+      body: JSON.stringify({ chunk_index: chunkIndex, action_id: actionId }),
+      timeoutMs: 120000,
+    }),
+  mode5LiveRebuildFinal: (sid, actionId = makeActionId()) =>
+    request(`/api/mode5/${sid}/live/rebuild-final`, {
+      method: 'POST',
+      body: JSON.stringify({ action_id: actionId }),
+      timeoutMs: 180000,
+    }),
+  mode5LivePauseChunk: (sid, chunkIndex, actionId = makeActionId()) =>
+    request(`/api/mode5/${sid}/live/pause-chunk`, {
+      method: 'POST',
+      body: JSON.stringify({ chunk_index: chunkIndex, action_id: actionId }),
+    }),
+  mode5LiveResumeChunk: (sid, chunkIndex, actionId = makeActionId()) =>
+    request(`/api/mode5/${sid}/live/resume-chunk`, {
+      method: 'POST',
+      body: JSON.stringify({ chunk_index: chunkIndex, action_id: actionId }),
     }),
   mode5TopicIdeas: (subMode, limit = 8, seed = null) =>
     request('/api/mode5/topic-ideas', {
@@ -284,38 +361,64 @@ export function socialVideoFileUrl(channelId, videoKey) {
 }
 
 /** Subscribe to SSE log stream. Returns cleanup function. */
-export function subscribeToStream(sessionId, onMessage, onDone, onError) {
-  const es = new EventSource(`${BASE}/api/pipeline/${sessionId}/stream`);
+export function subscribeToStream(sessionId, onMessage, onDone, onError, options = {}) {
+  const maxReconnectAttempts = Number.isFinite(options?.maxReconnectAttempts) ? options.maxReconnectAttempts : 4;
+  const reconnectBaseMs = Number.isFinite(options?.reconnectBaseMs) ? options.reconnectBaseMs : 1200;
+  let es = null;
   let closed = false;
+  let reconnectAttempts = 0;
+  let reconnectTimer = null;
 
   const finish = () => {
     closed = true;
     try {
-      es.close();
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+      if (es) es.close();
     } catch {/* ignore */}
   };
 
-  es.onmessage = (e) => {
+  const connect = () => {
     if (closed) return;
-    try {
-      const data = JSON.parse(e.data);
-      if (data.type === 'done') {
+    es = new EventSource(`${BASE}/api/pipeline/${sessionId}/stream`);
+
+    es.onopen = () => {
+      reconnectAttempts = 0;
+    };
+
+    es.onmessage = (e) => {
+      if (closed) return;
+      try {
+        const data = JSON.parse(e.data);
+        if (data.type === 'done') {
+          finish();
+          onDone(data);
+        } else if (data.type === 'error') {
+          finish();
+          onError(data.error);
+        } else if (data.type === 'log') {
+          onMessage(data);
+        }
+      } catch {/* ignore */}
+    };
+
+    es.onerror = () => {
+      if (closed) return;
+      try {
+        es.close();
+      } catch {/* ignore */}
+      if (reconnectAttempts >= maxReconnectAttempts) {
         finish();
-        onDone(data);
-      } else if (data.type === 'error') {
-        finish();
-        onError(data.error);
-      } else if (data.type === 'log') {
-        onMessage(data);
+        onError('Connection lost, switched to polling mode');
+        return;
       }
-    } catch {/* ignore */}
+      const delay = reconnectBaseMs * (2 ** reconnectAttempts);
+      reconnectAttempts += 1;
+      reconnectTimer = setTimeout(connect, delay);
+      onError(`Connection lost, reconnecting (${reconnectAttempts}/${maxReconnectAttempts})...`);
+    };
   };
-
-  es.onerror = () => {
-    if (closed) return;
-    finish();
-    onError('Connection lost');
-  };
+  connect();
 
   return () => {
     finish();

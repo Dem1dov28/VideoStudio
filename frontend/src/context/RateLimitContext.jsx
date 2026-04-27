@@ -84,6 +84,7 @@ export function RateLimitProvider({ children }) {
   const [isInitialized, setIsInitialized] = useState(false);
   const stateRef = useRef(state);
   const backendAvailableRef = useRef(true);
+  const checkMutexRef = useRef(Promise.resolve());
 
   useEffect(() => {
     stateRef.current = state;
@@ -175,6 +176,7 @@ export function RateLimitProvider({ children }) {
    * Check if video generation is allowed and start it or add to queue
    */
   const checkAndStartVideo = useCallback(async (payload) => {
+    const runLocked = async () => {
     if (state.isChecking) {
       // Wait for current check to complete
       await new Promise(resolve => setTimeout(resolve, 500));
@@ -260,6 +262,10 @@ export function RateLimitProvider({ children }) {
       setState(prev => ({ ...prev, isChecking: false }));
       throw error;
     }
+    };
+    const chained = checkMutexRef.current.then(runLocked, runLocked);
+    checkMutexRef.current = chained.catch(() => {});
+    return chained;
   }, [state.isChecking, state.limit, state.used]);
 
   /**
