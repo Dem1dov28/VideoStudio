@@ -63,6 +63,20 @@ function downloadTextFile(filename, text) {
   URL.revokeObjectURL(url);
 }
 
+function mode4SavedTrimForIndex(trims, idx) {
+  if (!Array.isArray(trims)) return null;
+  const row = trims.find((t) => Number(t?.index) === idx);
+  if (!row || !Number.isFinite(Number(row.start_sec)) || !Number.isFinite(Number(row.end_sec))) return null;
+  return { start: Number(row.start_sec), end: Number(row.end_sec) };
+}
+
+function mode4IsNearlyFullTrim(start, end, duration) {
+  if (!Number.isFinite(duration) || duration <= 0.2) return true;
+  const s = Number.isFinite(start) ? start : 0;
+  const e = Number.isFinite(end) ? end : duration;
+  return s <= 0.02 && e >= duration - 0.02;
+}
+
 export default function Progress() {
   const { sid } = useParams();
   const navigate = useNavigate();
@@ -81,6 +95,9 @@ export default function Progress() {
   const [mode4RegenIdx, setMode4RegenIdx] = useState(null);
   const [mode4TrimDrafts, setMode4TrimDrafts] = useState({});
   const [mode4TrimSavingIdx, setMode4TrimSavingIdx] = useState(null);
+  /** Индекс клипа, для которого видео зациклено только на выбранном диапазоне (превью «как в монтаже»). */
+  const [mode4TrimPreviewIdx, setMode4TrimPreviewIdx] = useState(null);
+  const mode4TrimVideoRefs = useRef({});
   const [mode13AssemblyBusy, setMode13AssemblyBusy] = useState(false);
   const [mode13AssemblySubs, setMode13AssemblySubs] = useState(true);
   const [mode13RegenKey, setMode13RegenKey] = useState(null);
@@ -131,6 +148,10 @@ export default function Progress() {
       setMode4AssemblyBusy(false);
       setMode4RegenIdx(null);
       setMode4AssemblySubs(true);
+      setMode4TrimDrafts({});
+      setMode4TrimSavingIdx(null);
+      setMode4TrimPreviewIdx(null);
+      mode4TrimVideoRefs.current = {};
       setMode13AssemblyBusy(false);
       setMode13AssemblySubs(true);
       setMode13RegenKey(null);
@@ -1174,7 +1195,7 @@ export default function Progress() {
               <span className="text-sm font-semibold text-white">Цитата: проверка фрагментов</span>
             </div>
             <p className="px-4 pt-3 text-sm text-[#a1a1aa] leading-relaxed">
-              Просмотрите клипы. При необходимости перегенерируйте отдельный фрагмент, затем соберите финальный ролик с субтитрами.
+              Просмотрите клипы. Обрезку можно сохранить для монтажа, посмотреть в этом же плеере кнопкой «Просмотр как в монтаже» и при необходимости вернуть полный клип. Затем соберите финальный ролик.
             </p>
             <div className="p-4 flex flex-col gap-8">
               {mode4ClipReview.map((row) => (
@@ -1185,26 +1206,88 @@ export default function Progress() {
                   {row.text ? (
                     <p className="text-sm text-[#d4d4d8] mb-3 whitespace-pre-wrap leading-relaxed">{row.text}</p>
                   ) : null}
-                  <div className="flex justify-center bg-black p-3 rounded-lg mb-3">
-                    <video
-                      controls
-                      className="max-h-[52vh] rounded-lg shadow-xl"
-                      style={{ maxWidth: '300px' }}
-                      key={row.url}
-                      onLoadedMetadata={(e) => {
-                        const dur = Number(e.currentTarget?.duration || 0);
-                        if (!Number.isFinite(dur) || dur <= 0.2) return;
-                        setMode4TrimDrafts((prev) => {
-                          const cur = prev[row.index] || {};
-                          const startSec = Number.isFinite(cur.startSec) ? Math.max(0, Math.min(cur.startSec, dur - 0.12)) : 0;
-                          const endSec = Number.isFinite(cur.endSec) ? Math.max(startSec + 0.12, Math.min(cur.endSec, dur)) : dur;
-                          return { ...prev, [row.index]: { ...cur, durationSec: dur, startSec, endSec } };
-                        });
-                      }}
-                    >
-                      <source src={row.url} type="video/mp4" />
-                    </video>
-                  </div>
+                  {(() => {
+                    const td0 = mode4TrimDrafts[row.index] || {};
+                    const duration0 = Number(td0.durationSec || 0);
+                    const start0 = Number.isFinite(td0.startSec) ? td0.startSec : 0;
+                    const end0 = Number.isFinite(td0.endSec) ? td0.endSec : duration0;
+                    const trimPreviewOn = mode4TrimPreviewIdx === row.index;
+                    const savedTrim = mode4SavedTrimForIndex(done?.mode4_clip_trims, row.index);
+                    const savedIsTight =
+                      savedTrim &&
+                      Number.isFinite(duration0) &&
+                      duration0 > 0.2 &&
+                      !mode4IsNearlyFullTrim(savedTrim.start, savedTrim.end, duration0);
+
+                    return (
+                      <>
+                        <div className="flex justify-center bg-black p-3 rounded-lg mb-2">
+                          <video
+                            controls
+                            className="max-h-[52vh] rounded-lg shadow-xl"
+                            style={{ maxWidth: '300px' }}
+                            key={row.url}
+                            ref={(el) => {
+                              if (el) mode4TrimVideoRefs.current[row.index] = el;
+                              else delete mode4TrimVideoRefs.current[row.index];
+                            }}
+                            onLoadedMetadata={(e) => {
+                              const dur = Number(e.currentTarget?.duration || 0);
+                              if (!Number.isFinite(dur) || dur <= 0.2) return;
+                              setMode4TrimDrafts((prev) => {
+                                const cur = prev[row.index] || {};
+                                const startSec = Number.isFinite(cur.startSec) ? Math.max(0, Math.min(cur.startSec, dur - 0.12)) : 0;
+                                const endSec = Number.isFinite(cur.endSec) ? Math.max(startSec + 0.12, Math.min(cur.endSec, dur)) : dur;
+                                return { ...prev, [row.index]: { ...cur, durationSec: dur, startSec, endSec } };
+                              });
+                            }}
+                            onTimeUpdate={(e) => {
+                              if (mode4TrimPreviewIdx !== row.index) return;
+                              const v = e.currentTarget;
+                              const t = mode4TrimDrafts[row.index] || {};
+                              const d = Number(t.durationSec || 0);
+                              if (!Number.isFinite(d) || d <= 0.2) return;
+                              const s = Number.isFinite(t.startSec) ? t.startSec : 0;
+                              const en = Number.isFinite(t.endSec) ? t.endSec : d;
+                              if (v.currentTime < s) v.currentTime = s;
+                              if (v.currentTime >= en - 0.04) v.currentTime = s;
+                            }}
+                            onSeeking={(e) => {
+                              if (mode4TrimPreviewIdx !== row.index) return;
+                              const v = e.currentTarget;
+                              const t = mode4TrimDrafts[row.index] || {};
+                              const d = Number(t.durationSec || 0);
+                              if (!Number.isFinite(d) || d <= 0.2) return;
+                              const s = Number.isFinite(t.startSec) ? t.startSec : 0;
+                              const en = Number.isFinite(t.endSec) ? t.endSec : d;
+                              if (v.currentTime < s) v.currentTime = s;
+                              if (v.currentTime > en - 0.06) v.currentTime = Math.max(s, en - 0.06);
+                            }}
+                          >
+                            <source src={row.url} type="video/mp4" />
+                          </video>
+                        </div>
+                        {trimPreviewOn && Number.isFinite(duration0) && duration0 > 0.2 ? (
+                          <p className="text-xs text-amber-300/95 mb-2">
+                            Превью обрезки: зациклен участок {start0.toFixed(2)}–{end0.toFixed(2)} с. «Полный клип» — снова весь файл в плеере.
+                          </p>
+                        ) : null}
+                        {savedIsTight ? (
+                          <p className="text-xs text-emerald-400/90 mb-2">
+                            В финальный монтаж сохранено: {savedTrim.start.toFixed(2)}–{savedTrim.end.toFixed(2)} с (файл клипа на диске полный; в ролике войдёт только этот кусок).
+                          </p>
+                        ) : null}
+                        {!trimPreviewOn &&
+                        Number.isFinite(duration0) &&
+                        duration0 > 0.2 &&
+                        end0 - start0 < duration0 - 0.06 ? (
+                          <p className="text-xs text-[#71717a] mb-2">
+                            «Просмотр как в монтаже» — в этом же плеере только выбранный диапазон; «Сохранить обрезку» — записать границы для финала.
+                          </p>
+                        ) : null}
+                      </>
+                    );
+                  })()}
                   {(() => {
                     const td = mode4TrimDrafts[row.index] || {};
                     const duration = Number(td.durationSec || 0);
@@ -1212,6 +1295,10 @@ export default function Progress() {
                     const startSec = Number.isFinite(td.startSec) ? td.startSec : 0;
                     const endSec = Number.isFinite(td.endSec) ? td.endSec : duration;
                     const minGap = 0.12;
+                    const savedTrim = mode4SavedTrimForIndex(done?.mode4_clip_trims, row.index);
+                    const savedIsTight =
+                      savedTrim && !mode4IsNearlyFullTrim(savedTrim.start, savedTrim.end, duration);
+
                     return (
                       <div className="mb-3 border border-[#27272f] rounded-lg p-3 bg-[#0f0f16]">
                         <p className="text-xs text-[#a1a1aa] mb-2">Обрезка перед финальным монтажом</p>
@@ -1257,7 +1344,7 @@ export default function Progress() {
                             />
                           </label>
                         </div>
-                        <div className="flex gap-2 mt-2">
+                        <div className="flex flex-wrap gap-2 mt-2">
                           <button
                             type="button"
                             className="btn-secondary text-xs"
@@ -1283,20 +1370,88 @@ export default function Progress() {
                             className="btn-secondary text-xs"
                             disabled={mode4AssemblyBusy}
                             onClick={() => {
-                              setMode4TrimDrafts((prev) => ({ ...prev, [row.index]: { ...td, durationSec: duration, startSec: 0, endSec: duration } }));
+                              setMode4TrimDrafts((prev) => ({
+                                ...prev,
+                                [row.index]: { ...td, durationSec: duration, startSec: 0, endSec: duration },
+                              }));
                             }}
                           >
-                            Сброс
+                            Сбросить ползунки
                           </button>
+                          <button
+                            type="button"
+                            className="btn-secondary text-xs"
+                            disabled={mode4AssemblyBusy || endSec - startSec >= duration - 0.06}
+                            onClick={() => {
+                              setMode4TrimPreviewIdx(row.index);
+                              const v = mode4TrimVideoRefs.current[row.index];
+                              if (v && Number.isFinite(duration)) {
+                                v.currentTime = Math.min(startSec, duration - 0.12);
+                                void v.play().catch(() => {});
+                              }
+                            }}
+                          >
+                            Просмотр как в монтаже
+                          </button>
+                          {mode4TrimPreviewIdx === row.index ? (
+                            <button
+                              type="button"
+                              className="btn-secondary text-xs"
+                              disabled={mode4AssemblyBusy}
+                              onClick={() => {
+                                setMode4TrimPreviewIdx(null);
+                                const v = mode4TrimVideoRefs.current[row.index];
+                                if (v) {
+                                  v.pause();
+                                  v.currentTime = 0;
+                                }
+                              }}
+                            >
+                              Полный клип
+                            </button>
+                          ) : null}
                         </div>
+                        {savedIsTight ? (
+                          <button
+                            type="button"
+                            className="btn-secondary text-xs mt-2 w-full sm:w-auto"
+                            disabled={mode4TrimSavingIdx === row.index || mode4AssemblyBusy}
+                            onClick={async () => {
+                              setMode4TrimSavingIdx(row.index);
+                              setError('');
+                              try {
+                                const res = await api.mode4ClearClipTrim(sid, row.index);
+                                const trims = Array.isArray(res?.clip_trims) ? res.clip_trims : [];
+                                setDone((prev) => (prev ? { ...prev, mode4_clip_trims: trims } : prev));
+                                setMode4TrimDrafts((prev) => ({
+                                  ...prev,
+                                  [row.index]: {
+                                    ...(prev[row.index] || {}),
+                                    durationSec: duration,
+                                    startSec: 0,
+                                    endSec: duration,
+                                  },
+                                }));
+                                setMode4TrimPreviewIdx((cur) => (cur === row.index ? null : cur));
+                              } catch (e) {
+                                setError(e.message || 'Не удалось убрать обрезку');
+                              } finally {
+                                setMode4TrimSavingIdx(null);
+                              }
+                            }}
+                          >
+                            Вернуть в монтаж полный клип
+                          </button>
+                        ) : null}
                       </div>
                     );
                   })()}
                   <button
                     type="button"
-                    disabled={mode4RegenIdx === row.index || mode4AssemblyBusy || mode4TrimSavingIdx != null}
+                    disabled={mode4RegenIdx === row.index || mode4AssemblyBusy || mode4TrimSavingIdx === row.index}
                     onClick={async () => {
                       setMode4RegenIdx(row.index);
+                      setMode4TrimPreviewIdx((cur) => (cur === row.index ? null : cur));
                       setError('');
                       try {
                         await api.mode4RegenerateClip(sid, row.index);

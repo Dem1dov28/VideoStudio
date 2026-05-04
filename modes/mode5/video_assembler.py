@@ -228,8 +228,8 @@ def _make_segment_clip_static_still(
 
     duration = _wav_duration_sec(audio_path)
     vf = (
-        f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease:flags=lanczos,"
-        f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:black,"
+        f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase:flags=lanczos,"
+        f"crop={target_w}:{target_h},"
         "format=yuv420p"
     )
     cmd = [
@@ -386,10 +386,11 @@ def _make_looped_video_segment_clip(
     render_fps: int,
 ) -> VideoFileClip:
     """
-    Подготовить готовый видео-сегмент (intro) под длительность аудио:
-    - бесконечно зациклить источник;
-    - обрезать по длительности текущего WAV;
-    - привести к целевому размеру/fps/pix_fmt.
+    Только картинка/видео-дорожка: зациклить источник MP4 и обрезать по длительности WAV.
+
+    WAV здесь нужен только как метка длительности (-t); в поток не микшируется (-an).
+    Речь сегмента подмешивается в assemble_mode5_video отдельно (seg_audio = этот же WAV),
+    склейка озвучки — строго по порядку сегментов, как для режима image.
     """
     ffmpeg = resolve_ffmpeg_executable()
     if not ffmpeg:
@@ -400,8 +401,8 @@ def _make_looped_video_segment_clip(
 
     duration = _wav_duration_sec(audio_path)
     vf = (
-        f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease:flags=lanczos,"
-        f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:black,"
+        f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase:flags=lanczos,"
+        f"crop={target_w}:{target_h},"
         "format=yuv420p"
     )
     cmd = [

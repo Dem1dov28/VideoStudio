@@ -33,6 +33,7 @@ from modes.mode5.outline_generator import (
     _outline_from_flat_rows,
     _pad_narrations_to_rows,
     _parse_json_obj,
+    trim_outline_to_first_n_subchapters,
 )
 from modes.mode5.quality_gate import remediate_mode5_narrations
 from utils.llm import make_llm
@@ -661,8 +662,31 @@ Hard constraints:
         )
 
     flat_rows = _flatten_outline(outline)
+    test_budget = bool(control and control.get("_mode5_test_run"))
+    if test_budget:
+        from modes.mode5.text_length import mode5_trim_strings_by_estimated_speech
+
+        tgt = float(control.get("_mode5_test_target_sec") or 300.0)
+        tgt = max(60.0, min(7200.0, tgt))
+        proxies = [
+            " ".join(
+                str(row.get(k) or "").strip()
+                for k in ("chapter_title", "subchapter_title", "coverage")
+            ).strip()
+            or "subsection"
+            for row in flat_rows
+        ]
+        kept = mode5_trim_strings_by_estimated_speech(proxies, language=lang, target_sec=tgt)
+        k = len(kept)
+        if k < len(flat_rows):
+            flat_rows = flat_rows[:k]
+            outline = trim_outline_to_first_n_subchapters(outline, k)
+            logger.info(
+                f"[Mode5 book_night] test_run: generating first {k} subsection(s) (~{tgt:.0f}s speech budget)"
+            )
+
     n_total = len(flat_rows)
-    if n_total < _MIN_BOOK_SUBS_TOTAL or n_total > _MAX_BOOK_SUBS_TOTAL:
+    if not test_budget and (n_total < _MIN_BOOK_SUBS_TOTAL or n_total > _MAX_BOOK_SUBS_TOTAL):
         raise ValueError(
             f"Mode 5 (книга на ночь): после нормализации ожидалось {_MIN_BOOK_SUBS_TOTAL}–{_MAX_BOOK_SUBS_TOTAL} подглав, "
             f"получилось {n_total}."

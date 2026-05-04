@@ -257,6 +257,17 @@ Rules:
     if len(facts) != FACTS50_TARGET:
         raise ValueError(f"Mode 5 (77 фактов): модель вернула {len(facts)} фактов вместо {FACTS50_TARGET}. Попробуйте ещё раз.")
 
+    if control and control.get("_mode5_test_run"):
+        tgt = float(control.get("_mode5_test_target_sec") or 300.0)
+        tgt = max(60.0, min(7200.0, tgt))
+        # В пайплайне добавляются отдельные intro/outro — оставляем запас под них.
+        reserve_sec = 110.0
+        per_fact_sec = 38.0
+        k = max(3, min(len(facts), int(max(0.0, tgt - reserve_sec) / per_fact_sec)))
+        if k < len(facts):
+            facts = facts[:k]
+            logger.info(f"[Mode5 facts50] test_run: generating {k} facts (~{tgt:.0f}s speech budget)")
+
     await checkpoint(control)
     try:
         facts = await _verify_facts(topic_clean, lang_name, facts)
@@ -303,17 +314,18 @@ Style anchor (keep stable across all batches): calm documentary narrator, precis
             narr = _pad_narrations_to_facts(batch_facts, narr, language=lang)
         return [_ensure_min_narration_length(x, language=lang) for x in narr]
 
-    # Батчим озвучки параллельно, но без жесткой привязки к старому количеству фактов.
+    # Батчим озвучки параллельно по фактической длине ``facts`` (полный релиз или укороченный test_run).
+    n_facts = len(facts)
     tasks = []
-    for start in range(0, FACTS50_TARGET, _NARRATION_BATCH):
-        end = min(FACTS50_TARGET, start + _NARRATION_BATCH)
+    for start in range(0, n_facts, _NARRATION_BATCH):
+        end = min(n_facts, start + _NARRATION_BATCH)
         tasks.append(narr_batch(start, end))
     narr_chunks = await asyncio.gather(*tasks)
     await checkpoint(control)
     narrations = [x for batch in narr_chunks for x in batch]
-    if len(narrations) != FACTS50_TARGET:
+    if len(narrations) != n_facts:
         narrations = _pad_narrations_to_facts(facts, narrations, language=lang)
-        narrations = [_ensure_min_narration_length(x, language=lang) for x in narrations[:FACTS50_TARGET]]
+        narrations = [_ensure_min_narration_length(x, language=lang) for x in narrations[:n_facts]]
 
-    logger.success(f"[Mode5 facts50] Generated {FACTS50_TARGET} facts + narrations for: {topic_clean[:80]}")
+    logger.success(f"[Mode5 facts50] Generated {n_facts} facts + narrations for: {topic_clean[:80]}")
     return facts, narrations

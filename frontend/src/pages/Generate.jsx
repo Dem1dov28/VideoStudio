@@ -530,60 +530,64 @@ export default function Generate() {
 
   /* Mode 5: длинные видео — прямой запуск */
   async function handleMode5Launch(override = null) {
+    const effectiveSubMode = override?.subMode ?? mode5SubMode;
     const scriptTrim = (override?.script ?? mode5Script).trim();
     const headerTrim = (override?.header ?? mode5HeaderTitle).trim();
     if (!scriptTrim) {
       setError(
-        mode5SubMode === 'outline'
+        effectiveSubMode === 'outline'
           ? 'Введите краткое описание сюжета или задумки'
-          : mode5SubMode === 'unwritten_chapter'
+          : effectiveSubMode === 'unwritten_chapter'
             ? 'Укажите тему для расследования на 30–50 минут'
-          : mode5SubMode === 'book_night'
+          : effectiveSubMode === 'book_night'
             ? 'Введите название книги (можно с автором)'
-            : mode5SubMode === 'facts50'
+            : effectiveSubMode === 'facts50'
               ? 'Введите тему для 77 фактов'
               : 'Вставьте текст для озвучки',
       );
       return;
     }
-    if (mode5SubMode === 'outline' && scriptTrim.length < MODE5_OUTLINE_MIN_BRIEF_CHARS) {
+    if (effectiveSubMode === 'outline' && scriptTrim.length < MODE5_OUTLINE_MIN_BRIEF_CHARS) {
       setError(
         `Для «плана из описания» напишите короткое описание не короче ${MODE5_OUTLINE_MIN_BRIEF_CHARS} символов: кто, где, настроение, что происходит — не только название ролика.`,
       );
       return;
     }
-    if ((mode5SubMode === 'facts50' || mode5SubMode === 'book_night' || mode5SubMode === 'unwritten_chapter') && scriptTrim.length < 8) {
+    if ((effectiveSubMode === 'facts50' || effectiveSubMode === 'book_night' || effectiveSubMode === 'unwritten_chapter') && scriptTrim.length < 8) {
       setError(
-        mode5SubMode === 'book_night'
+        effectiveSubMode === 'book_night'
           ? 'Для «книги на ночь» введите название книги (от 8 символов), можно с автором'
-          : mode5SubMode === 'unwritten_chapter'
+          : effectiveSubMode === 'unwritten_chapter'
             ? 'Для режима «The Unwritten Chapter» укажите тему расследования (от 8 символов)'
           : 'Для режима «77 фактов» введите тему подлиннее (например: 77 фактов о Франции)',
       );
       return;
     }
     if (
-      mode5SubMode !== 'facts50' &&
-      mode5SubMode !== 'outline' &&
-      mode5SubMode !== 'unwritten_chapter' &&
-      mode5SubMode !== 'book_night' &&
+      effectiveSubMode !== 'facts50' &&
+      effectiveSubMode !== 'outline' &&
+      effectiveSubMode !== 'unwritten_chapter' &&
+      effectiveSubMode !== 'book_night' &&
       scriptTrim.length < 80
     ) {
       setError('Для ручного режима нужен полноценный текст озвучки (не короче ~80 символов)');
       return;
     }
     setError('');
+    if (override?.subMode) {
+      setMode5SubMode(override.subMode);
+    }
     setStep('launching');
     try {
       const topicLine =
-        isMode5AiSubMode(mode5SubMode)
+        isMode5AiSubMode(effectiveSubMode)
           ? headerTrim ||
             scriptTrim ||
-            (mode5SubMode === 'outline'
+            (effectiveSubMode === 'outline'
               ? 'Лонгрид по описанию'
-              : mode5SubMode === 'book_night'
+              : effectiveSubMode === 'book_night'
                 ? 'Книга на ночь'
-                : mode5SubMode === 'unwritten_chapter'
+                : effectiveSubMode === 'unwritten_chapter'
                   ? 'The Unwritten Chapter'
                   : '77 фактов')
           : mode5HeaderTitle.trim() || 'Ручной long-form';
@@ -605,8 +609,10 @@ export default function Generate() {
         mode5_image_backend: mode5ImageBackend,
         mode5_skip_final_assembly: true,
         mode5_video_header_title: headerTrim,
-        mode5_bible_mode: mode5SubMode === 'bible',
-        mode5_sub_mode: mode5SubMode,
+        mode5_bible_mode: effectiveSubMode === 'bible',
+        mode5_sub_mode: effectiveSubMode,
+        mode5_test_run: Boolean(override?.testRun),
+        mode5_test_duration_sec: 300,
       };
       
       // Use rate limit check
@@ -1218,19 +1224,29 @@ export default function Generate() {
                         hint: 'Только тема — AI делает расследовательский лонгрид 30–50 минут в стиле архивного документального разбора',
                       },
                     ].map(({ id, label, hint }) => (
-                      <button
-                        key={id}
-                        type="button"
-                        title={hint}
-                        onClick={() => setMode5SubMode(id)}
-                        className={`flex-1 py-3 px-3 rounded-lg text-sm font-medium text-left transition-all border ${
-                          mode5SubMode === id
-                            ? 'bg-brand-600/20 text-brand-400 border-brand-600/40'
-                            : 'text-[#71717a] hover:text-[#e4e4f0] border-[#27272f] hover:border-[#3f3f50]'
-                        }`}
-                      >
-                        {label}
-                      </button>
+                      <div key={id} className="flex flex-col gap-1.5 flex-1 min-w-[140px]">
+                        <button
+                          type="button"
+                          title={hint}
+                          onClick={() => setMode5SubMode(id)}
+                          className={`flex-1 py-3 px-3 rounded-lg text-sm font-medium text-left transition-all border ${
+                            mode5SubMode === id
+                              ? 'bg-brand-600/20 text-brand-400 border-brand-600/40'
+                              : 'text-[#71717a] hover:text-[#e4e4f0] border-[#27272f] hover:border-[#3f3f50]'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                        <button
+                          type="button"
+                          title="Короткий прогон: по оценке длины текста ~5 минут озвучки, чтобы посмотреть, как ведёт себя этот подрежим"
+                          disabled={step === 'launching'}
+                          onClick={() => void handleMode5Launch({ subMode: id, testRun: true })}
+                          className="py-1.5 px-2 rounded-md text-xs font-medium text-center border border-[#27272f] text-[#71717a] hover:text-brand-400 hover:border-brand-600/40 transition-colors disabled:opacity-40"
+                        >
+                          Тест ~5 мин
+                        </button>
+                      </div>
                     ))}
                   </div>
                 </div>

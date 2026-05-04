@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import random
 import re
 import tempfile
 import time
@@ -418,27 +420,64 @@ _VOICEAPI_TEMPLATE_RESOLVE_CACHE: dict[str, dict[str, str]] = {}
 _VOICEAPI_TEMPLATE_RESOLVE_LOCK = asyncio.Lock()
 _VOICEAPI_TEMPLATE_RESOLVE_FAILED: set[str] = set()
 _VOICEAPI_SYNTH_SEMAPHORE: asyncio.Semaphore | None = None
+# Serialize POST /tasks so parallel Mode5 chunks don't stampede the provider when retries/backoff align.
+_VOICEAPI_POST_TASKS_LOCK = asyncio.Lock()
+
+
+def _voiceapi_effective_concurrency() -> int:
+    """
+    Сколько задач VoiceAPI этот процесс может держать одновременно (POST→…→result).
+
+    Провайдер (csv666) возвращает 429, если активных задач >= лимита аккаунта
+    («Please complete existing tasks…»). Один процесс не знает про задачи других
+    клиентов — закладываем headroom.
+    """
+    provider_limit = max(2, int(getattr(settings, "voiceapi_provider_active_task_limit", 5) or 5))
+    headroom = max(0, int(getattr(settings, "voiceapi_active_task_headroom", 3) or 3))
+    configured = max(1, int(getattr(settings, "voiceapi_max_concurrency", 2) or 2))
+    safe_cap = max(1, provider_limit - headroom)
+    return min(configured, safe_cap)
+
+
+def voiceapi_mode5_recommended_tts_parallel() -> int:
+    """Параллелизм чанков Mode5 на этапе TTS (согласован с лимитом активных задач VoiceAPI)."""
+    return _voiceapi_effective_concurrency()
 
 
 def _voiceapi_synth_semaphore() -> asyncio.Semaphore:
     global _VOICEAPI_SYNTH_SEMAPHORE
-    size = max(1, int(getattr(settings, "voiceapi_max_concurrency", 3) or 3))
+    size = _voiceapi_effective_concurrency()
     sem = _VOICEAPI_SYNTH_SEMAPHORE
     if sem is None:
         _VOICEAPI_SYNTH_SEMAPHORE = asyncio.Semaphore(size)
     return _VOICEAPI_SYNTH_SEMAPHORE
 
 
-def _voiceapi_retry_after_seconds(resp: httpx.Response, attempt: int) -> float:
+def _voiceapi_retry_after_seconds(
+    resp: httpx.Response,
+    attempt: int,
+    *,
+    for_http_429: bool = False,
+) -> float:
     base_delay = max(0.5, float(getattr(settings, "voiceapi_retry_base_sec", 2.0) or 2.0))
     max_delay = max(base_delay, float(getattr(settings, "voiceapi_retry_max_sec", 30.0) or 30.0))
+    cap_429 = max(max_delay, float(getattr(settings, "voiceapi_429_retry_after_cap_sec", 900.0) or 900.0))
     header = (resp.headers.get("Retry-After") or "").strip()
     if header:
         try:
-            return max(0.0, min(max_delay, float(header)))
+            sec = float(header)
+            if for_http_429:
+                return max(0.5, min(cap_429, sec))
+            return max(0.0, min(max_delay, sec))
         except Exception:
             pass
     return min(max_delay, base_delay * (2 ** max(0, int(attempt))))
+
+
+def _voiceapi_rate_limit_sleep_sec(resp: httpx.Response, attempt: int) -> float:
+    base = _voiceapi_retry_after_seconds(resp, attempt, for_http_429=True)
+    jitter = random.uniform(0.0, min(4.0, 0.22 * base))
+    return base + jitter
 
 
 async def _voiceapi_resolve_template_voice(template_uuid: str) -> dict[str, str] | None:
@@ -577,9 +616,179 @@ async def _voiceapi_resolve_template_voice(template_uuid: str) -> dict[str, str]
     return None
 
 
-async def _voiceapi_synthesize(plain: str, tmp_path: Path, voice: str | None = None) -> None:
-    timeout = max(30.0, float(settings.voiceapi_timeout_sec or 300.0))
+def _voiceapi_smaller_chunk_size(chunk_size: int | None) -> int | None:
+    """Reduce provider chunk_size within 500–2000 to ease slow/failing jobs."""
+    if chunk_size is None:
+        base = getattr(settings, "voiceapi_chunk_size", None)
+        if base is None:
+            return None
+        chunk_size = int(base)
+    cc = max(500, min(2000, int(chunk_size)))
+    nxt = max(500, int(cc * 0.75))
+    if nxt == cc and cc > 500:
+        nxt = max(500, cc - 100)
+    return nxt
+
+
+def _voiceapi_poll_deadline_timeout_sec(plain: str) -> float:
+    """
+    Wall-clock budget for polling /tasks/{id}/status until ending*.
+    Long plaintext (Mode5) needs more time than short quotes.
+    """
+    base = max(30.0, float(settings.voiceapi_timeout_sec or 900.0))
+    n = len(plain or "")
+    extra = min(1200.0, max(0, n - 800) * 0.09)
+    return min(3600.0, base + extra)
+
+
+async def _voiceapi_try_complete_existing_task(
+    task_id: int,
+    tmp_path: Path,
+    base_url: str,
+    *,
+    budget_sec: float,
+) -> bool:
+    """
+    Continue polling an already-created VoiceAPI task after the primary local deadline.
+
+    The synthesizer uses a wall-clock budget; the provider may still be processing the same task.
+    Creating POST /tasks again leaves the previous task «active» until it completes, which exhausts
+    the provider's concurrent-task limit (typically 5) and triggers 429 on /tasks.
+
+    Returns True if MP3 bytes were written to tmp_path.
+    """
+    if budget_sec <= 0:
+        return False
+    deadline = time.monotonic() + budget_sec
     poll_interval = max(0.5, float(settings.voiceapi_poll_interval_sec or 2.0))
+    read_cap = max(120.0, min(3600.0, budget_sec))
+    timeout = httpx.Timeout(connect=30.0, read=read_cap, write=30.0, pool=30.0)
+    terminal_error_status: str | None = None
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, http2=False) as client:
+            last_status = "waiting"
+            while True:
+                if time.monotonic() >= deadline:
+                    return False
+                status_resp = await _voiceapi_retrying_get(
+                    client,
+                    f"{base_url}/tasks/{task_id}/status",
+                    headers={**_voiceapi_headers(), "Accept": "application/json"},
+                    label=f"grace task {task_id} status",
+                )
+                if status_resp.status_code == 429:
+                    wait_sec = _voiceapi_rate_limit_sleep_sec(status_resp, 0)
+                    deadline += wait_sec
+                    logger.warning(
+                        "[TTS:VoiceAPI] grace GET /tasks/{}/status rate-limited (429); sleep {:.1f}s",
+                        task_id,
+                        wait_sec,
+                    )
+                    await asyncio.sleep(wait_sec)
+                    continue
+                status_resp.raise_for_status()
+                status_data = status_resp.json()
+                last_status = (status_data.get("status") or "").strip().lower()
+                if last_status in {"ending", "ending_processed"}:
+                    break
+                if last_status in {"error", "error_handled"}:
+                    terminal_error_status = last_status
+                    break
+                await asyncio.sleep(poll_interval)
+
+            result_429_round = 0
+            while True:
+                if time.monotonic() >= deadline:
+                    return False
+                result_resp = await _voiceapi_retrying_get(
+                    client,
+                    f"{base_url}/tasks/{task_id}/result",
+                    headers={**_voiceapi_headers(), "Accept": "audio/mpeg,application/zip,*/*"},
+                    label=f"grace task {task_id} result",
+                )
+                if result_resp.status_code == 429:
+                    result_429_round += 1
+                    if result_429_round > 80:
+                        return False
+                    wait_sec = _voiceapi_rate_limit_sleep_sec(result_resp, result_429_round)
+                    deadline += wait_sec
+                    logger.warning(
+                        "[TTS:VoiceAPI] grace GET /tasks/{}/result rate-limited (429); sleep {:.1f}s",
+                        task_id,
+                        wait_sec,
+                    )
+                    await asyncio.sleep(wait_sec)
+                    continue
+                if result_resp.status_code == 202:
+                    await asyncio.sleep(poll_interval)
+                    continue
+                break
+
+            if result_resp.status_code >= 400:
+                return False
+            result_resp.raise_for_status()
+            content_type = (result_resp.headers.get("content-type") or "").lower()
+            if "zip" in content_type:
+                logger.warning(
+                    "[TTS:VoiceAPI] grace poll task {} returned ZIP; cannot use as single MP3.",
+                    task_id,
+                )
+                return False
+            if terminal_error_status:
+                logger.warning(
+                    "[TTS:VoiceAPI] grace poll: task {} reported status={} but /result returned audio; using it.",
+                    task_id,
+                    terminal_error_status,
+                )
+            tmp_path.write_bytes(result_resp.content)
+            logger.info(
+                "[TTS:VoiceAPI] grace poll saved audio task_id={} → {} ({} bytes)",
+                task_id,
+                tmp_path.name,
+                len(result_resp.content),
+            )
+            return True
+    except Exception as exc:
+        logger.warning(
+            "[TTS:VoiceAPI] grace poll failed for task_id={}: {}",
+            task_id,
+            _voiceapi_exc_detail(exc),
+        )
+        return False
+
+
+async def _voiceapi_synthesize(
+    plain: str,
+    tmp_path: Path,
+    voice: str | None = None,
+    *,
+    chunk_size_override: int | None = None,
+    retry_left: int | None = None,
+    poll_timeout_retries_left: int | None = None,
+    _nested: bool = False,
+) -> None:
+    if not _nested:
+        async with _voiceapi_synth_semaphore():
+            await _voiceapi_synthesize(
+                plain,
+                tmp_path,
+                voice=voice,
+                chunk_size_override=chunk_size_override,
+                retry_left=retry_left,
+                poll_timeout_retries_left=poll_timeout_retries_left,
+                _nested=True,
+            )
+        return
+
+    timeout = _voiceapi_poll_deadline_timeout_sec(plain)
+    poll_interval = max(0.5, float(settings.voiceapi_poll_interval_sec or 2.0))
+    if retry_left is None:
+        retry_left = max(0, int(getattr(settings, "voiceapi_error_handled_retries", 2) or 0))
+    if poll_timeout_retries_left is None:
+        poll_timeout_retries_left = max(
+            0, int(getattr(settings, "voiceapi_poll_timeout_retries", 3) or 0)
+        )
 
     payload: dict = {"text": plain}
     template_uuid = (settings.voiceapi_template_uuid or "").strip()
@@ -589,46 +798,106 @@ async def _voiceapi_synthesize(plain: str, tmp_path: Path, voice: str | None = N
         raise ValueError("VOICEAPI_TEMPLATE_UUID is empty. Voice must be configured only via template.")
     payload["template_uuid"] = template_uuid
     # Keep technical chunking (not a voice override) for long texts.
-    chunk_size = getattr(settings, "voiceapi_chunk_size", None)
+    chunk_size = chunk_size_override if chunk_size_override is not None else getattr(settings, "voiceapi_chunk_size", None)
     if chunk_size is not None:
         payload["chunk_size"] = max(500, min(2000, int(chunk_size)))
 
-    create_attempts = max(1, int(getattr(settings, "voiceapi_create_max_attempts", 6) or 6))
+    create_429_budget_sec = float(
+        getattr(settings, "voiceapi_create_429_total_budget_sec", 7200.0) or 0.0
+    )
+    active_tasks_min_wait = float(
+        getattr(settings, "voiceapi_create_429_active_tasks_min_wait_sec", 180.0) or 0.0
+    )
+    abs_max_wait = max(
+        60.0,
+        float(getattr(settings, "voiceapi_create_429_absolute_max_wait_sec", 86400.0) or 86400.0),
+    )
     base_url = _voiceapi_base_url()
-    async with _voiceapi_synth_semaphore():
-        try:
-            async with httpx.AsyncClient(
+    try:
+        async with httpx.AsyncClient(
                 timeout=timeout,
                 follow_redirects=True,
                 http2=False,
             ) as client:
                 create_resp: httpx.Response | None = None
-                for attempt in range(create_attempts):
-                    create_resp = await _voiceapi_retrying_post(
-                        client,
-                        f"{base_url}/tasks",
-                        headers={
-                            **_voiceapi_headers(),
-                            "Content-Type": "application/json",
-                            "Accept": "application/json",
-                        },
-                        json_body=payload,
-                        label=f"POST /tasks via {base_url}",
-                    )
+                create_429_deadline: float | None = None
+                if create_429_budget_sec > 0:
+                    create_429_deadline = time.monotonic() + create_429_budget_sec
+                create_started = time.monotonic()
+                abs_deadline = create_started + abs_max_wait
+                attempt = 0
+                while True:
+                    if time.monotonic() >= abs_deadline:
+                        raise RuntimeError(
+                            "VoiceAPI: POST /tasks остаётся HTTP 429 после ожидания "
+                            f"{abs_max_wait:.0f}s (лимит активных задач на аккаунте). "
+                            "Завершите или отмените другие задачи озвучки у провайдера и повторите."
+                        )
+                    attempt += 1
+                    async with _VOICEAPI_POST_TASKS_LOCK:
+                        create_resp = await _voiceapi_retrying_post(
+                            client,
+                            f"{base_url}/tasks",
+                            headers={
+                                **_voiceapi_headers(),
+                                "Content-Type": "application/json",
+                                "Accept": "application/json",
+                            },
+                            json_body=payload,
+                            label=f"POST /tasks via {base_url}",
+                        )
                     if create_resp.status_code != 429:
                         break
-                    wait_sec = _voiceapi_retry_after_seconds(create_resp, attempt)
+
+                    wait_sec = _voiceapi_rate_limit_sleep_sec(create_resp, attempt - 1)
+                    active_tasks_full = False
+                    try:
+                        jd = create_resp.json()
+                        detail_l = str(jd.get("detail") or "").lower()
+                        if "active tasks" in detail_l or "complete existing tasks" in detail_l:
+                            active_tasks_full = True
+                    except Exception:
+                        pass
+                    if active_tasks_full:
+                        if active_tasks_min_wait > 0:
+                            wait_sec = max(wait_sec, active_tasks_min_wait)
+                        wait_sec = min(900.0, wait_sec + min(420.0, 45.0 * max(0, attempt - 1)))
+
+                    budget_note = ""
+                    if create_429_deadline is not None:
+                        slice_left = create_429_deadline - time.monotonic()
+                        budget_note = f" | slice budget ~{max(0.0, slice_left):.0f}s"
+                        # «Мягкий» slice-бюджет только укорачивает паузу для логов; выход — только по abs_deadline.
+                        if slice_left > 0:
+                            wait_sec = min(wait_sec, max(1.0, slice_left))
+
+                    abs_left = abs_deadline - time.monotonic()
+                    wait_sec = min(wait_sec, max(1.0, abs_left))
+
                     logger.warning(
-                        "[TTS:VoiceAPI] /tasks rate-limited (429) via {} | attempt {}/{} | wait {:.1f}s",
+                        "[TTS:VoiceAPI] /tasks rate-limited (429) via {} | attempt {} | wait {:.1f}s | abs left ~{:.0f}s{}",
                         base_url,
-                        attempt + 1,
-                        create_attempts,
+                        attempt,
                         wait_sec,
+                        abs_left,
+                        budget_note,
                     )
-                    if attempt >= create_attempts - 1:
-                        break
                     await asyncio.sleep(wait_sec)
+
+                    # Страховка от зацикливания (ошибка логики); основной выход — abs_deadline в начале цикла.
+                    if attempt >= 100000:
+                        logger.error(
+                            "[TTS:VoiceAPI] POST /tasks 429: hard cap attempts via {}",
+                            base_url,
+                        )
+                        break
                 assert create_resp is not None
+                if create_resp.status_code == 429:
+                    raise RuntimeError(
+                        "VoiceAPI: не удалось создать задачу озвучки: постоянный HTTP 429 на POST /tasks. "
+                        "Проверьте лимит активных задач у провайдера и при необходимости "
+                        "увеличьте VOICEAPI_CREATE_429_ABSOLUTE_MAX_WAIT_SEC."
+                    )
                 if create_resp.status_code >= 400:
                     body_preview = (create_resp.text or "").strip().replace("\n", " ")
                     if len(body_preview) > 800:
@@ -648,6 +917,8 @@ async def _voiceapi_synthesize(plain: str, tmp_path: Path, voice: str | None = N
 
                 deadline = time.monotonic() + timeout
                 last_status = "waiting"
+                terminal_error_status: str | None = None
+                terminal_error_payload: dict | None = None
                 while True:
                     if time.monotonic() >= deadline:
                         raise TimeoutError(f"VoiceAPI task {task_id} did not finish in {timeout:.0f}s")
@@ -657,38 +928,189 @@ async def _voiceapi_synthesize(plain: str, tmp_path: Path, voice: str | None = N
                         headers={**_voiceapi_headers(), "Accept": "application/json"},
                         label=f"task {task_id} status",
                     )
+                    if status_resp.status_code == 429:
+                        wait_sec = _voiceapi_rate_limit_sleep_sec(status_resp, 0)
+                        deadline += wait_sec
+                        logger.warning(
+                            "[TTS:VoiceAPI] GET /tasks/{}/status rate-limited (429); sleep {:.1f}s",
+                            task_id,
+                            wait_sec,
+                        )
+                        await asyncio.sleep(wait_sec)
+                        continue
                     status_resp.raise_for_status()
                     status_data = status_resp.json()
                     last_status = (status_data.get("status") or "").strip().lower()
                     if last_status in {"ending", "ending_processed"}:
                         break
                     if last_status in {"error", "error_handled"}:
-                        raise RuntimeError(f"VoiceAPI task {task_id} failed with status={last_status}")
+                        # Some providers may mark task as handled/error but still expose
+                        # a downloadable audio result. Try /result before failing hard.
+                        terminal_error_status = last_status
+                        terminal_error_payload = status_data if isinstance(status_data, dict) else None
+                        break
                     await asyncio.sleep(poll_interval)
 
-                result_resp = await _voiceapi_retrying_get(
-                    client,
-                    f"{base_url}/tasks/{task_id}/result",
-                    headers={**_voiceapi_headers(), "Accept": "audio/mpeg,application/zip,*/*"},
-                    label=f"task {task_id} result",
-                )
+                result_429_round = 0
+                while True:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"VoiceAPI task {task_id} did not finish in {timeout:.0f}s")
+                    result_resp = await _voiceapi_retrying_get(
+                        client,
+                        f"{base_url}/tasks/{task_id}/result",
+                        headers={**_voiceapi_headers(), "Accept": "audio/mpeg,application/zip,*/*"},
+                        label=f"task {task_id} result",
+                    )
+                    if result_resp.status_code == 429:
+                        result_429_round += 1
+                        if result_429_round > 80:
+                            result_resp.raise_for_status()
+                        wait_sec = _voiceapi_rate_limit_sleep_sec(result_resp, result_429_round)
+                        deadline += wait_sec
+                        logger.warning(
+                            "[TTS:VoiceAPI] GET /tasks/{}/result rate-limited (429); sleep {:.1f}s (round {})",
+                            task_id,
+                            wait_sec,
+                            result_429_round,
+                        )
+                        await asyncio.sleep(wait_sec)
+                        continue
+                    break
                 if result_resp.status_code == 202:
+                    if terminal_error_status:
+                        if retry_left > 0:
+                            current_chunk = payload.get("chunk_size")
+                            next_chunk: int | None = None
+                            if current_chunk is not None:
+                                cc = max(500, min(2000, int(current_chunk)))
+                                next_chunk = max(500, int(cc * 0.75))
+                                if next_chunk == cc and cc > 500:
+                                    next_chunk = max(500, cc - 100)
+                            logger.warning(
+                                "[TTS:VoiceAPI] task {} ended with status={} and empty result (202). "
+                                "Retrying whole task with smaller chunk_size={} (retries left: {}).",
+                                task_id,
+                                terminal_error_status,
+                                next_chunk if next_chunk is not None else payload.get("chunk_size"),
+                                retry_left - 1,
+                            )
+                            await asyncio.sleep(1.0)
+                            await _voiceapi_synthesize(
+                                plain,
+                                tmp_path,
+                                voice=voice,
+                                chunk_size_override=next_chunk,
+                                retry_left=retry_left - 1,
+                                poll_timeout_retries_left=poll_timeout_retries_left,
+                                _nested=True,
+                            )
+                            return
+                        status_preview = ""
+                        if terminal_error_payload:
+                            try:
+                                status_preview = json.dumps(terminal_error_payload, ensure_ascii=False)[:800]
+                            except Exception:
+                                status_preview = str(terminal_error_payload)[:800]
+                        raise RuntimeError(
+                            f"VoiceAPI task {task_id} failed with status={terminal_error_status}"
+                            + (f" payload={status_preview}" if status_preview else "")
+                        )
                     raise RuntimeError(f"VoiceAPI task {task_id} is not ready yet after status={last_status}")
+                if terminal_error_status and result_resp.status_code >= 400 and retry_left > 0:
+                    current_chunk = payload.get("chunk_size")
+                    next_chunk: int | None = None
+                    if current_chunk is not None:
+                        cc = max(500, min(2000, int(current_chunk)))
+                        next_chunk = max(500, int(cc * 0.75))
+                        if next_chunk == cc and cc > 500:
+                            next_chunk = max(500, cc - 100)
+                    logger.warning(
+                        "[TTS:VoiceAPI] task {} ended with status={} and result HTTP {}. "
+                        "Retrying whole task with smaller chunk_size={} (retries left: {}).",
+                        task_id,
+                        terminal_error_status,
+                        result_resp.status_code,
+                        next_chunk if next_chunk is not None else payload.get("chunk_size"),
+                        retry_left - 1,
+                    )
+                    await asyncio.sleep(1.0)
+                    await _voiceapi_synthesize(
+                        plain,
+                        tmp_path,
+                        voice=voice,
+                        chunk_size_override=next_chunk,
+                        retry_left=retry_left - 1,
+                        poll_timeout_retries_left=poll_timeout_retries_left,
+                        _nested=True,
+                    )
+                    return
                 result_resp.raise_for_status()
                 content_type = (result_resp.headers.get("content-type") or "").lower()
                 if "zip" in content_type:
                     raise RuntimeError(
                         "VoiceAPI returned ZIP instead of MP3. Reduce VOICEAPI_CHUNK_SIZE or adjust provider settings."
                     )
+                if terminal_error_status:
+                    logger.warning(
+                        "[TTS:VoiceAPI] task {} reported status={} but /result returned audio; using returned audio.",
+                        task_id,
+                        terminal_error_status,
+                    )
                 tmp_path.write_bytes(result_resp.content)
                 logger.debug(f"[TTS] VoiceAPI synthesized task={task_id} via {base_url} → {tmp_path.name}")
-        except Exception as exc:
-            logger.error(
-                "[TTS] VoiceAPI endpoint failed ({}): {}",
+    except (TimeoutError, asyncio.TimeoutError):
+        tid = locals().get("task_id")
+        grace_mult = float(getattr(settings, "voiceapi_same_task_grace_multiplier", 1.0) or 0.0)
+        if tid is not None and grace_mult > 0:
+            grace_budget = _voiceapi_poll_deadline_timeout_sec(plain) * grace_mult
+            logger.warning(
+                "[TTS:VoiceAPI] primary poll budget exhausted for task_id={} after {:.0f}s (plain_len={}); "
+                "grace poll SAME task {:.0f}s (no POST /tasks) via {}",
+                tid,
+                timeout,
+                len(plain),
+                grace_budget,
                 base_url,
-                _voiceapi_exc_detail(exc),
             )
-            raise
+            if await _voiceapi_try_complete_existing_task(
+                int(tid), tmp_path, base_url, budget_sec=grace_budget
+            ):
+                return
+        if poll_timeout_retries_left <= 0:
+            logger.error(
+                "[TTS] VoiceAPI poll deadline {:.0f}s exceeded (task_id={}, plain_len={}) via {}",
+                timeout,
+                tid,
+                len(plain),
+                base_url,
+            )
+            raise TimeoutError(f"VoiceAPI task {tid} did not finish in {timeout:.0f}s") from None
+        next_chunk = _voiceapi_smaller_chunk_size(payload.get("chunk_size"))
+        logger.warning(
+            "[TTS:VoiceAPI] task {} still not done after grace; retrying NEW task chunk_size={} "
+            "(poll timeout retries left: {}).",
+            tid,
+            next_chunk,
+            poll_timeout_retries_left - 1,
+        )
+        await asyncio.sleep(2.0)
+        await _voiceapi_synthesize(
+            plain,
+            tmp_path,
+            voice=voice,
+            chunk_size_override=next_chunk,
+            retry_left=retry_left,
+            poll_timeout_retries_left=poll_timeout_retries_left - 1,
+            _nested=True,
+        )
+        return
+    except Exception as exc:
+        logger.error(
+            "[TTS] VoiceAPI endpoint failed ({}): {}",
+            base_url,
+            _voiceapi_exc_detail(exc),
+        )
+        raise
 
 
 # ─────────────────────────────────────────────────────────────────────────────

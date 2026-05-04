@@ -9,6 +9,7 @@ import asyncio
 import functools
 import json
 import re
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -102,13 +103,69 @@ def _normalize_clip_ranges_for_assemble(
     return out
 
 
-def _refs_from_plan(plan: dict[str, Any]) -> list[Path]:
+def _refs_from_plan(plan: dict[str, Any], session_id: str) -> list[Path]:
     out: list[Path] = []
     for x in plan.get("reference_paths") or []:
         pp = Path(str(x))
         if pp.is_file():
             out.append(pp.resolve())
-    return out
+    if out:
+        return out
+    root = _session_dir(session_id)
+    for name in (
+        "mode4_reference_face.jpg",
+        "mode4_reference_face.jpeg",
+        "mode4_reference_face.png",
+        "mode4_reference_face.webp",
+    ):
+        p = root / name
+        if p.is_file():
+            return [p.resolve()]
+    for p in sorted(root.glob("mode4_reference_face.*")):
+        if p.is_file():
+            return [p.resolve()]
+    return []
+
+
+def _persist_mode4_reference_image(session_path: Path, photo_src: Path) -> Path:
+    """Копия лица в папку сессии — иначе путь из временной загрузки исчезает до перегенерации клипа."""
+    src = photo_src.resolve()
+    if not src.is_file():
+        raise FileNotFoundError(f"Reference image not found: {photo_src}")
+    suf = src.suffix.lower()
+    if suf not in (".jpg", ".jpeg", ".png", ".webp"):
+        suf = ".jpg"
+    dest = session_path / f"mode4_reference_face{suf}"
+    try:
+        shutil.copy2(src, dest)
+    except OSError as e:
+        logger.warning(f"[Mode4 MC] could not copy reference into session ({e}); using original path")
+        return src
+    return dest.resolve()
+
+
+def _multiclip_prompts_from_plan(plan: dict[str, Any]) -> list[str]:
+    """Промпты из плана или пересборка из segments (старые планы / сбой записи)."""
+    segments = [str(s).strip() for s in (plan.get("segments") or []) if str(s).strip()]
+    if len(segments) < 2:
+        return []
+    raw = plan.get("prompts")
+    if (
+        isinstance(raw, list)
+        and len(raw) == len(segments)
+        and all(isinstance(x, str) and str(x).strip() for x in raw)
+    ):
+        return [str(x) for x in raw]
+    master_en = str(plan.get("master_scene_en") or "").strip()
+    voice_desc = str(plan.get("voice_description") or "").strip()
+    speech_lang = (plan.get("speech_lang") or "ru").strip().lower()
+    if speech_lang not in ("ru", "en"):
+        speech_lang = "ru"
+    n = len(segments)
+    return [
+        build_quote_fragment_prompt(master_en, seg, voice_desc, i, n, speech_lang)
+        for i, seg in enumerate(segments)
+    ]
 
 
 def _resolve_segments(
@@ -272,9 +329,7 @@ async def run_mode4_multiclip_pipeline(
         for i, seg in enumerate(segments)
     ]
 
-    photo = Path(photo_path).resolve()
-    if not photo.is_file():
-        raise FileNotFoundError(f"Reference image not found: {photo_path}")
+    photo = _persist_mode4_reference_image(session_path, Path(photo_path))
 
     style = (subtitle_style or "karaoke").strip().lower()
     style = "plain_whisper" if style in ("plain_whisper", "plain") else "karaoke"
@@ -511,12 +566,22 @@ def assemble_mode4_multiclip_final_sync(
 
 async def regenerate_mode4_multiclip_clip(session_id: str, clip_index: int) -> dict[str, Any]:
     plan = load_quote_multiclip_plan(session_id)
-    prompts = plan.get("prompts")
-    if not isinstance(prompts, list) or clip_index < 0 or clip_index >= len(prompts):
+    prompts = _multiclip_prompts_from_plan(plan)
+    if clip_index < 0 or clip_index >= len(prompts):
         raise ValueError("Некорректный индекс клипа")
-    refs = _refs_from_plan(plan)
+    prev_prompts = plan.get("prompts")
+    if not isinstance(prev_prompts, list) or len(prev_prompts) != len(prompts):
+        plan["prompts"] = prompts
+        try:
+            _save_quote_multiclip_plan(session_id, plan)
+        except Exception as e:
+            logger.debug(f"[Mode4 MC] plan save prompts: {e}")
+    refs = _refs_from_plan(plan, session_id)
     if not refs:
-        raise FileNotFoundError("Референсное фото из плана недоступно на диске")
+        raise FileNotFoundError(
+            "Референсное фото из плана недоступно на диске. "
+            "Если это старая сессия, запустите режим цитаты заново — фото должно сохраняться в папке сессии."
+        )
     output_dir = _session_dir(session_id) / "clips"
     output_dir.mkdir(parents=True, exist_ok=True)
     path = await regenerate_parable_clip(
@@ -575,5 +640,31 @@ def set_mode4_multiclip_clip_trim(
         "start_sec": round(s, 3),
         "end_sec": round(e, 3),
         "duration_sec": round(dur, 3),
+        "clip_trims": list(plan.get("clip_trims") or []),
+    }
+
+
+def clear_mode4_multiclip_clip_trim(session_id: str, clip_index: int) -> dict[str, Any]:
+    """Убрать сохранённую обрезку для клипа — в финале снова используется весь файл."""
+    plan = load_quote_multiclip_plan(session_id)
+    segments = list(plan.get("segments") or [])
+    if clip_index < 0 or clip_index >= len(segments):
+        raise ValueError("Некорректный индекс клипа")
+    trims_in = list(plan.get("clip_trims") or [])
+    trims_out: list[dict[str, Any]] = []
+    for row in trims_in:
+        if not isinstance(row, dict):
+            continue
+        try:
+            idx = int(row.get("index"))
+        except Exception:
+            continue
+        if idx != clip_index:
+            trims_out.append(row)
+    plan["clip_trims"] = trims_out
+    _save_quote_multiclip_plan(session_id, plan)
+    return {
+        "ok": True,
+        "index": clip_index,
         "clip_trims": list(plan.get("clip_trims") or []),
     }

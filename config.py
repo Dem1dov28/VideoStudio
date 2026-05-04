@@ -186,7 +186,10 @@ class Settings(BaseSettings):
     # - "api"        -> только HTTP API (fastgen_http)
     # - "playwright" -> только браузерный путь (fastgen_playwright)
     # - "auto"       -> текущее автоповедение общего генератора
-    mode5_image_backend: str = Field("api", alias="MODE5_IMAGE_BACKEND")
+    mode5_image_backend: str = Field("playwright", alias="MODE5_IMAGE_BACKEND")
+    # Mode 5: проверка готового кадра на наличие текста (LLM vision), с автоповторами.
+    mode5_image_text_guard_enabled: bool = Field(True, alias="MODE5_IMAGE_TEXT_GUARD_ENABLED")
+    mode5_image_text_guard_attempts: int = Field(2, alias="MODE5_IMAGE_TEXT_GUARD_ATTEMPTS")
     edge_tts_pitch: str = Field("+0Hz", alias="EDGE_TTS_PITCH")
     # Fade-in (s) в начале TTS — сглаживает «рваное» начало, особенно для EN
     tts_audio_fade_in: float = Field(0.12, alias="TTS_AUDIO_FADE_IN")
@@ -228,16 +231,53 @@ class Settings(BaseSettings):
     voiceapi_auto_paragraph_pause: bool = Field(False, alias="VOICEAPI_AUTO_PARAGRAPH_PAUSE")
     voiceapi_stress_enabled: bool = Field(False, alias="VOICEAPI_STRESS_ENABLED")
     voiceapi_poll_interval_sec: float = Field(2.0, alias="VOICEAPI_POLL_INTERVAL_SEC")
-    voiceapi_timeout_sec: float = Field(300.0, alias="VOICEAPI_TIMEOUT_SEC")
-    # Rate-limit safety: cap concurrent /tasks creation and retry on 429.
-    voiceapi_max_concurrency: int = Field(3, alias="VOICEAPI_MAX_CONCURRENCY")
-    voiceapi_create_max_attempts: int = Field(6, alias="VOICEAPI_CREATE_MAX_ATTEMPTS")
+    # Ожидание завершения task по /status (длинные Mode5-чанки часто > 5 мин).
+    voiceapi_timeout_sec: float = Field(900.0, alias="VOICEAPI_TIMEOUT_SEC")
+    # Новая задача при истечении poll deadline (очередь/нагрузка на стороне VoiceAPI).
+    voiceapi_poll_timeout_retries: int = Field(3, alias="VOICEAPI_POLL_TIMEOUT_RETRIES", ge=0, le=8)
+    # После локального deadline сначала дожимать тот же task_id (без POST /tasks). Иначе на провайдере
+    # копятся активные задачи и срабатывает лимит «5 active tasks» (429 при создании новой).
+    # Множитель к budget из _voiceapi_poll_deadline_timeout_sec; 0 = отключить (старое поведение).
+    voiceapi_same_task_grace_multiplier: float = Field(1.0, alias="VOICEAPI_SAME_TASK_GRACE_MULTIPLIER", ge=0.0, le=5.0)
+    # Rate-limit safety: cap concurrent /tasks (одна задача = создание → poll → result).
+    # У csv666 лимит «не более N активных задач» на аккаунт — оставляем запас (headroom).
+    voiceapi_provider_active_task_limit: int = Field(5, alias="VOICEAPI_PROVIDER_ACTIVE_TASK_LIMIT", ge=2, le=32)
+    # При лимите провайдера «5 активных задач» headroom=4 → не более 1 одновременного синтеза в процессе,
+    # чтобы не копить висок вместе с повторами/другими клиентами.
+    voiceapi_active_task_headroom: int = Field(4, alias="VOICEAPI_ACTIVE_TASK_HEADROOM", ge=0, le=16)
+    voiceapi_max_concurrency: int = Field(2, alias="VOICEAPI_MAX_CONCURRENCY")
+    # Жёсткий предел числа POST /tasks при 429 (страховка). Основной лимит — voiceapi_create_429_total_budget_sec.
+    voiceapi_create_max_attempts: int = Field(500, alias="VOICEAPI_CREATE_MAX_ATTEMPTS", ge=1, le=10000)
+    # Суммарное время удержания 429 на POST /tasks: ждём освобождения слотов у провайдера (другие клиенты / висяки).
+    voiceapi_create_429_total_budget_sec: float = Field(7200.0, alias="VOICEAPI_CREATE_429_TOTAL_BUDGET_SEC", ge=0.0)
+    # Жёсткий потолок ожидания POST /tasks при непрерывном 429 (секунды от первой попытки). После — понятная ошибка, без HTTPStatusError.
+    voiceapi_create_429_absolute_max_wait_sec: float = Field(86400.0, alias="VOICEAPI_CREATE_429_ABSOLUTE_MAX_WAIT_SEC", ge=60.0)
+    # При теле «limit of 5 active tasks» не короткими паузами — иначе 12 попыток укладываются в минуты, слоты не освобождаются.
+    voiceapi_create_429_active_tasks_min_wait_sec: float = Field(180.0, alias="VOICEAPI_CREATE_429_ACTIVE_TASKS_MIN_WAIT_SEC", ge=0.0)
     voiceapi_retry_base_sec: float = Field(2.0, alias="VOICEAPI_RETRY_BASE_SEC")
     voiceapi_retry_max_sec: float = Field(30.0, alias="VOICEAPI_RETRY_MAX_SEC")
+    # Для HTTP 429: не обрезать Retry-After до voiceapi_retry_max_sec (иначе провайдер снова даёт 429).
+    voiceapi_429_retry_after_cap_sec: float = Field(900.0, alias="VOICEAPI_429_RETRY_AFTER_CAP_SEC")
     # Повторы GET/POST при ReadError / RemoteProtocolError / обрыве соединения.
     voiceapi_transient_retry_attempts: int = Field(8, alias="VOICEAPI_TRANSIENT_RETRY_ATTEMPTS", ge=1, le=30)
+    # Доп. повторы всей VoiceAPI task при terminal статусе error_handled.
+    voiceapi_error_handled_retries: int = Field(2, alias="VOICEAPI_ERROR_HANDLED_RETRIES", ge=0, le=5)
     # Context-aware auto stress model can overcorrect in some topics; keep OFF by default.
     tts_auto_stress: bool = Field(False, alias="TTS_AUTO_STRESS")
+
+    # Mode5: вместо отдельной картинки на каждый короткий сегмент — зацикленное motion-видео на «блок»
+    # реального времени озвучки (по умолчанию 30 мин), затем другое клип по теме (keyframes + FastGen).
+    # Нужны FASTGEN_HTTP_BASE_URL + ключ; иначе пайплайн остаётся на JPEG по сегментам (~30 с).
+    mode5_block_loop_video_enabled: bool = Field(True, alias="MODE5_BLOCK_LOOP_VIDEO_ENABLED")
+    mode5_block_loop_seconds: float = Field(1800.0, alias="MODE5_BLOCK_LOOP_SECONDS", ge=60.0, le=14400.0)
+    mode5_block_loop_include_facts50: bool = Field(False, alias="MODE5_BLOCK_LOOP_INCLUDE_FACTS50")
+    # True: FastGen still → FastGen image-to-video → loop; False: только keyframes из JPEG сегментов (старое поведение).
+    mode5_block_loop_still_then_animate: bool = Field(True, alias="MODE5_BLOCK_LOOP_STILL_THEN_ANIMATE")
+    # Два клипа на блок: A от still, B от последнего кадра A к тому же still — замкнутый цикл при повторе A+B.
+    mode5_block_loop_two_part_loop: bool = Field(True, alias="MODE5_BLOCK_LOOP_TWO_PART_LOOP")
+    # FFmpeg libx264 после склейки двух частей: меньше CRF = выше качество (и размер файла).
+    mode5_block_loop_concat_crf: int = Field(17, alias="MODE5_BLOCK_LOOP_CONCAT_CRF", ge=15, le=28)
+    mode5_block_loop_concat_preset: str = Field("slow", alias="MODE5_BLOCK_LOOP_CONCAT_PRESET")
 
     # ── Pipeline mode ────────────────────────────────────────────────────────
     # "mode1" = Top-5 facts with AI-generated images
@@ -418,10 +458,14 @@ class Settings(BaseSettings):
     # ── Video resolution ─────────────────────────────────────────────────────
     # "720" = 720×1280 (fast, good for TikTok/Reels — ~2.5× faster render)
     # "1080" = 1080×1920 (full HD, slow Python rendering)
+    # Mode 5 по умолчанию смотрит на MODE5_VIDEO_QUALITY (ниже), не обязательно на это поле.
     video_quality: str = Field("720", alias="VIDEO_QUALITY")
 
     # Mode 5: long-form episodes are horizontal by default.
     mode5_video_format: str = Field("horizontal", alias="MODE5_VIDEO_FORMAT")
+    # Разрешение рендера Mode 5 отдельно от глобального VIDEO_QUALITY (лонгформ по умолчанию Full HD).
+    # Допустимо: 720 | 1080
+    mode5_video_quality: str = Field("1080", alias="MODE5_VIDEO_QUALITY")
     # Mode 5: мягкий визуальный dissolve между соседними сегментами (сек), без overlap аудио.
     # Mode 5 visual transitions between segments (seconds).
     mode5_transition_sec: float = Field(0.95, alias="MODE5_TRANSITION_SEC")
@@ -445,13 +489,23 @@ class Settings(BaseSettings):
             return (720, 1280) if self.video_quality == "720" else (1080, 1920)
         return (1280, 720) if self.video_quality == "720" else (1920, 1080)
 
+    def _mode5_video_quality_effective(self) -> str:
+        raw = str(getattr(self, "mode5_video_quality", "") or "").strip().lower()
+        if raw in ("1080", "1080p", "fhd", "fullhd", "1920"):
+            return "1080"
+        if raw in ("720", "720p", "hd"):
+            return "720"
+        v = str(getattr(self, "video_quality", "") or "720").strip().lower()
+        return "1080" if v in ("1080", "1080p", "fhd", "fullhd") else "720"
+
     @property
     def mode5_video_resolution(self) -> tuple[int, int]:
-        """Разрешение рендера mode 5 (по умолчанию horizontal)."""
+        """Разрешение рендера mode 5 (по умолчанию horizontal; качество — MODE5_VIDEO_QUALITY)."""
         fmt = getattr(self, "mode5_video_format", "horizontal").strip().lower()
+        vq = self._mode5_video_quality_effective()
         if fmt == "vertical":
-            return (720, 1280) if self.video_quality == "720" else (1080, 1920)
-        return (1280, 720) if self.video_quality == "720" else (1920, 1080)
+            return (720, 1280) if vq == "720" else (1080, 1920)
+        return (1280, 720) if vq == "720" else (1920, 1080)
 
     @property
     def mode13_video_resolution(self) -> tuple[int, int]:

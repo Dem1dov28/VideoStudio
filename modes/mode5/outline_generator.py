@@ -5,6 +5,7 @@ Mode 5 «outline»: краткое описание от автора → стр
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from typing import Any
@@ -212,6 +213,31 @@ def get_chunk_outline_labels(outline: dict[str, Any]) -> list[tuple[str, str]]:
     ]
 
 
+def trim_outline_to_first_n_subchapters(outline: dict[str, Any], n: int) -> dict[str, Any]:
+    """Keep the first ``n`` subchapters in reading order (same order as ``_flatten_outline``)."""
+    o = copy.deepcopy(outline or {})
+    if n <= 0:
+        o["chapters"] = []
+        return o
+    remaining = int(n)
+    new_chapters: list[dict[str, Any]] = []
+    for ch in o.get("chapters") or []:
+        if remaining <= 0:
+            break
+        subs_out: list[dict[str, Any]] = []
+        for sc in ch.get("subchapters") or []:
+            if remaining <= 0:
+                break
+            subs_out.append(sc)
+            remaining -= 1
+        if subs_out:
+            nc = dict(ch)
+            nc["subchapters"] = subs_out
+            new_chapters.append(nc)
+    o["chapters"] = new_chapters
+    return o
+
+
 def _flatten_outline(outline: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for ci, ch in enumerate(outline.get("chapters") or []):
@@ -374,6 +400,28 @@ Hard constraints:
         )
 
     flat_rows = _flatten_outline(outline)
+
+    if control and control.get("_mode5_test_run"):
+        from modes.mode5.text_length import mode5_trim_strings_by_estimated_speech
+
+        tgt = float(control.get("_mode5_test_target_sec") or 300.0)
+        tgt = max(60.0, min(7200.0, tgt))
+        proxies = [
+            " ".join(
+                str(row.get(k) or "").strip()
+                for k in ("chapter_title", "subchapter_title", "coverage")
+            ).strip()
+            or "subsection"
+            for row in flat_rows
+        ]
+        kept = mode5_trim_strings_by_estimated_speech(proxies, language=lang, target_sec=tgt)
+        k = len(kept)
+        if k < len(flat_rows):
+            flat_rows = flat_rows[:k]
+            outline = trim_outline_to_first_n_subchapters(outline, k)
+            logger.info(
+                f"[Mode5 outline] test_run: generating first {k} subchapter(s) (~{tgt:.0f}s speech budget)"
+            )
 
     outline_json = json.dumps(outline, ensure_ascii=False, indent=2)
     total_blocks = len(flat_rows)

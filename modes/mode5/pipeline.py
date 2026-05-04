@@ -6,7 +6,9 @@ Mode 5 Pipeline — ручной long-form текст -> TTS (VoiceAPI) по ч�
 from __future__ import annotations
 
 import asyncio
+import base64
 import functools
+import hashlib
 import json
 import random
 import threading
@@ -20,10 +22,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from langchain_core.messages import HumanMessage, SystemMessage
 from loguru import logger
 
 from agents.video_editor.music_gen import generate_background_music
-from agents.video_editor.tts import plain_text_for_voiceapi_tts, synthesize
+from agents.video_editor.tts import (
+    plain_text_for_voiceapi_tts,
+    synthesize,
+    voiceapi_mode5_recommended_tts_parallel,
+)
 from agents.video_editor.whisper_timestamps import get_word_timestamps_from_audio_path
 from config import settings
 from modes.mode13.pipeline import (
@@ -40,6 +47,7 @@ from modes.mode5.prompt_builder import (
 )
 from modes.mode5.video_assembler import assemble_mode5_video
 from utils.ffmpeg_resolve import require_ffmpeg_or_raise, resolve_ffmpeg_executable
+from utils.llm import make_llm
 from utils.wav_pcm import slice_wav_time_range
 
 MODE5_PLAN = "mode5_plan.json"
@@ -313,15 +321,57 @@ def _unwritten_chunk_anchor_by_index(outline_doc: dict[str, Any] | None) -> dict
 
 CHUNK_SEC_DEFAULT = 300
 SEG_SEC_DEFAULT = 15
-_WORDS_PER_MIN = {"ru": 135.0, "en": 150.0}
 _MIN_CHUNK_TEXT_LEN = 80
+
+
+def _truncate_mode5_chunk_texts_for_test(
+    chunk_texts: list[str],
+    *,
+    language: str,
+    target_sec: float,
+) -> tuple[list[str], float]:
+    """
+    Keep a prefix of chunks until cumulative estimated speech reaches target_sec.
+    Always returns at least one chunk when input is non-empty.
+    """
+    from modes.mode5.text_length import mode5_approx_speech_sec, mode5_trim_strings_by_estimated_speech
+
+    if target_sec <= 0.0 or not chunk_texts:
+        return list(chunk_texts), 0.0
+    out = mode5_trim_strings_by_estimated_speech(chunk_texts, language=language, target_sec=target_sec)
+    acc = sum(mode5_approx_speech_sec(ct, language) for ct in out)
+    return out, acc
+
+
+def _facts50_eval_is_outro(ci: int, n_chunks: int, orig_full: int | None) -> bool:
+    """Last chunk is outro only when the full intro+…+outro chain was kept (test runs may cut before outro)."""
+    if ci != n_chunks - 1:
+        return False
+    if orig_full is None:
+        return True
+    return n_chunks >= orig_full
 _MIN_CHUNK_TEXT_LEN_FACTS50 = 40
+# Block-loop / intro motion: модель должна отдать клип, который FFmpeg потом крутит `-stream_loop`;
+# если первый и последний кадр расходятся — на стыке лупа будет «прыжок».
 _MODE5_INTRO_ANIMATION_DESCRIPTION = (
-    "Animation direction: seamless loop, identical opening and closing frame, "
-    "very subtle cinematic ambient motion, gentle parallax drift, no sudden cuts, "
-    "no fast camera moves, no flicker, no morphing artifacts, "
-    "no rubbery face deformation, no object warping, no temporal ghosting."
+    "Animation direction for seamless tiled playback: the FIRST and LAST frame of this short clip must match "
+    "(same framing, lighting, poses, and silhouette edges) so when the file repeats there is no visible jump. "
+    "Lock the virtual camera: no pan, tilt, dolly, zoom, or handheld shake — the frame border stays fixed. "
+    "All motion must read as movement inside the picture: layered parallax on separate planes, drifting dust or mist, "
+    "fabric or foliage sway, candle/steam shimmer, embers, rain at the window, subtle light caustics, small floating particles. "
+    "When the clip is split into two halves, treat them as the first and second half of one continuous ambient cycle "
+    "(same elements, same rhythm) — not as 'travel away' then 'camera rubber-bands back'. "
+    "No cuts, no new/disappearing objects, no morphing, no rubbery faces, no warped text, no ghosting."
 )
+_MODE5_BLOCK_LOOP_STILL_STYLE_OVERRIDE = (
+    "BLOCK_LOOP_STILL_OVERRIDE: render as premium 2D animation / illustrated feature-film key art "
+    "(expressive cartoon or painterly storybook look with rich atmosphere) — not photorealistic documentary photography. "
+    "Bold readable shapes, appealing color story, magical-realism mood; pack the frame with depth: foreground props, "
+    "midground action, background architecture or nature so parallax motion has layers to work with — avoid a sparse empty box room. "
+    "Keep the frame loop-friendly (clear focal plane, avoid chaotic motion-blur smear)."
+)
+# Bump when block-loop still/motion prompt contract changes so narr_fp cache invalidates.
+_MODE5_BLOCK_LOOP_CACHE_SALT = "cartoon_loop_v8_bridge_still_dual_kf"
 def _mode5_output_format() -> str:
     fmt = str(getattr(settings, "mode5_video_format", "horizontal") or "horizontal").strip().lower()
     return "horizontal" if fmt == "horizontal" else "vertical"
@@ -356,8 +406,8 @@ def _normalize_mode5_image_backend(value: str | None) -> str:
     if raw in {"api", "playwright", "auto"}:
         return raw
     if raw:
-        logger.warning(f"[Mode5] Unknown mode5 image backend={raw!r}, fallback to 'api'")
-    return "api"
+        logger.warning(f"[Mode5] Unknown mode5 image backend={raw!r}, fallback to 'playwright'")
+    return "playwright"
 
 
 async def _generate_one_image(
@@ -375,29 +425,97 @@ async def _generate_one_image(
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     backend = _normalize_mode5_image_backend(
-        image_backend if image_backend is not None else getattr(settings, "mode5_image_backend", "api")
+        image_backend if image_backend is not None else getattr(settings, "mode5_image_backend", "playwright")
     )
 
-    if backend == "auto":
-        return await _generate_one_image_mode13(prompt, dest, aspect_ratio=aspect_ratio)
+    attempts = max(
+        1,
+        min(
+            3,
+            int(getattr(settings, "mode5_image_text_guard_attempts", 2) or 2),
+        ),
+    )
+    guard_enabled = bool(getattr(settings, "mode5_image_text_guard_enabled", True))
 
-    if backend == "api":
-        from agents.content_generator import fastgen_http
+    async def _render_once(prompt_text: str) -> Path:
+        if backend == "auto":
+            return await _generate_one_image_mode13(prompt_text, dest, aspect_ratio=aspect_ratio)
+        if backend == "api":
+            from agents.content_generator import fastgen_http
 
-        paths = await fastgen_http.generate_images_fastgen([prompt], dest.parent, parallel=False)
-    else:  # backend == "playwright"
-        from agents.content_generator import fastgen_playwright
+            paths = await fastgen_http.generate_images_fastgen([prompt_text], dest.parent, parallel=False)
+        else:  # backend == "playwright"
+            from agents.content_generator import fastgen_playwright
 
-        paths = await fastgen_playwright.generate_images_fastgen([prompt], dest.parent, parallel=False)
+            paths = await fastgen_playwright.generate_images_fastgen([prompt_text], dest.parent, parallel=False)
 
-    if not paths:
-        raise RuntimeError(f"[Mode5] Empty image result for backend={backend}")
-    src = Path(paths[0])
-    if not src.is_file():
-        raise RuntimeError(f"[Mode5] Generated image not found for backend={backend}: {src}")
-    if src.resolve() != dest.resolve():
-        shutil.move(str(src), str(dest))
+        if not paths:
+            raise RuntimeError(f"[Mode5] Empty image result for backend={backend}")
+        src = Path(paths[0])
+        if not src.is_file():
+            raise RuntimeError(f"[Mode5] Generated image not found for backend={backend}: {src}")
+        if src.resolve() != dest.resolve():
+            shutil.move(str(src), str(dest))
+        return dest
+
+    current_prompt = prompt
+    for idx in range(attempts):
+        out = await _render_once(current_prompt)
+        if not guard_enabled:
+            return out
+        has_text = await _mode5_image_has_readable_text(out)
+        if not has_text:
+            return out
+        if idx + 1 < attempts:
+            logger.warning(
+                f"[Mode5] Text detected in image ({dest.name}), retry {idx + 2}/{attempts}"
+            )
+            current_prompt = (
+                f"{prompt}. Retry constraint #{idx + 2}: "
+                "absolutely no visible letters, numbers, symbols, signage, logos, labels, subtitles, or watermark."
+            )
+            continue
+        raise RuntimeError(f"[Mode5] Readable text detected in generated image after {attempts} attempt(s): {dest}")
     return dest
+
+
+def _mode5_image_to_data_url(path: Path) -> str:
+    ext = path.suffix.lower()
+    mime = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
+    raw = path.read_bytes()
+    b64 = base64.standard_b64encode(raw).decode("ascii")
+    return f"data:{mime};base64,{b64}"
+
+
+async def _mode5_image_has_readable_text(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        model = getattr(settings, "openrouter_vision_model", "") or getattr(settings, "openrouter_model", "")
+        llm = make_llm(temperature=0.0, model=model, max_tokens=220)
+        msg = HumanMessage(
+            content=[
+                {
+                    "type": "text",
+                    "text": (
+                        "Check this image for any readable text. "
+                        "Return strict JSON only: {\"has_text\": true|false}. "
+                        "Readable text means letters/numbers/words on signs, papers, logos, subtitles, watermarks."
+                    ),
+                },
+                {"type": "image_url", "image_url": {"url": _mode5_image_to_data_url(path)}},
+            ]
+        )
+        resp = await asyncio.wait_for(
+            llm.ainvoke([SystemMessage(content="You are a strict vision QA checker. JSON only."), msg]),
+            timeout=30.0,
+        )
+        raw = (getattr(resp, "content", "") or "").strip()
+        data = json.loads(raw)
+        return bool(data.get("has_text"))
+    except Exception as e:
+        logger.warning(f"[Mode5] Text guard fallback (skip) for {path.name}: {e}")
+        return False
 
 
 def _mode5_locked_style(plan: dict[str, Any]) -> str:
@@ -484,7 +602,7 @@ def _mode5_dir(session_id: str) -> Path:
     return d
 
 
-def _write_mode5_placeholder_image(path: Path, *, aspect_ratio: str | None = None) -> None:
+def _write_mode5_placeholder_image(path: Path) -> None:
     """
     Last-resort fallback: write a neutral placeholder frame so one failed image does not
     abort the entire already-generated pipeline.
@@ -492,8 +610,8 @@ def _write_mode5_placeholder_image(path: Path, *, aspect_ratio: str | None = Non
     ff = resolve_ffmpeg_executable()
     if not ff:
         raise RuntimeError("ffmpeg not found for mode5 placeholder image fallback")
-    ratio = str(aspect_ratio or _mode5_image_aspect_ratio()).strip()
-    size = "1280x720" if ratio == "16:9" else "720x1280"
+    tw, th = settings.mode5_video_resolution
+    size = f"{tw}x{th}"
     path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         ff,
@@ -1111,6 +1229,8 @@ def _result_payload(
         "mode5_live_events": plan.get("live_events") if isinstance(plan.get("live_events"), list) else [],
         "mode5_live_policy": plan.get("live_policy") or "hybrid",
         "mode5_pending_rebuilds": plan.get("pending_rebuilds") if isinstance(plan.get("pending_rebuilds"), list) else [],
+        "mode5_test_run": bool(plan.get("test_run")),
+        "mode5_test_target_sec": plan.get("test_target_sec"),
     }
 
 
@@ -1208,7 +1328,7 @@ async def _generate_chunk_images(
                     shutil.copy2(fallback_src, target)
                     seg["image_fallback_reason"] = f"copied fallback: {type(err).__name__}"
                 else:
-                    _write_mode5_placeholder_image(target, aspect_ratio=_mode5_image_aspect_ratio())
+                    _write_mode5_placeholder_image(target)
                     seg["image_fallback_reason"] = f"placeholder fallback: {type(err).__name__}"
                 seg["image_fallback"] = True
                 logger.warning(
@@ -1353,6 +1473,866 @@ async def _ensure_mode5_looped_intro_video(
     seg0["asset_type"] = "image"
 
 
+def _mode5_block_loop_series_anchor(plan: dict[str, Any]) -> str:
+    """Книга / тема / название выпуска — для символических отсылок в block-loop (без читаемого текста на кадре)."""
+    p = plan or {}
+    raw = str(p.get("facts_topic") or "").strip() or str(p.get("header_title") or "").strip()
+    if raw:
+        return raw[:280]
+    os = p.get("outline_structure")
+    if isinstance(os, dict):
+        wt = str(os.get("working_title") or "").strip()
+        if wt:
+            return wt[:280]
+    sc = str(p.get("script_text") or "").strip()
+    if sc:
+        return sc[:280]
+    return ""
+
+
+def _mode5_block_loop_applies(plan: dict[str, Any]) -> bool:
+    if not bool(getattr(settings, "mode5_block_loop_video_enabled", False)):
+        return False
+    if not str(getattr(settings, "fastgen_http_base_url", "") or "").strip():
+        return False
+    sm = (plan.get("sub_mode") or "").strip().lower()
+    if sm == "facts50":
+        return bool(getattr(settings, "mode5_block_loop_include_facts50", False))
+    return bool(sm)
+
+
+def _build_mode5_block_loop_video_prompt(
+    *,
+    block_index: int,
+    block_sec: float,
+    narration_snippet: str,
+    prev_snippet: str,
+    book_anchor: str = "",
+) -> str:
+    prev = re.sub(r"\s+", " ", (prev_snippet or "").strip())[:520]
+    narr = re.sub(r"\s+", " ", (narration_snippet or "").strip())[:2000]
+    minutes = max(1, int(block_sec // 60))
+    anchor = re.sub(r"\s+", " ", (book_anchor or "").strip())[:280]
+    parts = [
+        "Create a loopable stylized-illustration / cartoon motion clip from the provided start and end keyframes.",
+        "Match a premium 2D animation look: expressive shapes, painted textures, atmospheric lighting — not flat corporate icons.",
+        "Keep the camera fixed; animate depth layers and environmental micro-motion only so the loop feels like living scenery, not a sliding photograph.",
+        _MODE5_INTRO_ANIMATION_DESCRIPTION,
+        f"This clip will be tiled for about {minutes} minutes of narration; motion must stay subtle and perfectly loopable.",
+        f"Narration theme for this block: {narr}",
+    ]
+    if anchor:
+        parts.append(
+            "Echo this book or series through metaphor, props, palette, or setting only — "
+            "no readable titles, author names, book covers, or logos: "
+            + anchor
+        )
+    if block_index > 0 and prev:
+        parts.append(
+            "Visually differentiate this block from the previous one: new focal subject, lighting, palette, or setting. "
+            f"Do not repeat this prior motif: {prev}"
+        )
+    parts.append(
+        "No readable text, no logos, no UI. Start and end keyframes must align so the loop is invisible when repeated."
+    )
+    return " ".join(parts)
+
+
+def _build_mode5_block_loop_motion_from_still_prompt(
+    *,
+    block_index: int,
+    block_sec: float,
+    narration_snippet: str,
+    prev_snippet: str,
+    book_anchor: str = "",
+) -> str:
+    """Промпт для image→video: illustrated block still, микродвижение и бесшовный loop при тайлинге."""
+    prev = re.sub(r"\s+", " ", (prev_snippet or "").strip())[:520]
+    narr = re.sub(r"\s+", " ", (narration_snippet or "").strip())[:2000]
+    minutes = max(1, int(block_sec // 60))
+    anchor = re.sub(r"\s+", " ", (book_anchor or "").strip())[:280]
+    parts = [
+        "Animate the provided illustrated / cartoon keyframe into a short clip built for seamless looping when tiled.",
+        "Preserve the exact composition, character shapes, props, line style, and color script from the still; "
+        "add only in-frame ambient motion (layers swaying, light breathing, particles) that completes one full cycle "
+        "back to the identical rest pose at the last frame — camera locked, no whole-frame drift.",
+        _MODE5_INTRO_ANIMATION_DESCRIPTION,
+        f"This clip will repeat for about {minutes} minutes under narration — the join between end and start must be invisible.",
+        f"Mood and story beat for this block (spoken): {narr}",
+    ]
+    if anchor:
+        parts.append(
+            "Thematic nod to this book or topic through symbols and environment only — "
+            "never readable titles, spines, screens with text, or logos: "
+            + anchor
+        )
+    if block_index > 0 and prev:
+        parts.append(
+            "Shift mood or palette from the previous block so chapters feel distinct; do not copy the prior motif: "
+            + prev
+        )
+    parts.append("No readable text, no logos, no UI.")
+    return " ".join(parts)
+
+
+def _build_mode5_block_loop_motion_half_a_prompt(
+    *,
+    block_index: int,
+    block_sec: float,
+    narration_snippet: str,
+    prev_snippet: str,
+    book_anchor: str = "",
+) -> str:
+    """Часть 1/2: motion от opening still к «середине» цикла; последний кадр = старт части 2."""
+    prev = re.sub(r"\s+", " ", (prev_snippet or "").strip())[:520]
+    narr = re.sub(r"\s+", " ", (narration_snippet or "").strip())[:2000]
+    minutes = max(1, int(block_sec // 60))
+    anchor = re.sub(r"\s+", " ", (book_anchor or "").strip())[:280]
+    parts = [
+        "PART 1 of 2 for a closed-loop wallpaper clip (will be concatenated with part 2). "
+        "Animate this illustrated / cartoon opening keyframe as the FIRST HALF of a single ambient cycle: "
+        "only in-frame element motion (parallax layers, sway, shimmer, particles) with camera locked — no frame-wide pan/zoom.",
+        "Preserve art style, line quality, and palette from the still; push motion through foreground/midground details, not sliding the whole painting.",
+        "The LAST frame must be a clean, stable midpoint of that cycle (readable silhouette) — part 2 completes the second half back to the opening still.",
+        _MODE5_INTRO_ANIMATION_DESCRIPTION,
+        f"Narration context (~{minutes} min block): {narr}",
+    ]
+    if anchor:
+        parts.append(
+            "Symbolic nod to this book/topic only (no readable text, covers, logos): " + anchor
+        )
+    if block_index > 0 and prev:
+        parts.append("Visually distinct from prior block; avoid repeating: " + prev)
+    parts.append("No readable text, no logos, no UI.")
+    return " ".join(parts)
+
+
+def _build_mode5_block_loop_motion_half_b_keyframe_prompt(
+    *,
+    block_index: int,
+    block_sec: float,
+    narration_snippet: str,
+    prev_snippet: str,
+    book_anchor: str = "",
+) -> str:
+    """Часть 2/2: keyframes start = midpoint (конец части 1), end = opening still — замыкает цикл."""
+    prev = re.sub(r"\s+", " ", (prev_snippet or "").strip())[:520]
+    narr = re.sub(r"\s+", " ", (narration_snippet or "").strip())[:2000]
+    minutes = max(1, int(block_sec // 60))
+    anchor = re.sub(r"\s+", " ", (book_anchor or "").strip())[:280]
+    parts = [
+        "PART 2 of 2 for a closed-loop wallpaper clip (concatenated after part 1). "
+        "Interpolate from the provided START keyframe (the shared midpoint image that must match the last frame of part 1) "
+        "to the provided END keyframe (the original opening illustration).",
+        "This is the SECOND HALF of the same ambient cycle as part 1: continue the same element motion language "
+        "(sway, parallax, light, particles) with camera still locked — do not introduce a new opposite camera move.",
+        "Motion must decelerate smoothly into the end pose so it matches the end keyframe pixel-loyally: "
+        "same composition, characters, props, and lighting as the opening still.",
+        "When part1+part2 play in order and the file loops, the viewer should not perceive a jump at any join.",
+        _MODE5_INTRO_ANIMATION_DESCRIPTION,
+        f"Narration context (~{minutes} min block): {narr}",
+    ]
+    if anchor:
+        parts.append("Thematic continuity (symbols only, no text): " + anchor)
+    if block_index > 0 and prev:
+        parts.append("Avoid repeating prior block motif: " + prev)
+    parts.append("No readable text, no logos, no UI.")
+    return " ".join(parts)
+
+
+def _build_mode5_block_loop_bridge_still_prompt(
+    *,
+    block_index: int,
+    block_sec: float,
+    narration_snippet: str,
+    book_anchor: str = "",
+) -> str:
+    """
+    Отдельный JPEG «середина цикла»: тот же мир, что opening still, но чуть сдвинутое состояние для start/end-видео.
+    Генерируется через image+reference(still), затем part A = video(still→bridge), part B = video(bridge→still).
+    """
+    narr = re.sub(r"\s+", " ", (narration_snippet or "").strip())[:1200]
+    minutes = max(1, int(block_sec // 60))
+    anchor = re.sub(r"\s+", " ", (book_anchor or "").strip())[:240]
+    parts = [
+        "BLOCK_LOOP_MID_KEYFRAME: using the attached opening illustration as the strict reference for characters, "
+        "scale, palette, line style, location, and prop layout, generate exactly ONE new full-frame still that is the "
+        "MIDPOINT of a subtle ambient-motion cycle (halfway between the reference's rest pose and a gentle peak of motion).",
+        "Same environment and story beat; only micro-changes: cloth or hair offset, foliage or fabric sway, steam or dust, "
+        "soft light shift, small particle positions — no new objects, no teleporting elements, no camera reframing, "
+        "no crop change, no different room.",
+        f"This midpoint image will be the shared boundary between two FastGen start/end video clips for ~{minutes} min of narration.",
+        f"Spoken context for mood (not literal text to paint): {narr}",
+    ]
+    if anchor:
+        parts.append("Thematic echo only (no readable titles, spines, screens, logos): " + anchor)
+    if block_index > 0:
+        parts.append("Keep a fresh composition versus prior blocks while still matching the attached reference.")
+    parts.append(
+        "Absolutely no visible text, letters, numbers, UI, logos, or watermarks. "
+        "One continuous illustrated frame only — not a collage or split layout."
+    )
+    return " ".join(parts)
+
+
+def _mode5_probe_video_duration_sec(path: Path) -> float:
+    ff = resolve_ffmpeg_executable()
+    if not ff:
+        raise RuntimeError("ffmpeg not found")
+    cmd = [
+        ff,
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=90)
+    return max(0.05, float((r.stdout or "1").strip()))
+
+
+def _mode5_extract_last_frame_jpeg(video: Path, dest: Path) -> None:
+    """Последний кадр (с небольшим отступом от EOF, чтобы не поймать чёрный кадр)."""
+    ff = resolve_ffmpeg_executable()
+    if not ff:
+        raise RuntimeError("ffmpeg not found")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dur = _mode5_probe_video_duration_sec(video)
+    tail = max(0.0, dur - 0.06)
+    cmd = [
+        ff,
+        "-y",
+        "-ss",
+        f"{tail:.4f}",
+        "-i",
+        str(video),
+        "-frames:v",
+        "1",
+        "-q:v",
+        "2",
+        str(dest),
+    ]
+    subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=120)
+
+
+def _mode5_concat_two_block_loop_parts(a: Path, b: Path, out: Path) -> None:
+    """Склейка A+B в один H.264 с выравниванием под mode5 разрешение и более высоким качеством."""
+    ff = resolve_ffmpeg_executable()
+    if not ff:
+        raise RuntimeError("ffmpeg not found")
+    tw, th = settings.mode5_video_resolution
+    crf = int(getattr(settings, "mode5_block_loop_concat_crf", 17) or 17)
+    crf = max(15, min(28, crf))
+    preset = str(getattr(settings, "mode5_block_loop_concat_preset", "slow") or "slow").strip()
+    if preset not in (
+        "ultrafast",
+        "superfast",
+        "veryfast",
+        "faster",
+        "fast",
+        "medium",
+        "slow",
+        "slower",
+        "veryslow",
+    ):
+        preset = "slow"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    vf = (
+        f"[0:v]scale={tw}:{th}:force_original_aspect_ratio=decrease:flags=lanczos,"
+        f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[v0];"
+        f"[1:v]scale={tw}:{th}:force_original_aspect_ratio=decrease:flags=lanczos,"
+        f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[v1];"
+        f"[v0][v1]concat=n=2:v=1:a=0[outv]"
+    )
+    cmd = [
+        ff,
+        "-y",
+        "-i",
+        str(a),
+        "-i",
+        str(b),
+        "-filter_complex",
+        vf,
+        "-map",
+        "[outv]",
+        "-c:v",
+        "libx264",
+        "-preset",
+        preset,
+        "-crf",
+        str(crf),
+        "-pix_fmt",
+        "yuv420p",
+        str(out),
+    ]
+    subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=3600)
+
+
+def _mode5_block_loop_can_reuse_smart_cache(
+    *,
+    out_path: Path,
+    still_path: Path,
+    fp_path: Path,
+    fp_payload: str,
+    force: bool,
+) -> bool:
+    if force:
+        return False
+    if not out_path.is_file() or not still_path.is_file() or not fp_path.is_file():
+        return False
+    try:
+        want = fp_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    if want != fp_payload.strip():
+        return False
+    try:
+        vm = float(out_path.stat().st_mtime)
+        sm = float(still_path.stat().st_mtime)
+    except OSError:
+        return False
+    return vm >= sm - 1.0
+
+
+def _mode5_block_rows_max_image_mtime(
+    session_root: Path,
+    rows: list[tuple[dict[str, Any], dict[str, Any], float, float]],
+) -> float | None:
+    """Максимальный mtime JPEG по всем сегментам блока; None если путь отсутствует."""
+    latest: float | None = None
+    for _ch, seg, _t0, _d in rows:
+        rel = str(seg.get("image") or "").strip()
+        if not rel:
+            return None
+        p = session_root / rel
+        if not p.is_file():
+            return None
+        try:
+            m = float(p.stat().st_mtime)
+        except OSError:
+            return None
+        latest = m if latest is None else max(latest, m)
+    return latest
+
+
+async def _ensure_mode5_block_loop_videos(
+    session_id: str,
+    plan: dict[str, Any],
+    *,
+    force: bool = False,
+) -> None:
+    """
+    Для длинного Mode5: один короткий motion-клип на «блок» wall-clock (MODE5_BLOCK_LOOP_SECONDS),
+    общий файл для всех сегментов блока. При сборке превью/финала этот MP4 только зацикливается под
+    длину каждого seg_*.wav; озвучка остаётся прежней — отдельный WAV на сегмент, склейка по порядку
+    (см. assemble_mode5_video: seg_audio + concatenate_audioclips).
+
+    При ``mode5_block_loop_still_then_animate`` (по умолчанию True): для каждого блока сначала FastGen‑still,
+    затем motion: при ``mode5_block_loop_two_part_loop`` — два клипа (A от still, B keyframes от последнего кадра A
+    к тому же still), FFmpeg склеивает в один MP4 с более высоким качеством; иначе один image→video клип.
+    Затем тот же MP4 зацикливается на ``mode5_block_loop_seconds``.
+
+    Кэш: smart — по ``narr_fp`` + mtime still/mp4; legacy — mtime сегментных JPEG vs mp4.
+    """
+    if not _mode5_block_loop_applies(plan):
+        return
+    http_base = str(getattr(settings, "fastgen_http_base_url", "") or "").strip()
+    if not http_base:
+        logger.warning("[Mode5] Block loop video: FASTGEN_HTTP_BASE_URL пуст — пропускаем motion-блоки")
+        return
+
+    session_root = _session_dir(session_id)
+    m5dir = _mode5_dir(session_id)
+    m5dir.mkdir(parents=True, exist_ok=True)
+
+    if force:
+        for p in m5dir.glob("block_loop_*.mp4"):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        for p in m5dir.glob("block_loop_*_still.jpg"):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        for p in m5dir.glob("block_loop_*.narr_fp"):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        for p in m5dir.glob("block_loop_*_bridge.jpg"):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        for p in m5dir.glob("block_loop_*_half_*.mp4"):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        for ch in plan.get("chunks") or []:
+            for seg in ch.get("segments") or []:
+                seg.pop("video", None)
+                seg.pop("asset_type", None)
+
+    chunks = sorted(plan.get("chunks") or [], key=lambda c: int(c.get("index") or 0))
+    block_sec = float(getattr(settings, "mode5_block_loop_seconds", 1800.0) or 1800.0)
+    block_sec = max(60.0, min(14400.0, block_sec))
+
+    timeline: list[tuple[dict[str, Any], dict[str, Any], float, float]] = []
+    cumulative = 0.0
+    for ch in chunks:
+        segs = sorted((ch.get("segments") or []), key=lambda s: int(s.get("s", 0)))
+        for seg in segs:
+            aud_rel = str(seg.get("audio") or "").strip()
+            if not aud_rel:
+                continue
+            ap = session_root / aud_rel
+            if not ap.is_file():
+                continue
+            dur = _wav_duration_sec(ap)
+            t0 = cumulative
+            timeline.append((ch, seg, t0, dur))
+            cumulative += dur
+
+    if not timeline:
+        logger.warning("[Mode5] Block loop video: нет сегментов с WAV — пропуск")
+        return
+
+    blocks: dict[int, list[tuple[dict[str, Any], dict[str, Any], float, float]]] = {}
+    for ch, seg, t0, dur in timeline:
+        bid = int(t0 // block_sec)
+        blocks.setdefault(bid, []).append((ch, seg, t0, dur))
+
+    prev_theme = ""
+    book_anchor = _mode5_block_loop_series_anchor(plan)
+    from agents.content_generator import fastgen_http
+
+    smart_still = bool(getattr(settings, "mode5_block_loop_still_then_animate", True))
+
+    for bid in sorted(blocks.keys()):
+        rows = blocks[bid]
+        out_path = m5dir / f"block_loop_{bid:04d}.mp4"
+        still_path = m5dir / f"block_loop_{bid:04d}_still.jpg"
+        fp_path = m5dir / f"block_loop_{bid:04d}.narr_fp"
+        rel = _rel_session(session_root, out_path)
+
+        narr = " ".join(re.sub(r"\s+", " ", str(x[1].get("text") or "")) for x in rows[:24])[:2400]
+        fp_payload = hashlib.sha256(
+            (narr + "\n" + _MODE5_BLOCK_LOOP_CACHE_SALT + "\n" + book_anchor).encode("utf-8", errors="ignore")
+        ).hexdigest()
+
+        reuse_cached_mp4 = False
+        if not force:
+            if smart_still and _mode5_block_loop_can_reuse_smart_cache(
+                out_path=out_path,
+                still_path=still_path,
+                fp_path=fp_path,
+                fp_payload=fp_payload,
+                force=False,
+            ):
+                reuse_cached_mp4 = True
+            elif not smart_still and out_path.is_file():
+                try:
+                    video_mtime = float(out_path.stat().st_mtime)
+                except OSError:
+                    video_mtime = 0.0
+                img_mtime_max = _mode5_block_rows_max_image_mtime(session_root, rows)
+                if img_mtime_max is not None and img_mtime_max <= video_mtime + 1.5:
+                    reuse_cached_mp4 = True
+                elif img_mtime_max is not None:
+                    logger.info(
+                        "[Mode5] Block loop {:04d}: изображения новее {}, пересоздаём motion",
+                        bid,
+                        out_path.name,
+                    )
+                    try:
+                        out_path.unlink()
+                    except OSError:
+                        pass
+
+        if reuse_cached_mp4:
+            for ch, seg, _t0, _d in rows:
+                seg["video"] = rel
+                seg["asset_type"] = "video"
+            prev_theme = " ".join(
+                re.sub(r"\s+", " ", str(x[1].get("text") or "")) for x in rows[:8]
+            )[:500]
+            continue
+
+        img_a = session_root / rows[0][1]["image"]
+        img_b = session_root / rows[-1][1]["image"]
+        motion_ok = False
+
+        if smart_still:
+            try:
+                fp_disk = ""
+                if fp_path.is_file():
+                    fp_disk = fp_path.read_text(encoding="utf-8", errors="ignore").strip()
+                need_new_still = force or (not still_path.is_file()) or (fp_disk != fp_payload.strip())
+                if need_new_still:
+                    _bridge_u = m5dir / f"block_loop_{bid:04d}_bridge.jpg"
+                    _half_au = m5dir / f"block_loop_{bid:04d}_half_a.mp4"
+                    _half_bu = m5dir / f"block_loop_{bid:04d}_half_b.mp4"
+                    for p in (out_path, still_path, fp_path, _bridge_u, _half_au, _half_bu):
+                        if p.is_file():
+                            try:
+                                p.unlink()
+                            except OSError:
+                                pass
+                    style_lock = _ensure_mode5_style_lock(plan)
+                    minutes = max(1, int(block_sec // 60))
+                    book_line = ""
+                    if book_anchor:
+                        book_line = (
+                            f"The episode centers on this book or topic (symbolic cues only — no readable titles, "
+                            f"spines, screens, or logos): «{book_anchor}». "
+                            "Translate it into props, palette, architecture, weather, crafts, or silhouettes that visually "
+                            "intersect with that theme while staying consistent with the narration excerpt. "
+                        )
+                    still_ctx = (
+                        f"BLOCK_LOOP_HERO_STILL for ~{minutes} minutes of narration in one block. "
+                        "One striking illustrated frame meant to become a subtly animated wallpaper: "
+                        "premium 2D animation / painterly storybook look with strong atmosphere and storytelling depth — "
+                        "not photorealistic documentary photography. "
+                        + book_line
+                        + "Composition must feel busy and intentional: foreground + midground + background each carrying "
+                        "motifs from the spoken theme (objects, weather, architecture, crafts, nature, textiles) — "
+                        "not a generic plain wall or empty beige room unless the narration explicitly demands it. "
+                        "Rich mood light, imaginative layout, clear focal idea; leave pockets of calmer negative space so "
+                        "ambient loop motion can read. No readable text, no logos, no UI."
+                    )
+                    img_prompt = build_mode5_image_prompt(
+                        sub_mode=normalize_mode5_sub_mode(plan.get("sub_mode")),
+                        segment_text=narr[:2000],
+                        chunk_context=still_ctx,
+                        style_lock=style_lock,
+                        output_format=_mode5_output_format(),
+                    )
+                    img_prompt = _sanitize_mode5_image_prompt(img_prompt)
+                    if _MODE5_BLOCK_LOOP_STILL_STYLE_OVERRIDE not in img_prompt:
+                        img_prompt = f"{img_prompt} {_MODE5_BLOCK_LOOP_STILL_STYLE_OVERRIDE}"
+                    logger.info("[Mode5] Block loop {:04d}: FastGen still (блок ~{} мин)", bid, minutes)
+                    still_list = await fastgen_http.generate_images_fastgen(
+                        [img_prompt],
+                        m5dir,
+                        parallel=False,
+                        cancel_event=None,
+                    )
+                    if not still_list or not still_list[0]:
+                        raise RuntimeError("still image list empty")
+                    src_sp = Path(still_list[0])
+                    if not src_sp.is_file():
+                        raise RuntimeError("still image missing on disk")
+                    shutil.copy2(src_sp, still_path)
+                    try:
+                        if src_sp.resolve() != still_path.resolve():
+                            src_sp.unlink()
+                    except OSError:
+                        pass
+
+                need_new_video = force or (not out_path.is_file()) or need_new_still
+                if still_path.is_file() and out_path.is_file() and not need_new_still:
+                    try:
+                        if float(out_path.stat().st_mtime) < float(still_path.stat().st_mtime) - 0.5:
+                            need_new_video = True
+                    except OSError:
+                        need_new_video = True
+
+                if need_new_video and still_path.is_file():
+                    if out_path.is_file():
+                        try:
+                            out_path.unlink()
+                        except OSError:
+                            pass
+                    bridge_jpg = m5dir / f"block_loop_{bid:04d}_bridge.jpg"
+                    half_a = m5dir / f"block_loop_{bid:04d}_half_a.mp4"
+                    half_b = m5dir / f"block_loop_{bid:04d}_half_b.mp4"
+                    for tp in (bridge_jpg, half_a, half_b):
+                        if tp.is_file():
+                            try:
+                                tp.unlink()
+                            except OSError:
+                                pass
+
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    motion_done_inner = False
+                    if bool(getattr(settings, "mode5_block_loop_two_part_loop", True)):
+                        try:
+                            prompt_a = _build_mode5_block_loop_motion_half_a_prompt(
+                                block_index=bid,
+                                block_sec=block_sec,
+                                narration_snippet=narr,
+                                prev_snippet=prev_theme,
+                                book_anchor=book_anchor,
+                            )
+                            prompt_b = _build_mode5_block_loop_motion_half_b_keyframe_prompt(
+                                block_index=bid,
+                                block_sec=block_sec,
+                                narration_snippet=narr,
+                                prev_snippet=prev_theme,
+                                book_anchor=book_anchor,
+                            )
+                            idx_a = 8100 + int(bid) * 10
+                            ar = _mode5_image_aspect_ratio()
+
+                            bridge_prompt = _build_mode5_block_loop_bridge_still_prompt(
+                                block_index=bid,
+                                block_sec=block_sec,
+                                narration_snippet=narr,
+                                book_anchor=book_anchor,
+                            )
+                            bridge_list = await fastgen_http.generate_images_with_references_fastgen(
+                                [(bridge_prompt, [still_path])],
+                                m5dir,
+                                parallel=False,
+                            )
+                            if not bridge_list or not bridge_list[0]:
+                                raise RuntimeError("block loop bridge still empty")
+                            bp_src = Path(bridge_list[0])
+                            if not bp_src.is_file():
+                                raise RuntimeError("block loop bridge still missing on disk")
+                            shutil.copy2(bp_src, bridge_jpg)
+                            if bp_src.resolve() != bridge_jpg.resolve():
+                                try:
+                                    bp_src.unlink()
+                                except OSError:
+                                    pass
+
+                            raw_a = await fastgen_http.generate_video_from_keyframes(
+                                prompt_a,
+                                m5dir,
+                                still_path,
+                                bridge_jpg,
+                                idx_a,
+                                video_aspect_ratio=ar,
+                            )
+                            pa = Path(raw_a) if raw_a else None
+                            if not pa or not pa.is_file():
+                                raise RuntimeError("block loop part A keyframes missing")
+
+                            raw_b = await fastgen_http.generate_video_from_keyframes(
+                                prompt_b,
+                                m5dir,
+                                bridge_jpg,
+                                still_path,
+                                idx_a + 1,
+                                video_aspect_ratio=ar,
+                            )
+                            pb = Path(raw_b) if raw_b else None
+                            if not pb or not pb.is_file():
+                                raise RuntimeError("block loop part B keyframes missing")
+
+                            shutil.copy2(pa, half_a)
+                            if pa.resolve() != half_a.resolve():
+                                try:
+                                    pa.unlink()
+                                except OSError:
+                                    pass
+                            shutil.copy2(pb, half_b)
+                            if pb.resolve() != half_b.resolve():
+                                try:
+                                    pb.unlink()
+                                except OSError:
+                                    pass
+
+                            await asyncio.to_thread(_mode5_concat_two_block_loop_parts, half_a, half_b, out_path)
+                            if not out_path.is_file():
+                                raise RuntimeError("block loop concat output missing")
+                            motion_done_inner = True
+                            for tp in (half_a, half_b, bridge_jpg):
+                                if tp.is_file():
+                                    try:
+                                        tp.unlink()
+                                    except OSError:
+                                        pass
+                            logger.info(
+                                "[Mode5] Block loop {:04d}: two-part start/end video (still→bridge, bridge→still) готов: {} ({} сегм.)",
+                                bid,
+                                out_path.name,
+                                len(rows),
+                            )
+                        except Exception as two_err:
+                            logger.warning(
+                                "[Mode5] Block loop {:04d}: двухчастный start/end не удался ({}), пробуем legacy image→extract→keyframes",
+                                bid,
+                                two_err,
+                            )
+                            for tp in (half_a, half_b, bridge_jpg):
+                                if tp.is_file():
+                                    try:
+                                        tp.unlink()
+                                    except OSError:
+                                        pass
+                            try:
+                                prompt_a = _build_mode5_block_loop_motion_half_a_prompt(
+                                    block_index=bid,
+                                    block_sec=block_sec,
+                                    narration_snippet=narr,
+                                    prev_snippet=prev_theme,
+                                    book_anchor=book_anchor,
+                                )
+                                prompt_b = _build_mode5_block_loop_motion_half_b_keyframe_prompt(
+                                    block_index=bid,
+                                    block_sec=block_sec,
+                                    narration_snippet=narr,
+                                    prev_snippet=prev_theme,
+                                    book_anchor=book_anchor,
+                                )
+                                idx_a = 8100 + int(bid) * 10
+                                ar = _mode5_image_aspect_ratio()
+                                raw_a = await fastgen_http.generate_single_video_fastgen(
+                                    prompt_a,
+                                    m5dir,
+                                    idx_a,
+                                    reference_image_path=still_path,
+                                    cancel_event=None,
+                                    mode4_veo_flow_flower=False,
+                                )
+                                pa = Path(raw_a) if raw_a else None
+                                if not pa or not pa.is_file():
+                                    raise RuntimeError("block loop legacy part A missing")
+                                shutil.copy2(pa, half_a)
+                                if pa.resolve() != half_a.resolve():
+                                    try:
+                                        pa.unlink()
+                                    except OSError:
+                                        pass
+                                await asyncio.to_thread(_mode5_extract_last_frame_jpeg, half_a, bridge_jpg)
+                                if not bridge_jpg.is_file():
+                                    raise RuntimeError("block loop legacy bridge frame missing")
+                                raw_b = await fastgen_http.generate_video_from_keyframes(
+                                    prompt_b,
+                                    m5dir,
+                                    bridge_jpg,
+                                    still_path,
+                                    idx_a + 1,
+                                    video_aspect_ratio=ar,
+                                )
+                                pb = Path(raw_b) if raw_b else None
+                                if not pb or not pb.is_file():
+                                    raise RuntimeError("block loop legacy part B missing")
+                                shutil.copy2(pb, half_b)
+                                if pb.resolve() != half_b.resolve():
+                                    try:
+                                        pb.unlink()
+                                    except OSError:
+                                        pass
+                                await asyncio.to_thread(_mode5_concat_two_block_loop_parts, half_a, half_b, out_path)
+                                if not out_path.is_file():
+                                    raise RuntimeError("block loop legacy concat output missing")
+                                motion_done_inner = True
+                                for tp in (half_a, half_b, bridge_jpg):
+                                    if tp.is_file():
+                                        try:
+                                            tp.unlink()
+                                        except OSError:
+                                            pass
+                                logger.info(
+                                    "[Mode5] Block loop {:04d}: two-part legacy (image→extract→keyframes) готов: {} ({} сегм.)",
+                                    bid,
+                                    out_path.name,
+                                    len(rows),
+                                )
+                            except Exception as leg_err:
+                                logger.warning(
+                                    "[Mode5] Block loop {:04d}: legacy two-part тоже не удался ({})",
+                                    bid,
+                                    leg_err,
+                                )
+                                for tp in (out_path, half_a, half_b, bridge_jpg):
+                                    if tp.is_file():
+                                        try:
+                                            tp.unlink()
+                                        except OSError:
+                                            pass
+
+                    if not motion_done_inner:
+                        motion_prompt = _build_mode5_block_loop_motion_from_still_prompt(
+                            block_index=bid,
+                            block_sec=block_sec,
+                            narration_snippet=narr,
+                            prev_snippet=prev_theme,
+                            book_anchor=book_anchor,
+                        )
+                        clip_idx = 8000 + int(bid)
+                        raw_clip = await fastgen_http.generate_single_video_fastgen(
+                            motion_prompt,
+                            m5dir,
+                            clip_idx,
+                            reference_image_path=still_path,
+                            cancel_event=None,
+                            mode4_veo_flow_flower=False,
+                        )
+                        resolved_mv = Path(raw_clip) if raw_clip else None
+                        if not resolved_mv or not resolved_mv.is_file():
+                            raise RuntimeError("motion clip empty")
+                        if resolved_mv.resolve() != out_path.resolve():
+                            shutil.copy2(resolved_mv, out_path)
+                        try:
+                            if resolved_mv.resolve() != out_path.resolve():
+                                resolved_mv.unlink()
+                        except OSError:
+                            pass
+                        logger.info("[Mode5] Block loop still→motion (single) готов: {} ({} сегм.)", out_path.name, len(rows))
+
+                    fp_path.write_text(fp_payload, encoding="utf-8")
+                    for _ch, seg, _t0, _d in rows:
+                        seg["video"] = rel
+                        seg["asset_type"] = "video"
+                    prev_theme = narr[:500]
+                    motion_ok = True
+            except Exception as smart_err:
+                logger.warning("[Mode5] Block loop {}: still→motion не удалось — fallback keyframes: {}", bid, smart_err)
+
+        if motion_ok:
+            continue
+
+        if not img_a.is_file() or not img_b.is_file():
+            logger.warning("[Mode5] Block loop {}: нет keyframe-изображений, оставляем image", bid)
+            for _ch, seg, _t0, _d in rows:
+                seg.pop("video", None)
+                seg.pop("asset_type", None)
+            continue
+
+        prompt = _build_mode5_block_loop_video_prompt(
+            block_index=bid,
+            block_sec=block_sec,
+            narration_snippet=narr,
+            prev_snippet=prev_theme,
+            book_anchor=book_anchor,
+        )
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            video_path = await fastgen_http.generate_video_from_keyframes(
+                prompt=prompt,
+                output_dir=out_path.parent,
+                start_frame_path=img_a,
+                end_frame_path=img_b if img_b.resolve() != img_a.resolve() else img_a,
+                index=1000 + bid,
+                video_aspect_ratio=_mode5_image_aspect_ratio(),
+            )
+            resolved = Path(video_path) if video_path else None
+            if resolved and resolved.is_file():
+                if resolved.resolve() != out_path.resolve():
+                    shutil.copy2(resolved, out_path)
+                for _ch, seg, _t0, _d in rows:
+                    seg["video"] = rel
+                    seg["asset_type"] = "video"
+                prev_theme = narr[:500]
+                logger.info("[Mode5] Block loop video готов (keyframes): {} ({} сегм.)", out_path.name, len(rows))
+            else:
+                raise RuntimeError("empty path")
+        except Exception as err:
+            logger.warning("[Mode5] Block loop {}: генерация не удалась — image: {}", bid, err)
+            for _ch, seg, _t0, _d in rows:
+                seg.pop("video", None)
+                seg.pop("asset_type", None)
+
+
 def _build_chunk_preview_sync(session_id: str, chunk_index: int, plan: dict[str, Any]) -> Path:
     session_root = _session_dir(session_id)
     ch = plan["chunks"][chunk_index]
@@ -1370,11 +2350,14 @@ def _build_chunk_preview_sync(session_id: str, chunk_index: int, plan: dict[str,
         if not aud.is_file():
             raise FileNotFoundError(f"Missing audio: {aud}")
         si = int(seg.get("s", len(segment_data)))
-        is_intro = _is_global_intro_segment(ci, si)
         video_rel = str(seg.get("video") or "").strip()
         video_abs = (session_root / video_rel) if video_rel else None
-        is_intro_video = is_intro and sm == "unwritten_chapter"
-        if is_intro_video and video_abs and video_abs.is_file():
+        use_video = (
+            video_abs is not None
+            and video_abs.is_file()
+            and str(seg.get("asset_type") or "").strip().lower() == "video"
+        )
+        if use_video:
             segment_data.append(
                 {
                     "asset_type": "video",
@@ -1921,11 +2904,14 @@ async def _revoice_chunk(
         refresh_all=True,
     )
     _render_chunk_audio_slices(session_id, chunk)
-    await _ensure_mode5_looped_intro_video(
-        session_id,
-        plan,
-        force=chunk_index == 0,
-    )
+    if _mode5_block_loop_applies(plan):
+        await _ensure_mode5_block_loop_videos(session_id, plan, force=True)
+    else:
+        await _ensure_mode5_looped_intro_video(
+            session_id,
+            plan,
+            force=chunk_index == 0,
+        )
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, lambda: _build_chunk_preview_sync(session_id, chunk_index, plan))
     chunk["status"] = "ready"
@@ -1959,6 +2945,8 @@ async def run_mode5_pipeline(
     video_header_title: str | None = None,
     bible_mode: bool = False,
     sub_mode: str = "manual",
+    test_run: bool = False,
+    test_duration_sec: int = 300,
     control: dict | None = None,
 ) -> dict[str, Any]:
     from pipeline_control import checkpoint
@@ -1975,6 +2963,12 @@ async def run_mode5_pipeline(
     if sm == "manual" and bible_mode:
         sm = "bible"
 
+    test_target = max(60, min(7200, int(test_duration_sec or 300)))
+    gen_control = dict(control or {})
+    if bool(test_run):
+        gen_control["_mode5_test_run"] = True
+        gen_control["_mode5_test_target_sec"] = float(test_target)
+
     topic_input = re.sub(r"\s+", " ", (script_text or "").strip())
     facts_outline: list[str] | None = None
     outline_doc: dict[str, Any] | None = None
@@ -1989,7 +2983,7 @@ async def run_mode5_pipeline(
         )
         from modes.mode5.facts50_generator import generate_facts50_script
 
-        facts_outline, narrations = await generate_facts50_script(topic_input, language, control=control)
+        facts_outline, narrations = await generate_facts50_script(topic_input, language, control=gen_control)
         intro_text = _facts50_intro_text(topic_input, language)
         outro_text = _facts50_outro_text(topic_input, language)
         chunk_texts = [intro_text] + list(narrations) + [outro_text]
@@ -2010,7 +3004,7 @@ async def run_mode5_pipeline(
         from modes.mode5.outline_generator import generate_outline_longform_script
 
         outline_doc, chunk_texts, script_clean = await generate_outline_longform_script(
-            topic_input, language, control=control
+            topic_input, language, control=gen_control
         )
         logger.info(
             f"[Mode5] outline: {len(outline_doc.get('chapters') or [])} chapter(s), "
@@ -2028,7 +3022,7 @@ async def run_mode5_pipeline(
         from modes.mode5.book_night_generator import generate_book_night_script
 
         outline_doc, chunk_texts, script_clean = await generate_book_night_script(
-            topic_input, language, control=control
+            topic_input, language, control=gen_control
         )
         logger.info(
             f"[Mode5] book_night: {len(outline_doc.get('chapters') or [])} book chapter(s), "
@@ -2044,7 +3038,7 @@ async def run_mode5_pipeline(
         from modes.mode5.unwritten_chapter_generator import generate_unwritten_chapter_script
 
         outline_doc, chunk_texts, script_clean = await generate_unwritten_chapter_script(
-            topic_input, language, control=control
+            topic_input, language, control=gen_control
         )
         logger.info(
             f"[Mode5] unwritten_chapter: {len(outline_doc.get('chapters') or [])} block(s), "
@@ -2072,12 +3066,19 @@ async def run_mode5_pipeline(
     _mode5_dir(session_id)
     mpi = _clamp_mode5_parallel_images(max_parallel_images)
     ib = _normalize_mode5_image_backend(
-        image_backend if image_backend is not None else getattr(settings, "mode5_image_backend", "api")
+        image_backend if image_backend is not None else getattr(settings, "mode5_image_backend", "playwright")
     )
 
     logger.info(
         f"=== Mode 5 Pipeline | sub_mode={sm} | image_backend={ib} | session={session_id} ==="
     )
+    if bool(getattr(settings, "mode5_block_loop_video_enabled", False)) and not str(
+        getattr(settings, "fastgen_http_base_url", "") or ""
+    ).strip():
+        logger.info(
+            "[Mode5] Зацикленное motion по блокам выключено: задайте FASTGEN_HTTP_BASE_URL и ключ в .env "
+            "(иначе остаются статичные кадры по сегменту ~30 с)."
+        )
     await checkpoint(control)
 
     if sm not in ("facts50", "outline", "book_night", "unwritten_chapter"):
@@ -2106,12 +3107,38 @@ async def run_mode5_pipeline(
         if sm == "unwritten_chapter":
             unwritten_anchor_map = _unwritten_chunk_anchor_by_index(outline_doc)
 
+    facts50_orig_n: int | None = None
+    if bool(test_run) and chunk_texts:
+        if sm == "facts50":
+            facts50_orig_n = len(chunk_texts)
+        chunk_texts, test_est_sec = _truncate_mode5_chunk_texts_for_test(
+            chunk_texts,
+            language=language,
+            target_sec=float(test_target),
+        )
+        outline_labels = outline_labels[: len(chunk_texts)]
+        if unwritten_anchor_map:
+            unwritten_anchor_map = {
+                i: unwritten_anchor_map[i]
+                for i in range(len(chunk_texts))
+                if i in unwritten_anchor_map
+            }
+        logger.info(
+            f"[Mode5] test_run: target={test_target}s, chunks={len(chunk_texts)}, ~est_speech={test_est_sec:.0f}s"
+        )
+
+    plan_test_meta: dict[str, Any] = (
+        {"test_run": True, "test_target_sec": int(test_target)}
+        if bool(test_run)
+        else {"test_run": False, "test_target_sec": None}
+    )
+
     # Persist stub plan before long parallel TTS so /review-state does not 404 while audio generates.
     if sm == "facts50" and chunk_texts:
         stub_chunks: list[dict[str, Any]] = []
         for i, ct in enumerate(chunk_texts):
             is_intro = i == 0
-            is_outro = i == (len(chunk_texts) - 1)
+            is_outro = _facts50_eval_is_outro(i, len(chunk_texts), facts50_orig_n)
             fh = ct if (is_intro or is_outro) else ""
             if (not is_intro) and (not is_outro) and isinstance(facts_outline, list) and (i - 1) < len(facts_outline):
                 fh = str(facts_outline[i - 1] or "").strip()
@@ -2147,6 +3174,7 @@ async def run_mode5_pipeline(
             "style_lock": style_lock,
             "style_id": style_id,
             "chunks": stub_chunks,
+            **plan_test_meta,
         }
         _save_mode5_plan(session_id, stub_plan, checkpoint=MODE5_CKPT_STUB)
     elif chunk_texts and sm != "facts50":
@@ -2196,6 +3224,7 @@ async def run_mode5_pipeline(
             "style_lock": style_lock,
             "style_id": style_id,
             "chunks": stub_chunks_lf,
+            **plan_test_meta,
         }
         _save_mode5_plan(session_id, stub_plan_lf, checkpoint=MODE5_CKPT_STUB)
 
@@ -2204,12 +3233,13 @@ async def run_mode5_pipeline(
     if sm == "facts50":
         # Параллельно до N фактов: TTS и затем картинки (типичный паттерн — asyncio + семафор под лимиты API).
         par = max(1, min(32, int(getattr(settings, "mode5_facts50_parallel", 10))))
+        par = min(par, voiceapi_mode5_recommended_tts_parallel())
         sem_tts = asyncio.Semaphore(par)
 
         async def _facts50_tts(ci: int, chunk_text: str):
             async with sem_tts:
                 is_intro = ci == 0
-                is_outro = ci == (len(chunk_texts) - 1)
+                is_outro = _facts50_eval_is_outro(ci, len(chunk_texts), facts50_orig_n)
                 if is_intro or is_outro:
                     source_text = chunk_text
                 else:
@@ -2227,7 +3257,7 @@ async def run_mode5_pipeline(
         for ci in range(len(chunk_texts)):
             mp3_path, wav_path, dur, wts, words, tts_plain = tts_by_ci[ci]
             is_intro = ci == 0
-            is_outro = ci == (len(chunk_texts) - 1)
+            is_outro = _facts50_eval_is_outro(ci, len(chunk_texts), facts50_orig_n)
             fact_hint = tts_plain if (is_intro or is_outro) else ""
             if (not is_intro) and (not is_outro) and isinstance(facts_outline, list) and (ci - 1) < len(facts_outline):
                 fact_hint = str(facts_outline[ci - 1] or "").strip()
@@ -2287,7 +3317,10 @@ async def run_mode5_pipeline(
 
         for ch in chunks_plan:
             _render_chunk_audio_slices(session_id, ch)
-        await _ensure_mode5_looped_intro_video(session_id, plan, force=False)
+        if _mode5_block_loop_applies(plan):
+            await _ensure_mode5_block_loop_videos(session_id, plan, force=False)
+        else:
+            await _ensure_mode5_looped_intro_video(session_id, plan, force=False)
         _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_SLICES)
         await checkpoint(control)
 
@@ -2296,6 +3329,7 @@ async def run_mode5_pipeline(
         # keep prompt/segment quality tied to real TTS output, but overlap image generation
         # of ready chunks with TTS still running on the remaining chunks.
         par = max(1, min(16, int(getattr(settings, "mode5_facts50_parallel", 10) or 10)))
+        par = min(par, voiceapi_mode5_recommended_tts_parallel())
         sem_tts = asyncio.Semaphore(par)
         # _generate_chunk_images already fans out segment image requests inside one chunk,
         # so keep one chunk-level image lane to avoid explosive API concurrency.
@@ -2436,7 +3470,10 @@ async def run_mode5_pipeline(
                 *[_longform_pipeline_chunk(ci, ct) for ci, ct in enumerate(chunk_texts)]
             )
         await checkpoint(control)
-        await _ensure_mode5_looped_intro_video(session_id, plan, force=False)
+        if _mode5_block_loop_applies(plan):
+            await _ensure_mode5_block_loop_videos(session_id, plan, force=False)
+        else:
+            await _ensure_mode5_looped_intro_video(session_id, plan, force=False)
 
     return await _finalize_mode5_outputs(
         session_id,
@@ -2591,7 +3628,10 @@ async def resume_mode5_pipeline(
                 _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_SLICES, chunk_index=ci)
             await checkpoint(control)
 
-        await _ensure_mode5_looped_intro_video(session_id, plan, force=False)
+        if _mode5_block_loop_applies(plan):
+            await _ensure_mode5_block_loop_videos(session_id, plan, force=False)
+        else:
+            await _ensure_mode5_looped_intro_video(session_id, plan, force=False)
         _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_SLICES)
         await checkpoint(control)
 
@@ -2634,7 +3674,10 @@ async def resume_mode5_pipeline(
     for ch in chunks:
         if not _mode5_chunk_slices_complete(session_root, ch):
             _render_chunk_audio_slices(session_id, ch)
-    await _ensure_mode5_looped_intro_video(session_id, plan, force=False)
+    if _mode5_block_loop_applies(plan):
+        await _ensure_mode5_block_loop_videos(session_id, plan, force=False)
+    else:
+        await _ensure_mode5_looped_intro_video(session_id, plan, force=False)
     _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_SLICES)
     await checkpoint(control)
 
@@ -2706,7 +3749,9 @@ async def regenerate_mode5_image(
     img_path = session_root / seg["image"]
     await _generate_one_image(prompt, img_path, aspect_ratio=_mode5_image_aspect_ratio())
     seg["image_version"] = int(seg.get("image_version") or 1) + 1
-    if _is_global_intro_segment(chunk_index, segment_index):
+    if _mode5_block_loop_applies(plan):
+        await _ensure_mode5_block_loop_videos(session_id, plan, force=True)
+    elif _is_global_intro_segment(chunk_index, segment_index):
         await _ensure_mode5_looped_intro_video(session_id, plan, force=True)
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, lambda: _build_chunk_preview_sync(session_id, chunk_index, plan))

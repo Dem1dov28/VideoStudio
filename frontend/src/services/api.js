@@ -184,11 +184,17 @@ export const api = {
     request(`/api/mode4/${sid}/regenerate-clip`, {
       method: 'POST',
       body: JSON.stringify({ index }),
+      timeoutMs: 900000,
     }),
   mode4SetClipTrim: (sid, index, startSec, endSec) =>
     request(`/api/mode4/${sid}/set-clip-trim`, {
       method: 'POST',
       body: JSON.stringify({ index, start_sec: startSec, end_sec: endSec }),
+    }),
+  mode4ClearClipTrim: (sid, index) =>
+    request(`/api/mode4/${sid}/clear-clip-trim`, {
+      method: 'POST',
+      body: JSON.stringify({ index }),
     }),
   mode4Assemble: (sid, showSubtitles = undefined) =>
     request(`/api/mode4/${sid}/assemble`, {

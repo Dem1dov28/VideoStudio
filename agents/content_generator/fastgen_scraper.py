@@ -202,17 +202,29 @@ async def generate_video_from_keyframes(
     start_frame_path: Path,
     end_frame_path: Path,
     index: int = 0,
+    *,
+    video_aspect_ratio: str | None = None,
 ) -> Path | None:
     if _use_http():
         from agents.content_generator import fastgen_http
 
         return await fastgen_http.generate_video_from_keyframes(
-            prompt, output_dir, start_frame_path, end_frame_path, index=index
+            prompt,
+            output_dir,
+            start_frame_path,
+            end_frame_path,
+            index=index,
+            video_aspect_ratio=video_aspect_ratio,
         )
     from agents.content_generator import fastgen_playwright as _pw
 
     return await _pw.generate_video_from_keyframes(
-        prompt, output_dir, start_frame_path, end_frame_path, index=index
+        prompt,
+        output_dir,
+        start_frame_path,
+        end_frame_path,
+        index=index,
+        video_aspect_ratio=video_aspect_ratio,
     )
 
 

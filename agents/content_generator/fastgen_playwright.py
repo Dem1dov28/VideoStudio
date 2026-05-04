@@ -1117,9 +1117,28 @@ class FastGenScraper:
             pass
         await asyncio.sleep(1)
 
-    async def _select_model(self) -> None:
-        """Image tab: FASTGEN_MODEL."""
-        model = settings.fastgen_model
+    def _resolve_mode5_playwright_model(self, prompt: str | None = None) -> str | None:
+        """
+        Keep Mode5 image quality stable on Playwright path.
+
+        Mode5 should consistently use GEM_PIX_2 (Nano Banana Pro - Flow), same intent
+        as HTTP backend guard, regardless of accidental UI model drift.
+        """
+        configured = (settings.fastgen_model or "").strip()
+        low = (prompt or "").lower()
+        is_mode5 = str(getattr(settings, "pipeline_mode", "") or "").strip().lower() == "mode5"
+        has_mode5_marker = (
+            "hard override for mode5" in low
+            or "mode5 sequence" in low
+            or "for mode5" in low
+        )
+        if is_mode5 or has_mode5_marker:
+            return "GEM_PIX_2"
+        return configured or None
+
+    async def _select_model(self, prompt: str | None = None) -> None:
+        """Image tab model select with Mode5 quality guard."""
+        model = self._resolve_mode5_playwright_model(prompt)
         if not model:
             return
         await self._select_ui_model(model)
@@ -1458,7 +1477,7 @@ class FastGenScraper:
             await self._authenticate()
 
         await self._activate_image_tab()
-        await self._select_model()
+        await self._select_model(prompt)
         await self._select_aspect_ratio()
 
         if reference_image_path and reference_image_path.exists():
@@ -1630,7 +1649,7 @@ class FastGenScraper:
             await self._authenticate()
 
         await self._activate_image_tab()
-        await self._select_model()
+        await self._select_model(prompt)
         await self._select_aspect_ratio()
 
         # Upload ALL reference images (character photos)
@@ -3133,6 +3152,8 @@ async def generate_video_from_keyframes(
     start_frame_path: Path,
     end_frame_path: Path,
     index: int = 0,
+    *,
+    video_aspect_ratio: str | None = None,
 ) -> Path | None:
     """
     Generate video via fast-gen.ai Video tab using keyframes (start + end frame).

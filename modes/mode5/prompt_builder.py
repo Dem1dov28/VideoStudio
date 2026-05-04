@@ -81,11 +81,13 @@ _MODE5_PROMPT_PROFILES: dict[str, Mode5PromptProfile] = {
         style_id="soft_cinematic_realistic",
         style_description=(
             "Soft cinematic realism, calm low-contrast lighting, gentle depth cues, "
-            "cozy but realistic environment rendering."
+            "cozy but realistic environment rendering with layered production design."
         ),
         mode_rules=(
-            "Show lived scenes implied by ideas and habits, not books/pages/screens as hero object. "
-            "Preserve restful, quiet mood."
+            "Show lived scenes implied by ideas and habits. "
+            "Weave the episode's themes into the set: props, era, weather, crafts, textures, and architecture that echo the narration — "
+            "avoid a sparse anonymous room unless the script explicitly calls for it. "
+            "Preserve restful, quiet mood; keep energy in detail density, not chaos."
         ),
     ),
     "unwritten_chapter": Mode5PromptProfile(
@@ -115,11 +117,16 @@ _MODE5_RENDER_SLOTS: dict[str, Mode5RenderSlots] = {
         ),
         extra_rules=(
             "Continuity: surrounding context may fix recurring place or era only if it does not contradict the scene source.",
+            "Add environmental storytelling: secondary props, architecture, weather, or workplace detail that reinforces the narration — "
+            "avoid a blank minimalist void.",
         ),
     ),
     "bible": Mode5RenderSlots(
         subject="1-3 figures in modest period dress implied by the scene source; respectful poses, no caricature",
-        environment="ancient Near East plausible architecture/landscape from the spoken moment (no modern objects)",
+        environment=(
+            "ancient Near East plausible architecture/landscape from the spoken moment (no modern objects); "
+            "populate the world with period props, paths, vessels, animals, or city life that support the beat"
+        ),
         action="one narrative action from the scene source (travel, teaching moment, labor, prayer posture as described)",
         mood="reverent classical tableau, warm chiaroscuro, restrained emotion",
         camera="medium shot or two-shot, stable composition, painterly depth",
@@ -159,19 +166,25 @@ _MODE5_RENDER_SLOTS: dict[str, Mode5RenderSlots] = {
         extra_rules=(
             "Use surrounding context to keep recurring motifs consistent when the segment is thin.",
             "If the scene source is abstract, still render one concrete literal scene that instantiates it.",
+            "Include midground/background interest (tools, signage shapes without text, vehicles, landscape) so the frame feels specific to the beat.",
         ),
     ),
     "book_night": Mode5RenderSlots(
         subject="1-2 people in everyday roles implied by the scene source (no celebrity likeness)",
-        environment="quiet domestic or soft public interior/exterior matching the spoken habit or reflection",
+        environment=(
+            "a specific, lived-in interior or exterior with storytelling depth: foreground prop, midground figures, "
+            "background context (street, garden, workshop corner, kitchen detail, transit platform) aligned to the spoken habit or reflection"
+        ),
         action="gentle routine action (walking, sitting, hands busy with a non-text prop, conversation posture)",
         mood="soft low-contrast calm, sleep-friendly, intimate but realistic",
-        camera="medium-close or medium, gentle depth, no harsh dutch angle",
+        camera="medium-close or medium, gentle depth, no harsh dutch angle; frame should feel art-directed, not stock-photo empty",
         quality=(
-            "soft shadows, low noise, cozy but photoreal materials, no harsh speculars, no surreal glow"
+            "soft shadows, low noise, cozy but photoreal materials, no harsh speculars, no surreal glow; "
+            "rich small-object and texture detail that supports the theme"
         ),
         extra_rules=(
-            "No book spread, e-reader screen, manuscript, or library shelf as the dominant subject.",
+            "Echo the book or episode topic through environment and props (stacked closed books as shapes, lamp light, textiles, tools, "
+            "maps as texture without labels) — not as readable pages, covers, titles, or UI.",
             "No readable text on walls, screens, or props; keep typography out of frame.",
         ),
     ),
@@ -267,6 +280,16 @@ def _build_mode5_prompt_payload(
         f"The mood is {slots.mood}, with {slots.camera}."
     )
     quality_line = f"Use {slots.quality}."
+    if mode_key == "book_night":
+        literal_scene_rule = (
+            "Anchor the frame in literal, filmable reality (people, place, action). "
+            "Enrich the world with concrete set dressing and textures that echo the narration's themes — "
+            "still one real moment, not a surreal metaphor collage unrelated to the spoken line."
+        )
+    else:
+        literal_scene_rule = (
+            "Do not create symbolic, metaphorical, or conceptual substitutions; render literal filmable content from the narration moment."
+        )
 
     final_parts: list[str] = [
         "Create one cinematic still image.",
@@ -276,7 +299,7 @@ def _build_mode5_prompt_payload(
         f"Follow this visual direction, {profile.mode_rules}",
         "The narration moment is authoritative; if nearby narration conflicts with it, ignore the conflicting nearby details.",
         "Choose the subject, action, and environment from the narration moment first.",
-        "Do not create symbolic, metaphorical, or conceptual substitutions; render literal filmable content from the narration moment.",
+        literal_scene_rule,
         "Generate exactly one photo with exactly one scene only.",
         "Do not merge multiple moments, multiple locations, or multiple timeline beats into one image.",
         single_image_rule,

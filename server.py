@@ -112,11 +112,18 @@ def _session_topic_from_request(req: "StartRequest") -> str:
     if m == 5:
         header = (getattr(req, "mode5_video_header_title", None) or "").strip()
         txt = (getattr(req, "mode5_script_text", None) or "").strip()
+        base = None
         if header:
-            return header[:100]
-        if txt:
-            return f"Long-form: {txt[:90]}"
-        return "Ручной long-form (режим 5)"
+            base = header[:100]
+        elif txt:
+            base = f"Long-form: {txt[:90]}"
+        else:
+            base = "Ручной long-form (режим 5)"
+        if getattr(req, "mode5_test_run", False):
+            td = int(getattr(req, "mode5_test_duration_sec", 300) or 300)
+            mins = max(1, td // 60)
+            return f"{base} · тест ~{mins} мин"
+        return base
     return (
         req.topic
         or getattr(req, "mode3_topic", None)
@@ -181,6 +188,8 @@ async def _run_pipeline_task(
             mode5_video_header_title=getattr(req, "mode5_video_header_title", None),
             mode5_bible_mode=bool(getattr(req, "mode5_bible_mode", False)),
             mode5_sub_mode=getattr(req, "mode5_sub_mode", "manual") or "manual",
+            mode5_test_run=bool(getattr(req, "mode5_test_run", False)),
+            mode5_test_duration_sec=int(getattr(req, "mode5_test_duration_sec", 300) or 300),
             mode6_num_characters=getattr(req, "mode6_num_characters", 3),
             mode7_keyboards=getattr(req, "mode7_keyboards", None),
             mode7_animal_type=getattr(req, "mode7_animal_type", None),
@@ -692,6 +701,9 @@ class StartRequest(BaseModel):
     mode5_bible_mode: bool = False
     # manual | bible | facts50 | outline | book_night | unwritten_chapter (legacy: mode5_bible_mode)
     mode5_sub_mode: str = "manual"
+    # Mode 5: короткий тестовый прогон (~test_duration_sec озвучки по оценке слов)
+    mode5_test_run: bool = False
+    mode5_test_duration_sec: int = 300
     # Mode 6: viral cartoon drama
     mode6_num_characters: int = 3
     # Mode 7: ASMR animal keyboard videos
@@ -774,6 +786,15 @@ class StartRequest(BaseModel):
         if s in ("api", "playwright", "auto"):
             return s
         raise ValueError("mode5_image_backend must be api, playwright, auto, or null")
+
+    @field_validator("mode5_test_duration_sec", mode="before")
+    @classmethod
+    def _clamp_mode5_test_duration_sec(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            n = 300
+        return max(60, min(7200, n))
 
 
 class RegenerateClipIndexBody(BaseModel):
@@ -1465,6 +1486,23 @@ async def mode4_set_clip_trim_ep(session_id: str, body: Mode4ClipTrimBody):
             start_sec=float(body.start_sec),
             end_sec=float(body.end_sec),
         )
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+    sess = _sessions.get(session_id)
+    if sess and isinstance(sess.get("result"), dict):
+        sess["result"]["mode4_clip_trims"] = result.get("clip_trims") or []
+    return result
+
+
+@app.post("/api/mode4/{session_id}/clear-clip-trim")
+async def mode4_clear_clip_trim_ep(session_id: str, body: RegenerateClipIndexBody):
+    from modes.mode4.multiclip import clear_mode4_multiclip_clip_trim
+
+    try:
+        result = clear_mode4_multiclip_clip_trim(session_id, body.index)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e)) from e
     except ValueError as e:

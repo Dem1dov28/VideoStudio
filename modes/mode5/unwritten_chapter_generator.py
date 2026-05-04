@@ -27,6 +27,7 @@ from modes.mode5.outline_generator import (
     _pad_narrations_to_rows,
     _parse_json_obj,
     _scenario_llm,
+    trim_outline_to_first_n_subchapters,
 )
 from modes.mode5.narration_quality import adjacent_repetition_pairs
 from modes.mode5.text_length import spoken_plain_len
@@ -671,6 +672,35 @@ Hard constraints:
         )
 
     rows = _flatten_outline(outline)
+
+    if control and control.get("_mode5_test_run"):
+        from modes.mode5.text_length import mode5_trim_strings_by_estimated_speech
+
+        tgt = float(control.get("_mode5_test_target_sec") or 300.0)
+        tgt = max(60.0, min(7200.0, tgt))
+        proxies = [
+            " ".join(
+                str(row.get(k) or "").strip()
+                for k in (
+                    "chapter_title",
+                    "subchapter_title",
+                    "coverage",
+                    "evidence_anchor",
+                    "human_stakes",
+                )
+            ).strip()
+            or "block"
+            for row in rows
+        ]
+        kept = mode5_trim_strings_by_estimated_speech(proxies, language=lang, target_sec=tgt)
+        k = len(kept)
+        if k < len(rows):
+            rows = rows[:k]
+            outline = trim_outline_to_first_n_subchapters(outline, k)
+            logger.info(
+                f"[Mode5 unwritten] test_run: generating first {k} block(s) (~{tgt:.0f}s speech budget)"
+            )
+
     words_per_block = max(560, int(_DEFAULT_WORDS_TOTAL / max(1, len(rows))))
     chars_lo = int(words_per_block * 5.2)
     chars_hi = int(words_per_block * 6.4)
