@@ -38,8 +38,8 @@ from utils.ffmpeg_resolve import resolve_ffmpeg_executable
 # pan_x is crop center in [0..1]:
 #   0.5 = centered, <0.5 = left, >0.5 = right.
 _MOTION_PATTERNS: list[tuple[float, float, float, float]] = [
-    # One-way horizontal drift across each segment (faster, no direction flip jerk).
-    (0.12, 0.88, 0.50, 0.50),
+    # Ultra-gentle one-way horizontal drift.
+    (0.46, 0.54, 0.50, 0.50),
 ]
 
 _MIN_SEGMENT_AUDIO_SEC = 0.25
@@ -227,9 +227,14 @@ def _make_segment_clip_static_still(
         temp_out = Path(tmp.name)
 
     duration = _wav_duration_sec(audio_path)
+    render_crf = max(15, min(28, int(getattr(settings, "mode5_render_crf", 17) or 17)))
+    # FastGen/Veo source clips may include a small bottom-right provider watermark.
+    # Remove a thin bottom strip before scaling/padding so the badge never appears in final output.
     vf = (
-        f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase:flags=lanczos,"
-        f"crop={target_w}:{target_h},"
+        "crop=iw:ih-ceil(ih*0.055):0:0,"
+        f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease:flags=lanczos,"
+        f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=#101318,"
+        "unsharp=5:5:0.45:5:5:0.0,"
         "format=yuv420p"
     )
     cmd = [
@@ -247,6 +252,8 @@ def _make_segment_clip_static_still(
         str(render_fps),
         "-c:v",
         "libx264",
+        "-crf",
+        str(render_crf),
         "-preset",
         "medium",
         "-pix_fmt",
@@ -299,6 +306,7 @@ def _make_segment_clip(
     else:
         panx0, panx1, pany0, pany1 = (0.5, 0.5, 0.5, 0.5)
     duration = _wav_duration_sec(audio_path)
+    render_crf = max(15, min(28, int(getattr(settings, "mode5_render_crf", 17) or 17)))
     total_frames = max(2, int(round(duration * render_fps)))
     # Use smoothstep easing so movement has zero velocity at segment endpoints.
     denom = max(1, total_frames - 1)
@@ -317,7 +325,8 @@ def _make_segment_clip(
 
     # For pan to be visible, zoompan needs an overscanned canvas (>1.0).
     # Keep it constant over time (no zoom animation), so we get pure smooth pan.
-    zoom_expr = "1.100000"
+    # Keep overscan very small so the frame does not look visibly cropped.
+    zoom_expr = "1.020000"
 
     # Smooth pan fractions.
     panx_expr = f"{panx0:.6f} + ({panx1:.6f}-{panx0:.6f})*{ease_expr}"
@@ -341,6 +350,7 @@ def _make_segment_clip(
         f"x='{x_expr}':"
         f"y='{y_expr}':"
         f"d={total_frames}:s={target_w}x{target_h}:fps={render_fps},"
+        "unsharp=5:5:0.45:5:5:0.0,"
         "format=yuv420p[v]"
     )
     cmd = [
@@ -358,6 +368,8 @@ def _make_segment_clip(
         "[v]",
         "-c:v",
         "libx264",
+        "-crf",
+        str(render_crf),
         "-preset",
         "medium",
         "-pix_fmt",
@@ -384,6 +396,8 @@ def _make_looped_video_segment_clip(
     target_w: int,
     target_h: int,
     render_fps: int,
+    *,
+    loop_offset_sec: float = 0.0,
 ) -> VideoFileClip:
     """
     Только картинка/видео-дорожка: зациклить источник MP4 и обрезать по длительности WAV.
@@ -400,9 +414,14 @@ def _make_looped_video_segment_clip(
         temp_out = Path(tmp.name)
 
     duration = _wav_duration_sec(audio_path)
+    render_crf = max(15, min(28, int(getattr(settings, "mode5_render_crf", 17) or 17)))
+    crop_ratio = float(getattr(settings, "mode5_video_bottom_crop", 0.028) or 0.028)
+    crop_ratio = max(0.0, min(0.08, crop_ratio))
     vf = (
-        f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase:flags=lanczos,"
-        f"crop={target_w}:{target_h},"
+        f"crop=iw:ih-ceil(ih*{crop_ratio:.4f}):0:0,"
+        f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease:flags=lanczos,"
+        f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=#101318,"
+        "unsharp=5:5:0.45:5:5:0.0,"
         "format=yuv420p"
     )
     cmd = [
@@ -412,6 +431,17 @@ def _make_looped_video_segment_clip(
         "-1",
         "-i",
         str(video_path),
+    ]
+    seek_sec = max(0.0, float(loop_offset_sec or 0.0))
+    if seek_sec > 1e-3:
+        cmd.extend(
+            [
+                "-ss",
+                f"{seek_sec:.6f}",
+            ]
+        )
+    cmd.extend(
+        [
         "-t",
         f"{duration:.6f}",
         "-vf",
@@ -421,12 +451,15 @@ def _make_looped_video_segment_clip(
         str(render_fps),
         "-c:v",
         "libx264",
+        "-crf",
+        str(render_crf),
         "-preset",
         "medium",
         "-pix_fmt",
         "yuv420p",
         str(temp_out),
-    ]
+        ]
+    )
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=3600)
         return VideoFileClip(str(temp_out))
@@ -475,6 +508,7 @@ def assemble_mode5_video(
         asset_type = "image"
         img_path: Path | None = None
         video_path: Path | None = None
+        loop_offset_sec = 0.0
         if isinstance(seg_entry, tuple):
             img_path, audio_path = seg_entry
         elif isinstance(seg_entry, dict):
@@ -485,6 +519,10 @@ def assemble_mode5_video(
             video_raw = seg_entry.get("video_path")
             img_path = Path(img_raw) if img_raw else None
             video_path = Path(video_raw) if video_raw else None
+            try:
+                loop_offset_sec = max(0.0, float(seg_entry.get("loop_offset_sec") or 0.0))
+            except (TypeError, ValueError):
+                loop_offset_sec = 0.0
         else:
             logger.warning(f"[Mode5] Skip invalid segment entry type={type(seg_entry).__name__}")
             continue
@@ -509,6 +547,7 @@ def assemble_mode5_video(
                     target_w,
                     target_h,
                     render_fps,
+                    loop_offset_sec=loop_offset_sec,
                 )
         if asset_type != "video":
             if not isinstance(img_path, Path) or not img_path.exists():
@@ -575,6 +614,8 @@ def assemble_mode5_video(
             final = concatenate_videoclips(clips, method="compose")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    encode_preset = str(getattr(settings, "mode5_preview_encode_preset", "veryfast") or "veryfast").strip() or "veryfast"
+    encode_threads = max(1, int(getattr(settings, "mode5_preview_encode_threads", 4) or 4))
     # Параллельные превью + дефолтный temp в CWD/префикс имени → коллизии и WinError 32.
     # Явный UUID + не даём MoviePy сразу os.remove (закрываем клипы, потом unlink с ретраями).
     temp_mpy_audio = output_path.parent / f"_m5_snd_{uuid.uuid4().hex}.mp4"
@@ -584,8 +625,8 @@ def assemble_mode5_video(
             fps=render_fps,
             codec="libx264",
             audio_codec="aac",
-            threads=4,
-            preset="medium",
+            threads=encode_threads,
+            preset=encode_preset,
             logger=None,
             temp_audiofile=str(temp_mpy_audio),
             temp_audiofile_path=str(output_path.parent),

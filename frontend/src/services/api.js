@@ -253,12 +253,31 @@ export const api = {
       body: JSON.stringify({ chunk_index: chunkIndex, action_id: actionId }),
       timeoutMs: 120000,
     }),
+  mode5LiveRegenerateBlockLoop: (sid, chunkIndex, actionId = makeActionId()) =>
+    request(`/api/mode5/${sid}/live/regenerate-block-loop`, {
+      method: 'POST',
+      body: JSON.stringify({ chunk_index: chunkIndex, action_id: actionId }),
+      timeoutMs: 180000,
+    }),
+  mode5LiveRegenerateIntroPreview: (sid, previewIndex, actionId = makeActionId()) =>
+    request(`/api/mode5/${sid}/live/regenerate-intro-preview`, {
+      method: 'POST',
+      body: JSON.stringify({ chunk_index: previewIndex, action_id: actionId }),
+      timeoutMs: 180000,
+    }),
   mode5LiveRebuildFinal: (sid, actionId = makeActionId()) =>
     request(`/api/mode5/${sid}/live/rebuild-final`, {
       method: 'POST',
       body: JSON.stringify({ action_id: actionId }),
       timeoutMs: 180000,
     }),
+  mode5LiveRegeneratePublishThumbnail: (sid, actionId = makeActionId()) =>
+    request(`/api/mode5/${sid}/live/regenerate-publish-thumbnail`, {
+      method: 'POST',
+      body: JSON.stringify({ action_id: actionId }),
+      timeoutMs: 180000,
+    }),
+  mode5PublishThumbnailUrl: (sid) => `${BASE}/api/mode5/${encodeURIComponent(sid)}/publish-thumbnail`,
   mode5LivePauseChunk: (sid, chunkIndex, actionId = makeActionId()) =>
     request(`/api/mode5/${sid}/live/pause-chunk`, {
       method: 'POST',

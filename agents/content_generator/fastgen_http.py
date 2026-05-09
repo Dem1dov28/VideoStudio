@@ -30,7 +30,8 @@ from agents.content_generator.fastgen_exceptions import FastGenCancelled, VideoG
 from agents.content_generator.fastgen_prompts import (
     _fastgen_aspect_ratio_normalized,
     _resolve_video_tab_aspect_ratio,
-    prepare_fastgen_prompt_for_ui,
+    prepare_fastgen_prompt_for_image,
+    prepare_fastgen_prompt_for_video,
 )
 from config import settings
 
@@ -40,8 +41,8 @@ _DATA_URI_RE = re.compile(r"^data:([^;]+);base64,(.+)$", re.DOTALL)
 # Повтор при HTTP 500 generation.content_policy («известные лица»): усиливаем анонимность сцены.
 _CONTENT_POLICY_IMAGE_RETRY_SUFFIX = (
     "REGENERATION (content policy): do not depict any real public figure, celebrity, politician, athlete, or religious leader. "
-    "No recognizable face or body likeness. Prefer landscapes, objects, symbolic scenes, or tiny distant indistinct silhouettes; "
-    "if people are needed, use fully generic stylized characters with no facial features matching anyone real."
+    "No recognizable face or body likeness. Preserve the original scene intent, location, and topic-linked objects; "
+    "if people are needed, use anonymous generic role-based characters with non-identifiable facial features."
 )
 _FILE_REF_RE = re.compile(r"^file:[a-f0-9]{32}$")
 _MAX_INLINE_BYTES = 4 * 1024 * 1024  # ~4 MiB raw — дальше storage
@@ -85,7 +86,7 @@ def _build_headers() -> dict[str, str]:
 
 
 def _content_policy_relaxed_image_prompt(prepared_prompt: str) -> str:
-    """Один раз дополняем уже подготовленный (prepare_fastgen_prompt_for_ui) промпт."""
+    """Один раз дополняем уже подготовленный FastGen промпт."""
     base = (prepared_prompt or "").rstrip()
     if not base:
         return _CONTENT_POLICY_IMAGE_RETRY_SUFFIX
@@ -146,8 +147,8 @@ def _merge_into_parameters(params: dict[str, Any]) -> dict[str, Any]:
     return params
 
 
-def _image_aspect_enum() -> str:
-    r = _fastgen_aspect_ratio_normalized()
+def _image_aspect_enum(explicit: str | None = None) -> str:
+    r = _fastgen_aspect_ratio_normalized(explicit)
     if r == "9:16":
         return "IMAGE_ASPECT_RATIO_PORTRAIT"
     if r == "4:3":
@@ -188,37 +189,41 @@ def _merge_v4_request_body(body: dict[str, Any]) -> dict[str, Any]:
 
 def _normalize_google_fx_image_model() -> str:
     """
-    FASTGEN_MODEL как в UI (value GEM_PIX_2 или подпись «Nano Banana Pro - Flow»)
+    FASTGEN_MODEL как в UI (value NARWHAL или подпись «Nano Banana 2 - Flow»)
     → enum v2/v4 Flow: GEM_PIX_2 | NARWHAL.
-    IMAGEN_* intentionally disabled: forced fallback to GEM_PIX_2.
+    IMAGEN_* intentionally disabled: forced fallback to NARWHAL.
     """
-    raw = (getattr(settings, "fastgen_model", None) or "GEM_PIX_2").strip()
+    raw = (getattr(settings, "fastgen_model", None) or "NARWHAL").strip()
     if not raw:
-        return "GEM_PIX_2"
+        return "NARWHAL"
     compact = re.sub(r"[^A-Za-z0-9]+", "_", raw).upper()
     if "NARWHAL" in compact or "BANANA_2" in compact or "NANO_BANANA_2" in compact:
         return "NARWHAL"
     if "IMAGEN" in compact or "IMAGEN4" in compact or "IMAGEN_4" in compact:
-        logger.warning("[FastGen HTTP] IMAGEN_* is disabled for images; forcing GEM_PIX_2")
-        return "GEM_PIX_2"
+        logger.warning("[FastGen HTTP] IMAGEN_* is disabled for images; forcing NARWHAL")
+        return "NARWHAL"
     if "GEM_PIX" in compact or "PIX_2" in compact or ("NANO" in compact and "PRO" in compact):
         return "GEM_PIX_2"
+    if "BANANA_2" in compact or "NANO_BANANA_2" in compact:
+        return "NARWHAL"
     u = raw.upper().replace(" ", "").replace("_", "")
+    if u in ("NARWHAL", "NANOBANANA2", "NANO_BANANA_2"):
+        return "NARWHAL"
     if u in ("GEMPIX2", "GEM_PIX_2"):
         return "GEM_PIX_2"
-    return "GEM_PIX_2"
+    return "NARWHAL"
 
 
 def _resolve_image_model_for_prompt(prompt: str) -> str:
     """
-    Mode5 (all submodes) must use GEM_PIX_2 (Nano Banana Pro - Flow) for v2 images.
+    Mode5 (all submodes) must use NARWHAL (Nano Banana 2 - Flow) for v2 images.
     We enforce this by pipeline mode and by explicit mode5 guard marker in prompt.
     """
     low = (prompt or "").lower()
     if str(getattr(settings, "pipeline_mode", "") or "").strip().lower() == "mode5":
-        return "GEM_PIX_2"
+        return "NARWHAL"
     if "hard override for mode5" in low or "mode5 sequence" in low or "for mode5" in low:
-        return "GEM_PIX_2"
+        return "NARWHAL"
     return _normalize_google_fx_image_model()
 
 
@@ -288,10 +293,10 @@ def _remix_categories(n: int) -> list[str]:
     return [order[i % 3] for i in range(n)]
 
 
-def _v2_image_body_generate(prompt: str) -> dict[str, Any]:
+def _v2_image_body_generate(prompt: str, aspect_ratio: str | None = None) -> dict[str, Any]:
     params: dict[str, Any] = {
         "prompt": prompt,
-        "aspect_ratio": _image_aspect_enum(),
+        "aspect_ratio": _image_aspect_enum(aspect_ratio),
         "model": _resolve_image_model_for_prompt(prompt),
     }
     return {
@@ -301,11 +306,13 @@ def _v2_image_body_generate(prompt: str) -> dict[str, Any]:
     }
 
 
-def _v2_image_body_transform(prompt: str, input_image: str) -> dict[str, Any]:
+def _v2_image_body_transform(
+    prompt: str, input_image: str, aspect_ratio: str | None = None
+) -> dict[str, Any]:
     params: dict[str, Any] = {
         "prompt": prompt,
         "input_image": input_image,
-        "aspect_ratio": _image_aspect_enum(),
+        "aspect_ratio": _image_aspect_enum(aspect_ratio),
         "model": _resolve_image_model_for_prompt(prompt),
     }
     return {
@@ -315,14 +322,16 @@ def _v2_image_body_transform(prompt: str, input_image: str) -> dict[str, Any]:
     }
 
 
-def _v2_image_body_remix(prompt: str, refs: list[str]) -> dict[str, Any]:
+def _v2_image_body_remix(
+    prompt: str, refs: list[str], aspect_ratio: str | None = None
+) -> dict[str, Any]:
     n = min(3, len(refs))
     cats = _remix_categories(n)
     ref_objs = [{"image": refs[i], "category": cats[i]} for i in range(n)]
     params: dict[str, Any] = {
         "prompt": prompt,
         "reference_images": ref_objs,
-        "aspect_ratio": _image_aspect_enum(),
+        "aspect_ratio": _image_aspect_enum(aspect_ratio),
         "model": _resolve_image_model_for_prompt(prompt),
     }
     return {
@@ -496,11 +505,12 @@ async def _generate_one_image(
     output_dir: Path,
     index: int | None,
     cancel_event: threading.Event | None,
-    reference_paths: list[Path] | None,
+    reference_paths: list[Path] | None = None,
+    aspect_ratio: str | None = None,
 ) -> Path | None:
     if _cancel_requested(cancel_event):
         return None
-    full_prompt = prepare_fastgen_prompt_for_ui(prompt)
+    full_prompt = prepare_fastgen_prompt_for_image(prompt)
     refs = [p for p in (reference_paths or []) if p.exists()]
     if len(refs) > 3:
         logger.warning(f"[FastGen HTTP] remix supports max 3 refs, using first 3 of {len(refs)}")
@@ -509,12 +519,12 @@ async def _generate_one_image(
         ref_inputs = [await _image_input_for_path(client, p) for p in refs]
 
         def _body(cur: str) -> dict[str, Any]:
-            return _v2_image_body_remix(cur, ref_inputs)
+            return _v2_image_body_remix(cur, ref_inputs, aspect_ratio)
 
     else:
 
         def _body(cur: str) -> dict[str, Any]:
-            return _v2_image_body_generate(cur)
+            return _v2_image_body_generate(cur, aspect_ratio)
 
     out = await _post_v2_images_resilient(client, full_prompt, _body)
     dest = _unique_frame_dest(output_dir, str(index) if index is not None else "0")
@@ -585,7 +595,7 @@ async def _generate_one_video(
     end_frame: Path | None = None,
     video_aspect_ratio: str | None = None,
 ) -> Path | None:
-    full_prompt = prepare_fastgen_prompt_for_ui(prompt)
+    full_prompt = prepare_fastgen_prompt_for_video(prompt)
     aspect = _video_aspect_enum(video_aspect_ratio)
     aspect_short = _video_aspect_v4_short(video_aspect_ratio)
     out = output_dir / f"clip_{index:03d}.mp4"
@@ -717,6 +727,7 @@ async def generate_images_fastgen(
     output_dir: Path,
     parallel: bool = True,
     cancel_event: threading.Event | None = None,
+    aspect_ratio: str | None = None,
 ) -> list[Path]:
     _require_base()
     if not _api_key():
@@ -731,7 +742,9 @@ async def generate_images_fastgen(
                 if _cancel_requested(cancel_event):
                     raise FastGenCancelled()
                 try:
-                    r = await _generate_one_image(client, p, output_dir, i, cancel_event, None)
+                    r = await _generate_one_image(
+                        client, p, output_dir, i, cancel_event, None, aspect_ratio
+                    )
                     if r:
                         return r
                 except FastGenCancelled:
@@ -765,7 +778,9 @@ async def generate_images_fastgen(
                 if _cancel_requested(cancel_event):
                     raise FastGenCancelled()
                 try:
-                    r = await _generate_one_image(client, pr, output_dir, i, cancel_event, None)
+                    r = await _generate_one_image(
+                        client, pr, output_dir, i, cancel_event, None, aspect_ratio
+                    )
                     if r:
                         all_paths.append(r)
                         ok = True
@@ -847,7 +862,7 @@ async def generate_images_chain_fastgen(
         for i, (prompt, ref_idx) in enumerate(steps):
             if _cancel_requested(cancel_event):
                 raise FastGenCancelled()
-            full_prompt = prepare_fastgen_prompt_for_ui(prompt)
+            full_prompt = prepare_fastgen_prompt_for_image(prompt)
             ok = False
             for _ in range(max(1, settings.fastgen_max_attempts)):
                 if _cancel_requested(cancel_event):
@@ -904,7 +919,7 @@ async def generate_images_chain_from_seed_fastgen(
             if ref_idx < 0 or ref_idx >= len(chain):
                 raise ValueError(f"Invalid ref_idx {ref_idx} for chain len {len(chain)}")
             ref_path = chain[ref_idx]
-            full_prompt = prepare_fastgen_prompt_for_ui(prompt)
+            full_prompt = prepare_fastgen_prompt_for_image(prompt)
             ok = False
             for _ in range(max(1, settings.fastgen_max_attempts)):
                 if _cancel_requested(cancel_event):
@@ -980,6 +995,7 @@ async def generate_single_video_fastgen(
     reference_image_paths: list[str | Path] | None = None,
     cancel_event: threading.Event | None = None,
     mode4_veo_flow_flower: bool = False,
+    video_aspect_ratio: str | None = None,
 ) -> Path | None:
     _require_base()
     if not _api_key():
@@ -997,7 +1013,14 @@ async def generate_single_video_fastgen(
         for _ in range(max(1, settings.fastgen_max_attempts)):
             try:
                 r = await _generate_one_video(
-                    client, prompt, output_dir, index, paths, cancel_event, mode4_veo_flow_flower=mode4_veo_flow_flower
+                    client,
+                    prompt,
+                    output_dir,
+                    index,
+                    paths,
+                    cancel_event,
+                    mode4_veo_flow_flower=mode4_veo_flow_flower,
+                    video_aspect_ratio=video_aspect_ratio,
                 )
                 if r:
                     return r

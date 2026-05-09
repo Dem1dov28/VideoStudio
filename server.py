@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+import mimetypes
 import os
 import tempfile
 import threading
@@ -30,6 +31,7 @@ from casino_routes import register_casino_routes
 
 # ── Session store ─────────────────────────────────────────────────────────────
 _sessions: dict[str, dict] = {}
+_mode5_continue_locks: dict[str, asyncio.Lock] = {}
 
 # ── YouTube OAuth (state → unix time) ─────────────────────────────────────────
 _youtube_oauth_states: dict[str, float] = {}
@@ -256,6 +258,11 @@ async def _run_pipeline_task(
             "mode5_can_resume": result.get("mode5_can_resume"),
             "mode5_checkpoint_stage": result.get("mode5_checkpoint_stage"),
             "mode5_resume_reason": result.get("mode5_resume_reason"),
+            "mode5_waiting_confirmation": result.get("mode5_waiting_confirmation"),
+            "mode5_intro_preview_video": result.get("mode5_intro_preview_video"),
+            "mode5_intro_preview_videos": result.get("mode5_intro_preview_videos"),
+            "mode5_block_loop_pool_size": result.get("mode5_block_loop_pool_size"),
+            "mode5_publish_thumbnail": result.get("mode5_publish_thumbnail"),
             "mode13_review_ready": result.get("mode13_review_ready"),
             "mode13_clip_filenames": result.get("mode13_clip_filenames"),
             "mode13_show_subtitles": result.get("mode13_show_subtitles"),
@@ -359,6 +366,11 @@ async def _run_mode5_resume_task(session_id: str, queue: asyncio.Queue, control:
             "mode5_can_resume": result.get("mode5_can_resume"),
             "mode5_checkpoint_stage": result.get("mode5_checkpoint_stage"),
             "mode5_resume_reason": result.get("mode5_resume_reason"),
+            "mode5_waiting_confirmation": result.get("mode5_waiting_confirmation"),
+            "mode5_intro_preview_video": result.get("mode5_intro_preview_video"),
+            "mode5_intro_preview_videos": result.get("mode5_intro_preview_videos"),
+            "mode5_block_loop_pool_size": result.get("mode5_block_loop_pool_size"),
+            "mode5_publish_thumbnail": result.get("mode5_publish_thumbnail"),
         }
         await queue.put({"type": "done", **session["result"]})
         try:
@@ -1374,7 +1386,23 @@ async def queue_move(item_id: str, body: QueueMoveRequest):
 async def stream_logs(session_id: str):
     session = _sessions.get(session_id)
     if not session:
-        raise HTTPException(404, "Session not found")
+        # Fallback for persisted Mode5 sessions opened from history after process restart.
+        try:
+            from modes.mode5.pipeline import mode5_status_from_plan
+
+            persisted = mode5_status_from_plan(session_id)
+
+            async def persisted_event_gen():
+                payload = {"type": "done", **persisted}
+                yield f"data: {json.dumps(payload)}\n\n"
+
+            return StreamingResponse(
+                persisted_event_gen(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        except Exception:
+            raise HTTPException(404, "Session not found")
 
     async def event_gen():
         q: asyncio.Queue = session["queue"]
@@ -1387,6 +1415,21 @@ async def stream_logs(session_id: str):
                     if entry.get("type") in ("done", "error"):
                         return
                 except asyncio.TimeoutError:
+                    st = str(session.get("status") or "")
+                    if st in ("done", "error", "cancelled"):
+                        if st == "done":
+                            payload = session.get("result")
+                            if isinstance(payload, dict):
+                                yield f"data: {json.dumps({'type': 'done', **payload})}\n\n"
+                            else:
+                                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                        else:
+                            err_text = str(
+                                session.get("error")
+                                or ("Генерация отменена" if st == "cancelled" else "Pipeline failed")
+                            )
+                            yield f"data: {json.dumps({'type': 'error', 'error': err_text})}\n\n"
+                        return
                     yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
         except asyncio.CancelledError:
             # Клиент закрыл вкладку / оборвал SSE — не превращать в 500 для всего ASGI
@@ -1432,6 +1475,25 @@ async def get_status(session_id: str):
             merged["mode5_resume_reason"] = snap.get("reason") or None
             if merged.get("mode5_sub_mode") is None:
                 merged["mode5_sub_mode"] = plan.get("sub_mode")
+            result = merged
+        except Exception:
+            pass
+    if int(session.get("mode") or 0) == 5:
+        try:
+            from modes.mode5.pipeline import load_mode5_plan
+
+            plan = load_mode5_plan(session_id)
+            merged: dict = dict(result) if isinstance(result, dict) else {}
+            merged.setdefault("session_id", session_id)
+            # Always prefer fresh persisted plan values for volatile mode5 state.
+            merged["mode5_intro_preview_video"] = plan.get("intro_preview_video")
+            merged["mode5_intro_preview_videos"] = list(plan.get("intro_preview_videos") or [])
+            merged["mode5_waiting_confirmation"] = bool(plan.get("await_intro_confirmation"))
+            merged["mode5_block_loop_pool_size"] = int(plan.get("mode5_block_loop_pool_size") or 0) or None
+            if isinstance(plan.get("publishing"), dict):
+                merged["publishing"] = plan.get("publishing")
+            thumb_rel = str(plan.get("publish_thumbnail_rel") or "").strip()
+            merged["mode5_publish_thumbnail"] = thumb_rel or None
             result = merged
         except Exception:
             pass
@@ -1621,6 +1683,8 @@ async def mode5_assemble_ep(session_id: str):
         r["quote_caption"] = result.get("quote_caption")
         r["quote_caption_ru"] = result.get("quote_caption_ru")
         r["quote_caption_en"] = result.get("quote_caption_en")
+        r["publishing"] = result.get("publishing")
+        r["mode5_publish_thumbnail"] = result.get("mode5_publish_thumbnail")
         r["mode5_review_ready"] = False
         r.pop("mode5_clip_filenames", None)
         r.pop("mode5_chunks_meta", None)
@@ -1727,6 +1791,67 @@ async def mode5_live_rebuild_chunk_preview_ep(session_id: str, body: Mode5ChunkI
         raise HTTPException(400, str(e)) from e
 
 
+@app.post("/api/mode5/{session_id}/live/regenerate-block-loop")
+async def mode5_live_regenerate_block_loop_ep(session_id: str, body: Mode5ChunkIndexBody):
+    from modes.mode5.pipeline import regenerate_mode5_block_loop_video, load_mode5_plan
+
+    try:
+        load_mode5_plan(session_id)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    sess = _sessions.get(session_id)
+    paused = False
+    if isinstance(sess, dict) and sess.get("status") == "running":
+        ctrl = sess.get("control") or {}
+        pause_event = ctrl.get("pause_event")
+        if pause_event is not None:
+            pause_event.clear()
+            sess["status"] = "paused"
+            paused = True
+    try:
+        result = await regenerate_mode5_block_loop_video(
+            session_id, body.chunk_index, action_id=body.action_id
+        )
+        result["policy_decision"] = "paused_automatically" if paused else "background"
+        return result
+    except FileNotFoundError as e:
+        if paused and isinstance(sess, dict):
+            ctrl = sess.get("control") or {}
+            pe = ctrl.get("pause_event")
+            if pe is not None:
+                pe.set()
+            sess["status"] = "running"
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        if paused and isinstance(sess, dict):
+            ctrl = sess.get("control") or {}
+            pe = ctrl.get("pause_event")
+            if pe is not None:
+                pe.set()
+            sess["status"] = "running"
+        raise HTTPException(400, str(e)) from e
+
+
+@app.post("/api/mode5/{session_id}/live/regenerate-intro-preview")
+async def mode5_live_regenerate_intro_preview_ep(session_id: str, body: Mode5ChunkIndexBody):
+    from modes.mode5.pipeline import regenerate_mode5_intro_preview, load_mode5_plan
+
+    try:
+        load_mode5_plan(session_id)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    try:
+        result = await regenerate_mode5_intro_preview(
+            session_id, body.chunk_index, action_id=body.action_id
+        )
+        result["policy_decision"] = "background"
+        return result
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
 @app.post("/api/mode5/{session_id}/live/rebuild-final")
 async def mode5_live_rebuild_final_ep(session_id: str, body: Mode5LiveFinalBody):
     from modes.mode5.pipeline import rebuild_mode5_final_sync, load_mode5_plan
@@ -1754,6 +1879,8 @@ async def mode5_live_rebuild_final_ep(session_id: str, body: Mode5LiveFinalBody)
             if isinstance(sess_result, dict):
                 sess_result["video_path"] = result.get("video_path")
                 sess_result["video_paths"] = result.get("video_paths")
+                sess_result["publishing"] = result.get("publishing")
+                sess_result["mode5_publish_thumbnail"] = result.get("mode5_publish_thumbnail")
                 sess_result["mode5_review_ready"] = False
         result["policy_decision"] = "paused_automatically" if paused else "background"
         return result
@@ -1773,6 +1900,55 @@ async def mode5_live_rebuild_final_ep(session_id: str, body: Mode5LiveFinalBody)
                 pe.set()
             sess["status"] = "running"
         raise HTTPException(400, str(e)) from e
+
+
+@app.post("/api/mode5/{session_id}/live/regenerate-publish-thumbnail")
+async def mode5_live_regenerate_publish_thumbnail_ep(session_id: str, body: Mode5LiveFinalBody):
+    from modes.mode5.pipeline import regenerate_mode5_publish_thumbnail, load_mode5_plan
+
+    try:
+        load_mode5_plan(session_id)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    try:
+        result = await regenerate_mode5_publish_thumbnail(session_id, action_id=body.action_id)
+        sess = _sessions.get(session_id)
+        if isinstance(sess, dict):
+            sess_result = sess.get("result")
+            if isinstance(sess_result, dict):
+                thumb_rel = str(result.get("thumbnail_relpath") or "").strip()
+                sess_result["mode5_publish_thumbnail"] = thumb_rel or None
+                if isinstance(result.get("publishing"), dict):
+                    sess_result["publishing"] = result.get("publishing")
+        result["policy_decision"] = "background"
+        return result
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.get("/api/mode5/{session_id}/publish-thumbnail")
+async def mode5_publish_thumbnail_ep(session_id: str):
+    from modes.mode5.pipeline import load_mode5_plan
+
+    try:
+        plan = load_mode5_plan(session_id)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    rel = str(plan.get("publish_thumbnail_rel") or "").strip()
+    if not rel:
+        raise HTTPException(404, "Publish thumbnail not found")
+    session_root = settings.videos_dir / session_id
+    path = (session_root / rel).resolve()
+    try:
+        path.relative_to(session_root.resolve())
+    except ValueError:
+        raise HTTPException(400, "Invalid thumbnail path") from None
+    if not path.is_file():
+        raise HTTPException(404, "Publish thumbnail file missing")
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return FileResponse(str(path), media_type=media_type, filename=path.name)
 
 
 @app.post("/api/mode5/{session_id}/live/pause-chunk")
@@ -1805,6 +1981,8 @@ async def mode5_review_state_ep(session_id: str):
 
     try:
         return mode5_review_snapshot(session_id)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
 
@@ -1814,68 +1992,78 @@ async def mode5_continue_generation_ep(session_id: str):
     """Продолжить mode5 с последнего сохранённого этапа (TTS/картинки/слайсы на диске)."""
     from modes.mode5.pipeline import load_mode5_plan, mode5_resume_snapshot
 
-    snap = mode5_resume_snapshot(session_id)
-    if not snap.get("can_resume"):
-        raise HTTPException(
-            400,
-            detail=str(snap.get("reason") or "cannot_resume"),
+    lock = _mode5_continue_locks.setdefault(session_id, asyncio.Lock())
+    async with lock:
+        snap = mode5_resume_snapshot(session_id)
+        if not snap.get("can_resume"):
+            raise HTTPException(
+                400,
+                detail=str(snap.get("reason") or "cannot_resume"),
+            )
+
+        existing = _sessions.get(session_id)
+        if isinstance(existing, dict):
+            t = existing.get("task")
+            if t is not None and not t.done():
+                raise HTTPException(409, "Для этой сессии уже идёт генерация")
+            st = str(existing.get("status") or "").strip().lower()
+            if st in ("running", "paused"):
+                raise HTTPException(409, "Для этой сессии уже идёт генерация")
+
+        try:
+            plan = load_mode5_plan(session_id)
+        except FileNotFoundError as e:
+            raise HTTPException(404, str(e)) from e
+
+        topic = (
+            (plan.get("header_title") or plan.get("facts_topic") or "").strip()
+            or f"Mode 5 ({session_id})"
         )
 
-    existing = _sessions.get(session_id)
-    if existing:
-        t = existing.get("task")
-        if existing.get("status") == "running" and t is not None and not t.done():
-            raise HTTPException(409, "Для этой сессии уже идёт генерация")
+        from agents.topics_history import get_start_request_for_session
 
-    try:
-        plan = load_mode5_plan(session_id)
-    except FileNotFoundError as e:
-        raise HTTPException(404, str(e)) from e
+        req_hist = get_start_request_for_session(session_id)
+        req_final = None
+        if isinstance(existing, dict) and isinstance(existing.get("request"), dict):
+            req_final = existing["request"]
+        elif isinstance(req_hist, dict):
+            req_final = req_hist
+        if not isinstance(req_final, dict):
+            req_final = {"mode": 5, "mode5_skip_final_assembly": True}
 
-    topic = (
-        (plan.get("header_title") or plan.get("facts_topic") or "").strip()
-        or f"Mode 5 ({session_id})"
-    )
+        if isinstance(existing, dict) and isinstance(existing.get("queue"), asyncio.Queue):
+            queue = existing["queue"]
+            _drain_async_queue(queue)
+        else:
+            queue = asyncio.Queue()
 
-    from agents.topics_history import get_start_request_for_session
+        pause_event = asyncio.Event()
+        pause_event.set()
+        control = {
+            "pause_event": pause_event,
+            "cancelled": False,
+            "fastgen_cancel_event": threading.Event(),
+        }
 
-    req_hist = get_start_request_for_session(session_id)
-    req_final = None
-    if isinstance(existing, dict) and isinstance(existing.get("request"), dict):
-        req_final = existing["request"]
-    elif isinstance(req_hist, dict):
-        req_final = req_hist
-    if not isinstance(req_final, dict):
-        req_final = {"mode": 5, "mode5_skip_final_assembly": True}
+        prev_result = (existing or {}).get("result") if isinstance(existing, dict) else None
+        if isinstance(prev_result, dict):
+            prev_result = dict(prev_result)
+            prev_result["mode5_waiting_confirmation"] = False
 
-    if isinstance(existing, dict) and isinstance(existing.get("queue"), asyncio.Queue):
-        queue = existing["queue"]
-        _drain_async_queue(queue)
-    else:
-        queue = asyncio.Queue()
-
-    pause_event = asyncio.Event()
-    pause_event.set()
-    control = {
-        "pause_event": pause_event,
-        "cancelled": False,
-        "fastgen_cancel_event": threading.Event(),
-    }
-
-    _sessions[session_id] = {
-        "status": "running",
-        "queue": queue,
-        "result": (existing or {}).get("result") if isinstance(existing, dict) else None,
-        "error": None,
-        "started_at": time.time(),
-        "control": control,
-        "topic": topic,
-        "mode": 5,
-        "request": req_final,
-    }
-    task = asyncio.create_task(_run_mode5_resume_task(session_id, queue, control))
-    _sessions[session_id]["task"] = task
-    return {"session_id": session_id, "continuing": True}
+        _sessions[session_id] = {
+            "status": "running",
+            "queue": queue,
+            "result": prev_result,
+            "error": None,
+            "started_at": time.time(),
+            "control": control,
+            "topic": topic,
+            "mode": 5,
+            "request": req_final,
+        }
+        task = asyncio.create_task(_run_mode5_resume_task(session_id, queue, control))
+        _sessions[session_id]["task"] = task
+        return {"session_id": session_id, "continuing": True}
 
 
 @app.post("/api/mode5/topic-ideas")
@@ -1969,6 +2157,7 @@ async def list_pipeline_sessions():
             and (
                 result.get("mode4_multiclip_ready")
                 or result.get("mode13_review_ready")
+                or result.get("mode5_review_ready")
             )
         )
         terminal_visible = st in ("error", "cancelled")
@@ -2047,6 +2236,9 @@ async def restart_pipeline(session_id: str):
     req_data = session.get("request")
     if not req_data:
         raise HTTPException(400, "Перезапуск недоступен: параметры этой сессии не сохранены (старая версия)")
+    task = session.get("task")
+    if task is not None and not task.done():
+        raise HTTPException(409, "Нельзя перезапустить активную сессию: сначала остановите или дождитесь завершения")
 
     import shutil
 
@@ -2879,8 +3071,16 @@ def _resolve_video_path(session_id: str, filename: str) -> Path | None:
         fn = parts[0]
         if fn.lower().startswith("clip_") and fn.endswith(".mp4"):
             candidates.append(legacy_root / "clips" / fn)
+        # Mode5 intro preflight clips may be nested under clips/mode5/.
+        if fn.lower().endswith(".mp4"):
+            candidates.append(legacy_root / "clips" / "mode5" / fn)
+        # Mode5 pre-confirmation previews are stored under session/mode5/
+        if fn.lower().endswith(".mp4"):
+            candidates.append(legacy_root / "mode5" / fn)
     elif len(parts) == 2 and parts[0] == "clips":
         candidates.append(legacy_root / "clips" / parts[1])
+    elif len(parts) == 2 and parts[0] == "mode5":
+        candidates.append(legacy_root / "mode5" / parts[1])
     for cand in candidates:
         try:
             rc = cand.resolve()

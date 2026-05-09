@@ -107,8 +107,34 @@ def _looks_historical_prompt(text: str) -> bool:
     return any(token in low for token in _HISTORICAL_HINTS)
 
 
-def prepare_fastgen_prompt_for_ui(user_prompt: str) -> str:
-    """Все текстовые промпты в FastGen (картинка и видео) проходят через это."""
+def _allows_intentional_overlay_text(text: str) -> bool:
+    """
+    Detect prompts where visible in-image text is intentional (e.g., YouTube thumbnails).
+    In such cases, do not inject the global no-text suffix.
+    """
+    low = (text or "").lower()
+    positive_markers = (
+        "thumbnail",
+        "typography",
+        "title text",
+        "title typography",
+        "text overlay",
+        "overlay text",
+        "hook line",
+        "banner line",
+        "for sleep",
+        "mobile-readable",
+        "readability",
+    )
+    if not any(m in low for m in positive_markers):
+        return False
+    # Explicit global bans should still win when prompt is not clearly thumbnail-like.
+    # But if user asks for thumbnail text, we honor it.
+    return True
+
+
+def prepare_fastgen_prompt_for_image(user_prompt: str) -> str:
+    """Prompt post-processing for image generation only."""
     body = (user_prompt or "").strip()
     if body:
         for pattern in _MULTI_IMAGE_BAN_PATTERNS:
@@ -118,10 +144,30 @@ def prepare_fastgen_prompt_for_ui(user_prompt: str) -> str:
         return "\n\n".join(
             (_FASTGEN_SINGLE_IMAGE_ENFORCER_SUFFIX, _FASTGEN_NO_TEXT_ENFORCER_SUFFIX, _FASTGEN_NO_NAMES_SUFFIX)
         )
-    suffixes = [_FASTGEN_SINGLE_IMAGE_ENFORCER_SUFFIX, _FASTGEN_NO_TEXT_ENFORCER_SUFFIX, _FASTGEN_NO_NAMES_SUFFIX]
+    suffixes = [_FASTGEN_SINGLE_IMAGE_ENFORCER_SUFFIX, _FASTGEN_NO_NAMES_SUFFIX]
+    if not _allows_intentional_overlay_text(body):
+        suffixes.insert(1, _FASTGEN_NO_TEXT_ENFORCER_SUFFIX)
     if _looks_historical_prompt(body):
         suffixes.append(_FASTGEN_HISTORICAL_LOCK_SUFFIX)
     return f"{body}\n\n" + "\n\n".join(suffixes)
+
+
+def prepare_fastgen_prompt_for_video(user_prompt: str) -> str:
+    """Prompt post-processing for video generation only (no image-layout suffixes)."""
+    body = (user_prompt or "").strip()
+    if body:
+        body = re.sub(r"\s+", " ", body).strip(" ,.;:-")
+    if not body:
+        return _FASTGEN_NO_NAMES_SUFFIX
+    suffixes = [_FASTGEN_NO_NAMES_SUFFIX]
+    if _looks_historical_prompt(body):
+        suffixes.append(_FASTGEN_HISTORICAL_LOCK_SUFFIX)
+    return f"{body}\n\n" + "\n\n".join(suffixes)
+
+
+def prepare_fastgen_prompt_for_ui(user_prompt: str) -> str:
+    """Backward-compatible alias for image prompts."""
+    return prepare_fastgen_prompt_for_image(user_prompt)
 
 
 def _fastgen_aspect_ratio_normalized(override: str | None = None) -> str:

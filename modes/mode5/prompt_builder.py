@@ -84,9 +84,9 @@ _MODE5_PROMPT_PROFILES: dict[str, Mode5PromptProfile] = {
             "cozy but realistic environment rendering with layered production design."
         ),
         mode_rules=(
-            "Show lived scenes implied by ideas and habits. "
-            "Weave the episode's themes into the set: props, era, weather, crafts, textures, and architecture that echo the narration — "
-            "avoid a sparse anonymous room unless the script explicitly calls for it. "
+            "Show one concrete, literal scene from the spoken line (specific place + specific action + specific props). "
+            "Weave the episode's themes into the set through concrete objects and environment details explicitly implied by narration — "
+            "avoid abstract symbolism and avoid a sparse anonymous room unless the script explicitly calls for it. "
             "Preserve restful, quiet mood; keep energy in detail density, not chaos."
         ),
     ),
@@ -141,7 +141,10 @@ _MODE5_RENDER_SLOTS: dict[str, Mode5RenderSlots] = {
     ),
     "facts50": Mode5RenderSlots(
         subject="the concrete fact carrier: people in roles, object, place, or process named by the scene source",
-        environment="single setting that makes the fact obvious at a glance (lab, street, landscape, workshop)",
+        environment=(
+            "single real-world setting that makes the fact obvious at a glance and is directly tied to the topic "
+            "(for country/culture topics: recognizable geography, architecture, public spaces, landscapes, artifacts, daily-life context)"
+        ),
         action="one illustrative action proving the fact (observing, building, measuring, traveling)",
         mood="clear educational editorial, calm, readable",
         camera="medium shot or clean wide establishing if the place is the fact; horizon straight",
@@ -152,6 +155,7 @@ _MODE5_RENDER_SLOTS: dict[str, Mode5RenderSlots] = {
         extra_rules=(
             "The image must visualize the current fact line, not a generic stock scene.",
             "Infer modern versus historical setting from the scene source; do not default to the wrong century.",
+            "Never default to a generic office/lab/laptop scene unless the segment explicitly describes that context.",
         ),
     ),
     "outline": Mode5RenderSlots(
@@ -183,8 +187,8 @@ _MODE5_RENDER_SLOTS: dict[str, Mode5RenderSlots] = {
             "rich small-object and texture detail that supports the theme"
         ),
         extra_rules=(
-            "Echo the book or episode topic through environment and props (stacked closed books as shapes, lamp light, textiles, tools, "
-            "maps as texture without labels) — not as readable pages, covers, titles, or UI.",
+            "Use topic-linked environment and props literally (e.g., period objects, tools, room details implied by narration) "
+            "instead of abstract metaphors; still avoid readable pages, covers, titles, or UI.",
             "No readable text on walls, screens, or props; keep typography out of frame.",
         ),
     ),
@@ -216,6 +220,37 @@ _SINGLE_SCENE_RULE = (
     "Critical single-scene rule: generate exactly ONE photo with ONE scene only. "
     "Do not merge multiple moments, multiple locations, or multiple timeline beats into one image."
 )
+_MODE5_UNIFIED_STILL_STYLE_RULE = (
+    "Unified visual style rule for video photos: whimsical soft-cartoon cinematic look "
+    "(Ghibli-inspired mood), gentle painterly textures, calm dreamy atmosphere, readable composition, "
+    "and coherent real-world scene geometry."
+)
+_MODE5_SUBMODE_STYLE_NUANCE: dict[str, str] = {
+    "manual": (
+        "Sub-mode style nuance (manual): balanced whimsical-editorial treatment, neutral color story, "
+        "practical scene readability first."
+    ),
+    "bible": (
+        "Sub-mode style nuance (bible): reverent dreamy warmth, soft amber/chiaroscuro light, "
+        "period-authentic textures and respectful human presence."
+    ),
+    "facts50": (
+        "Sub-mode style nuance (facts50): whimsical editorial-doc look with crisp evidence readability, "
+        "clean geometry, and concrete fact-carrying props."
+    ),
+    "outline": (
+        "Sub-mode style nuance (outline): restrained explanatory look, tidy framing rhythm, "
+        "clear instructional readability with soft cinematic calm."
+    ),
+    "book_night": (
+        "Sub-mode style nuance (book_night): extra dreamy cozy-night palette, gentle glow, "
+        "intimate restful atmosphere, and soft painterly depth."
+    ),
+    "unwritten_chapter": (
+        "Sub-mode style nuance (unwritten_chapter): moody archival-dream tone with muted sepia/olive range, "
+        "investigative ambience, and tactile evidence-oriented detail."
+    ),
+}
 
 
 def normalize_mode5_sub_mode(sub_mode: str | None) -> str:
@@ -265,6 +300,7 @@ def _build_mode5_prompt_payload(
     segment = _clean_text(segment_text, limit=1200)
     context = _chunk_context_text(chunk_context)
     style = _clean_text(style_lock, limit=600) or profile.style_description
+    style_nuance = _MODE5_SUBMODE_STYLE_NUANCE.get(mode_key, _MODE5_SUBMODE_STYLE_NUANCE[_DEFAULT_PROFILE_KEY])
     geometry = _output_format_rule(output_format)
     no_text_rule = (
         "There must be absolutely no visible text anywhere in the image; no captions, no labels, no headings, "
@@ -291,12 +327,23 @@ def _build_mode5_prompt_payload(
             "Do not create symbolic, metaphorical, or conceptual substitutions; render literal filmable content from the narration moment."
         )
 
+    aesthetic_line = (
+        "Aesthetic target: whimsical soft-cartoon cinematic frame with calm, sleep-friendly atmosphere "
+        "and painterly depth, while preserving literal topical clarity, concrete location cues, "
+        "and readable action."
+    )
+
     final_parts: list[str] = [
         "Create one cinematic still image.",
         f"Use a visual style of {style}",
+        _MODE5_UNIFIED_STILL_STYLE_RULE,
+        style_nuance,
+        aesthetic_line,
         f"Base the image on this narration moment, {segment}",
         f"For continuity of place, era, people, or mood, consider this nearby narration only when it does not conflict, {context}",
         f"Follow this visual direction, {profile.mode_rules}",
+        "Location rule: choose a specific place that is directly tied to the current narration/theme, not a generic room.",
+        "Prop rule: every prominent object in frame should support or evidence the narration/theme; avoid random decorative filler.",
         "The narration moment is authoritative; if nearby narration conflicts with it, ignore the conflicting nearby details.",
         "Choose the subject, action, and environment from the narration moment first.",
         literal_scene_rule,
@@ -316,6 +363,8 @@ def _build_mode5_prompt_payload(
         f"Mode profile: {mode_key}.",
         f"Locked style id: {profile.style_id}.",
         f"Style lock: {style}",
+        _MODE5_UNIFIED_STILL_STYLE_RULE,
+        style_nuance,
         f"Mode constraints: {profile.mode_rules}",
         _CONFLICT_RULE,
         "Scene selection rule: derive subject/action/environment from CURRENT_SEGMENT first.",

@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     fastgen_api_key: str = Field("", alias="FASTGEN_API_KEY")
     # Модель: значение option[value=…] или подпись в UI (см. лог [FastGen] Available model options).
     # Пример value: GEM_PIX_2 (вместо устаревшего NARWHAL).
-    fastgen_model: str = Field("GEM_PIX_2", alias="FASTGEN_MODEL")
+    fastgen_model: str = Field("NARWHAL", alias="FASTGEN_MODEL")
     # false = видимый браузер (для отладки), true = фоновый (продакшн)
     fastgen_headless: bool = Field(False, alias="FASTGEN_HEADLESS")
     # Сколько секунд ждать появления нового превью на fast-gen.ai (иногда >2 мин)
@@ -153,6 +153,16 @@ class Settings(BaseSettings):
     )
     # Crop bottom X of video (0.0–0.2) to hide Veo watermark. 0.05 = hide bottom 5%.
     video_bottom_crop: float = Field(0.05, alias="VIDEO_BOTTOM_CROP")
+    # Mode5-specific bottom crop for provider watermark removal in looped/intro clips.
+    # Keep conservative to avoid cutting useful captions in source frames.
+    mode5_video_bottom_crop: float = Field(0.028, alias="MODE5_VIDEO_BOTTOM_CROP")
+    # Mode5: trim probable "dead tail" in generated loop source before tiling.
+    # Helps remove end-of-clip freeze that causes visible stop each cycle.
+    # 0 disables tail trimming completely.
+    mode5_loop_trim_tail_sec: float = Field(0.0, alias="MODE5_LOOP_TRIM_TAIL_SEC")
+    # Mode5: freeze detector for generated loop clips (ffmpeg freezedetect).
+    mode5_freeze_detect_noise: float = Field(0.0018, alias="MODE5_FREEZE_DETECT_NOISE")
+    mode5_freeze_detect_min_sec: float = Field(0.35, alias="MODE5_FREEZE_DETECT_MIN_SEC")
     # Word-highlight subtitles synced to scene timeline (no Whisper — equal time per word).
     subtitle_karaoke: bool = Field(True, alias="SUBTITLE_KARAOKE")
     # Сдвиг пословных таймкодов Whisper (сек): положительный — подсветка позже (если опережает голос).
@@ -270,14 +280,20 @@ class Settings(BaseSettings):
     # Нужны FASTGEN_HTTP_BASE_URL + ключ; иначе пайплайн остаётся на JPEG по сегментам (~30 с).
     mode5_block_loop_video_enabled: bool = Field(True, alias="MODE5_BLOCK_LOOP_VIDEO_ENABLED")
     mode5_block_loop_seconds: float = Field(1800.0, alias="MODE5_BLOCK_LOOP_SECONDS", ge=60.0, le=14400.0)
-    mode5_block_loop_include_facts50: bool = Field(False, alias="MODE5_BLOCK_LOOP_INCLUDE_FACTS50")
+    # Fixed pool size of reusable animated block-loops (default 5 => covers 2.5h by 30-min slots).
+    mode5_block_loop_pool_size: int = Field(5, alias="MODE5_BLOCK_LOOP_POOL_SIZE", ge=1, le=20)
+    mode5_block_loop_include_facts50: bool = Field(True, alias="MODE5_BLOCK_LOOP_INCLUDE_FACTS50")
     # True: FastGen still → FastGen image-to-video → loop; False: только keyframes из JPEG сегментов (старое поведение).
     mode5_block_loop_still_then_animate: bool = Field(True, alias="MODE5_BLOCK_LOOP_STILL_THEN_ANIMATE")
     # Два клипа на блок: A от still, B от последнего кадра A к тому же still — замкнутый цикл при повторе A+B.
-    mode5_block_loop_two_part_loop: bool = Field(True, alias="MODE5_BLOCK_LOOP_TWO_PART_LOOP")
+    mode5_block_loop_two_part_loop: bool = Field(False, alias="MODE5_BLOCK_LOOP_TWO_PART_LOOP")
     # FFmpeg libx264 после склейки двух частей: меньше CRF = выше качество (и размер файла).
     mode5_block_loop_concat_crf: int = Field(17, alias="MODE5_BLOCK_LOOP_CONCAT_CRF", ge=15, le=28)
     mode5_block_loop_concat_preset: str = Field("slow", alias="MODE5_BLOCK_LOOP_CONCAT_PRESET")
+    # Before full long-video pipeline: generate one animated intro preview and wait for user confirmation.
+    mode5_intro_confirm_enabled: bool = Field(True, alias="MODE5_INTRO_CONFIRM_ENABLED")
+    # Mode5 segment encode quality (image/video -> per-segment mp4): lower CRF = sharper output.
+    mode5_render_crf: int = Field(17, alias="MODE5_RENDER_CRF", ge=15, le=28)
 
     # ── Pipeline mode ────────────────────────────────────────────────────────
     # "mode1" = Top-5 facts with AI-generated images
@@ -464,7 +480,7 @@ class Settings(BaseSettings):
     # Mode 5: long-form episodes are horizontal by default.
     mode5_video_format: str = Field("horizontal", alias="MODE5_VIDEO_FORMAT")
     # Разрешение рендера Mode 5 отдельно от глобального VIDEO_QUALITY (лонгформ по умолчанию Full HD).
-    # Допустимо: 720 | 1080
+    # Допустимо: 720 | 1080 | 2k | 4k
     mode5_video_quality: str = Field("1080", alias="MODE5_VIDEO_QUALITY")
     # Mode 5: мягкий визуальный dissolve между соседними сегментами (сек), без overlap аудио.
     # Mode 5 visual transitions between segments (seconds).
@@ -491,11 +507,19 @@ class Settings(BaseSettings):
 
     def _mode5_video_quality_effective(self) -> str:
         raw = str(getattr(self, "mode5_video_quality", "") or "").strip().lower()
+        if raw in ("2k", "1440", "1440p", "qhd", "wqhd", "2560"):
+            return "2k"
+        if raw in ("4k", "2160", "2160p", "uhd", "ultrahd", "3840"):
+            return "4k"
         if raw in ("1080", "1080p", "fhd", "fullhd", "1920"):
             return "1080"
         if raw in ("720", "720p", "hd"):
             return "720"
         v = str(getattr(self, "video_quality", "") or "720").strip().lower()
+        if v in ("2k", "1440", "1440p", "qhd", "wqhd", "2560"):
+            return "2k"
+        if v in ("4k", "2160", "2160p", "uhd", "ultrahd", "3840"):
+            return "4k"
         return "1080" if v in ("1080", "1080p", "fhd", "fullhd") else "720"
 
     @property
@@ -504,7 +528,15 @@ class Settings(BaseSettings):
         fmt = getattr(self, "mode5_video_format", "horizontal").strip().lower()
         vq = self._mode5_video_quality_effective()
         if fmt == "vertical":
+            if vq == "4k":
+                return (2160, 3840)
+            if vq == "2k":
+                return (1440, 2560)
             return (720, 1280) if vq == "720" else (1080, 1920)
+        if vq == "4k":
+            return (3840, 2160)
+        if vq == "2k":
+            return (2560, 1440)
         return (1280, 720) if vq == "720" else (1920, 1080)
 
     @property

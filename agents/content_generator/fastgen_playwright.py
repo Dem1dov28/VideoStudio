@@ -31,7 +31,8 @@ from agents.content_generator.fastgen_prompts import (
     _fastgen_aspect_select_kw_list,
     _fastgen_video_aspect_default,
     _resolve_video_tab_aspect_ratio,
-    prepare_fastgen_prompt_for_ui,
+    prepare_fastgen_prompt_for_image,
+    prepare_fastgen_prompt_for_video,
 )
 
 _URL = "https://fast-gen.ai/generator"
@@ -1121,7 +1122,7 @@ class FastGenScraper:
         """
         Keep Mode5 image quality stable on Playwright path.
 
-        Mode5 should consistently use GEM_PIX_2 (Nano Banana Pro - Flow), same intent
+        Mode5 should consistently use NARWHAL (Nano Banana 2 - Flow), same intent
         as HTTP backend guard, regardless of accidental UI model drift.
         """
         configured = (settings.fastgen_model or "").strip()
@@ -1133,7 +1134,7 @@ class FastGenScraper:
             or "for mode5" in low
         )
         if is_mode5 or has_mode5_marker:
-            return "GEM_PIX_2"
+            return "NARWHAL"
         return configured or None
 
     async def _select_model(self, prompt: str | None = None) -> None:
@@ -1462,6 +1463,7 @@ class FastGenScraper:
         index: int | None = None,
         reference_image_path: Path | None = None,
         cancel_event: threading.Event | None = None,
+        aspect_ratio: str | None = None,
     ) -> list[Path]:
         """Generate image. If reference_image_path provided, uses img2img (reference + prompt)."""
         page = self._page
@@ -1470,7 +1472,7 @@ class FastGenScraper:
         if _cancel_requested(cancel_event):
             raise FastGenCancelled()
 
-        prompt = prepare_fastgen_prompt_for_ui(prompt)
+        prompt = prepare_fastgen_prompt_for_image(prompt)
         mode = "img2img" if reference_image_path and reference_image_path.exists() else "text2img"
         logger.info(f"[FastGen] Generating image ({mode}) for prompt: {prompt[:80]}...")
         if not self._authenticated:
@@ -1478,7 +1480,7 @@ class FastGenScraper:
 
         await self._activate_image_tab()
         await self._select_model(prompt)
-        await self._select_aspect_ratio()
+        await self._select_aspect_ratio(aspect_ratio)
 
         if reference_image_path and reference_image_path.exists():
             await _upload_reference_image(page, Path(reference_image_path))
@@ -1642,7 +1644,7 @@ class FastGenScraper:
         page = self._page
         assert page is not None, "Call start() first"
 
-        prompt = prepare_fastgen_prompt_for_ui(prompt)
+        prompt = prepare_fastgen_prompt_for_image(prompt)
         num_refs = len(reference_image_paths) if reference_image_paths else 0
         logger.info(f"[FastGen] Generating image with {num_refs} reference(s): {prompt[:80]}...")
         if not self._authenticated:
@@ -1806,7 +1808,7 @@ class FastGenScraper:
         page = self._page
         assert page is not None, "Call start() first"
 
-        prompt = prepare_fastgen_prompt_for_ui(prompt)
+        prompt = prepare_fastgen_prompt_for_video(prompt)
         logger.info(f"[FastGen] Generating video with {len(reference_image_paths) if reference_image_paths else 0} references: {prompt[:80]}...")
         if not self._authenticated:
             await self._authenticate()
@@ -1950,7 +1952,7 @@ class FastGenScraper:
         assert page is not None, "Call start() first"
 
         vtag = _video_clip_log(index)
-        prompt = prepare_fastgen_prompt_for_ui(prompt)
+        prompt = prepare_fastgen_prompt_for_video(prompt)
         logger.info(f"[FastGen]{vtag} Generating video for prompt: {prompt[:80]}...")
 
         if _cancel_requested(cancel_event):
@@ -2163,6 +2165,7 @@ def _run_single_image_sync(
     prompt: str,
     output_dir: Path,
     cancel_event: threading.Event | None = None,
+    aspect_ratio: str | None = None,
 ) -> Path | None:
     """Генерация одного изображения в отдельном браузере. Для параллельного запуска."""
     import asyncio as _asyncio
@@ -2176,7 +2179,11 @@ def _run_single_image_sync(
                     return None
                 try:
                     paths = await scraper.generate(
-                        prompt, output_dir, index=index, cancel_event=cancel_event
+                        prompt,
+                        output_dir,
+                        index=index,
+                        cancel_event=cancel_event,
+                        aspect_ratio=aspect_ratio,
                     )
                     if paths and paths[0] and Path(paths[0]).exists():
                         return paths[0]
@@ -2255,6 +2262,7 @@ def _run_fastgen_sync(
     prompts: list[str],
     output_dir: Path,
     cancel_event: threading.Event | None = None,
+    aspect_ratio: str | None = None,
 ) -> list[Path]:
     """
     Synchronous wrapper that runs Playwright in its own event loop.
@@ -2282,7 +2290,10 @@ def _run_fastgen_sync(
                         raise FastGenCancelled()
                     try:
                         paths = await scraper.generate(
-                            prompt, output_dir, cancel_event=cancel_event
+                            prompt,
+                            output_dir,
+                            cancel_event=cancel_event,
+                            aspect_ratio=aspect_ratio,
                         )
                         if paths and any(Path(p).is_file() for p in paths):
                             all_paths.extend(paths)
@@ -2419,6 +2430,7 @@ def _run_fastgen_images_parallel_sync(
     prompts: list[str],
     output_dir: Path,
     cancel_event: threading.Event | None = None,
+    aspect_ratio: str | None = None,
 ) -> list[Path]:
     """Параллельная генерация изображений — каждое в своём окне браузера (Mode 1 и др.)."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -2435,7 +2447,7 @@ def _run_fastgen_images_parallel_sync(
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
             executor.submit(
-                _run_single_image_sync, i, prompts[i], output_dir, cancel_event
+                _run_single_image_sync, i, prompts[i], output_dir, cancel_event, aspect_ratio
             ): i
             for i in range(len(prompts))
         }
@@ -2515,6 +2527,7 @@ def _run_single_video_sync(
     reference_image_paths: list[Path] | None = None,
     cancel_event: threading.Event | None = None,
     mode4_veo_flow_flower: bool = False,
+    aspect_ratio: str | None = None,
 ) -> Path | None:
     """Генерация одного видео в отдельном браузере. Для параллельного запуска."""
     import asyncio as _asyncio
@@ -2539,6 +2552,7 @@ def _run_single_video_sync(
                         upload_reference=upload_ref,
                         cancel_event=cancel_event,
                         mode4_veo_flow_flower=mode4_veo_flow_flower,
+                        aspect_ratio=aspect_ratio,
                     )
                     if path and Path(path).exists():
                         return path
@@ -2649,6 +2663,7 @@ async def generate_single_video_fastgen(
     reference_image_paths: list[str | Path] | None = None,
     cancel_event: threading.Event | None = None,
     mode4_veo_flow_flower: bool = False,
+    video_aspect_ratio: str | None = None,
 ) -> Path | None:
     """
     Сгенерировать одно видео с reference.
@@ -2670,6 +2685,7 @@ async def generate_single_video_fastgen(
             paths_arg,
             cancel_event,
             mode4_veo_flow_flower,
+            video_aspect_ratio,
         )
     except FastGenCancelled:
         raise asyncio.CancelledError("FastGen cancelled") from None
@@ -3171,7 +3187,7 @@ async def generate_video_from_keyframes(
     """
     return await asyncio.to_thread(
         _run_keyframe_video_sync,
-        prompt, output_dir, start_frame_path, end_frame_path, index,
+        prompt, output_dir, start_frame_path, end_frame_path, index, video_aspect_ratio,
     )
 
 
@@ -3181,6 +3197,7 @@ def _run_keyframe_video_sync(
     start_frame_path: Path,
     end_frame_path: Path,
     index: int,
+    aspect_ratio: str | None = None,
 ) -> Path | None:
     """Sync wrapper for keyframe video generation."""
     import asyncio as _asyncio
@@ -3189,15 +3206,15 @@ def _run_keyframe_video_sync(
         try:
             page = scraper._page
             assert page is not None
-            
-            prompt = prepare_fastgen_prompt_for_ui(prompt)
-            logger.info(f"[FastGen Keyframes] Generating video from keyframes: {prompt[:60]}...")
+
+            full_prompt = prepare_fastgen_prompt_for_video(prompt)
+            logger.info(f"[FastGen Keyframes] Generating video from keyframes: {full_prompt[:60]}...")
 
             if not scraper._authenticated:
                 await scraper._authenticate()
             
             await scraper._activate_video_tab()
-            await scraper._select_video_settings()
+            await scraper._select_video_settings(aspect_ratio)
             await _screenshot(page, "kf_01_video_tab")
             
             # Debug: log all visible buttons and switches
@@ -3245,11 +3262,11 @@ def _run_keyframe_video_sync(
                 scraper._prompt_selector = sel
             
             # Log prompt length for debugging
-            logger.info(f"[FastGen Keyframes] Prompt length: {len(prompt)} chars")
-            if len(prompt) > 800:
-                logger.warning(f"[FastGen Keyframes] Prompt is too long ({len(prompt)} chars), may cause issues!")
-            
-            await _react_fill(page, sel, prompt)
+            logger.info(f"[FastGen Keyframes] Prompt length: {len(full_prompt)} chars")
+            if len(full_prompt) > 800:
+                logger.warning(f"[FastGen Keyframes] Prompt is too long ({len(full_prompt)} chars), may cause issues!")
+
+            await _react_fill(page, sel, full_prompt)
             await asyncio.sleep(0.5)
             await _screenshot(page, "kf_05_prompt_typed")
             
@@ -3430,6 +3447,7 @@ async def generate_images_fastgen(
     output_dir: Path,
     parallel: bool = True,
     cancel_event: threading.Event | None = None,
+    aspect_ratio: str | None = None,
 ) -> list[Path]:
     """
     Generate images via fast-gen.ai.
@@ -3442,10 +3460,12 @@ async def generate_images_fastgen(
         if parallel and len(prompts) > 1:
             logger.info("[FastGen] Starting parallel image generation ...")
             return await asyncio.to_thread(
-                _run_fastgen_images_parallel_sync, prompts, output_dir, cancel_event
+                _run_fastgen_images_parallel_sync, prompts, output_dir, cancel_event, aspect_ratio
             )
         logger.info("[FastGen] Starting sequential image generation ...")
-        return await asyncio.to_thread(_run_fastgen_sync, prompts, output_dir, cancel_event)
+        return await asyncio.to_thread(
+            _run_fastgen_sync, prompts, output_dir, cancel_event, aspect_ratio
+        )
     except FastGenCancelled:
         raise asyncio.CancelledError("FastGen cancelled") from None
     except asyncio.CancelledError:

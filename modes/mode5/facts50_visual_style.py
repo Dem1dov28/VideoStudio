@@ -53,7 +53,7 @@ async def derive_facts50_unified_style_suffix(
                 "- Keep characters and architecture believable (no caricature, no chibi, no comic-book exaggeration).\n"
                 "- Keep colors soft, clean, and slightly dreamy; readable details over noisy textures.\n\n"
                 "CRITICAL — infer PRIMARY ERA from the HEADLINE and fact samples:\n"
-                "- Broad modern country / travel / culture headlines (e.g. \"77 facts about France\", \"Japan\", \"oceans\"): "
+                "- Broad modern country / travel / culture headlines (e.g. \"77 facts about France\", \"Italy\", \"oceans\"): "
                 "default to CONTEMPORARY stylized illustration imagery — modern cities, present-day landscapes, current architecture, "
                 "editorial travel-documentary composition in semi-cartoon rendering. Do NOT drift into medieval castles, knights, or "
                 "generic fantasy Europe unless samples clearly focus on medieval history.\n"
