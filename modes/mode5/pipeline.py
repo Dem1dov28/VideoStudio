@@ -372,8 +372,6 @@ _MODE5_INTRO_ANIMATION_DESCRIPTION = (
     "Calmness rule: no talking behavior at all — no lip-sync, no mouth articulation, no speech-like head bobbing, "
     "no active dialogue gestures, no conversational staging. "
     "People, if present, remain serene and mostly still with only subtle breathing/posture micro-motion. "
-    "Temporal continuity rule: motion energy must stay present across the full clip timeline; "
-    "do not settle into a static frame before the last 5% of duration, no early freeze/hold plateau. "
     "Identity lock: keep exactly the same objects/actors/materials from start to end; no new elements and no disappearing elements. "
     "Keep geometry stable: no warped faces/hands, no bending architecture, no elastic distortions, no frame wobble. "
     "No cuts, no scene replacement, no morphing, no ghosting, no new or disappearing objects."
@@ -405,7 +403,7 @@ _MODE5_BLOCK_LOOP_STILL_STYLE_OVERRIDE = (
     "Keep the frame loop-friendly (clear focal plane, avoid chaotic motion-blur smear)."
 )
 # Bump when block-loop still/motion prompt contract changes so narr_fp cache invalidates.
-_MODE5_BLOCK_LOOP_CACHE_SALT = "painterly_loop_v16_ultrasmooth_micro_motion"
+_MODE5_BLOCK_LOOP_CACHE_SALT = "painterly_loop_v17_motion_prompt_trim"
 def _mode5_output_format() -> str:
     fmt = str(getattr(settings, "mode5_video_format", "horizontal") or "horizontal").strip().lower()
     return "horizontal" if fmt == "horizontal" else "vertical"
@@ -979,7 +977,6 @@ def _build_mode5_intro_single_motion_prompt(
     parts = [
         "Create one high-quality loopable animation from the provided still image.",
         "Keep scene identity stable: same location, props, subject roles, and composition from the still.",
-        "Do not introduce unrelated objects or generic defaults (office/lab/laptop) unless explicitly present in the story.",
         f"Animate ONLY these anchor groups from the still: {motion_anchors}",
         mode_line,
         _MODE5_INTRO_ANIMATION_DESCRIPTION,
