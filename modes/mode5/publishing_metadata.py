@@ -39,6 +39,36 @@ _TAGS_EN = [
     "sleep meditation video",
 ]
 
+_TAGS_BOOK_NIGHT_RU = [
+    "пересказ книги",
+    "аудиокнига саммари",
+    "nonfiction пересказ",
+    "книга на ночь слушать",
+    "спокойная озвучка",
+    "длинное видео книга",
+    "саммари бизнес книги",
+    "обзор книги спокойно",
+    "slow narration russian",
+    "book summary video",
+    "calm audiobook style",
+    "вечернее прослушивание",
+]
+
+_TAGS_BOOK_NIGHT_EN = [
+    "nonfiction book summary",
+    "calm audiobook summary",
+    "long form book digest",
+    "slow narration",
+    "book explained calmly",
+    "evening listening",
+    "soft spoken book recap",
+    "bedtime book listen",
+    "author ideas overview",
+    "structured book summary",
+    "relaxing educational video",
+    "nonfiction recap",
+]
+
 _PUBLISHING_PROMPT = """Create YouTube metadata for a long-form sleep-oriented video.
 
 VIDEO CONTEXT:
@@ -61,6 +91,40 @@ Return strict JSON only:
   "title": "...",
   "description": "...",
   "hashtags": ["#sleep", "..."],
+  "tags": ["...", "..."],
+  "first_comment": "..."
+}}
+
+Language: {language}
+"""
+
+_PUBLISHING_PROMPT_BOOK_NIGHT = """Create YouTube metadata for a long-form **nonfiction book summary** video.
+
+PRIMARY PROMISE (must be obvious in title + first line of description):
+- This is a calm, structured **digest / audiobook-style recap** of the book named in the topic — main parts, ideas, and mental models.
+- It is **NOT** sleep meditation, hypnosis, or a tutorial on "how to use this book to fall asleep".
+- You may mention once, briefly, that the pacing is relaxed and suitable for evening listening — **without** making sleep or meditation the main hook.
+
+VIDEO CONTEXT:
+- Book / topic line: {topic}
+- Sub-mode: {sub_mode}
+- Approx duration (minutes): {duration_min}
+- Script excerpt: {script_excerpt}
+
+TARGET QUALITY:
+- Non-template writing. Sound human, modern, and channel-ready for 2026 YouTube.
+- Audience intent: people who want to **hear the book unpacked** in one sitting (calm voice, no hype).
+- Title: 45-72 chars, no hashtags, searchable (book title / recognizable shorthand + hint at summary or calm listen).
+- Description: 2 short paragraphs; **lead with what the viewer learns about the book**; second paragraph may note relaxed narration length — still secondary.
+- Hashtags: 3-5; prefer book/summary/education; at most **one** generic calm/sleep-adjacent tag if natural — do not stack sleep/meditation tags.
+- Tags: 10-15 intent-focused tags mixing **book summary**, **nonfiction**, **audiobook-style**, **calm narration** — not exclusively sleep-video tags.
+- first_comment: one calm question about **which book or author** to cover next (not "how do you fall asleep").
+
+Return strict JSON only:
+{{
+  "title": "...",
+  "description": "...",
+  "hashtags": ["#...", "..."],
   "tags": ["...", "..."],
   "first_comment": "..."
 }}
@@ -355,6 +419,39 @@ def _fallback_publish(topic: str, language: str) -> dict[str, Any]:
     }
 
 
+_HASHTAGS_BOOK_NIGHT_RU = ["#книги", "#саммари", "#nonfiction", "#спокойно"]
+_HASHTAGS_BOOK_NIGHT_EN = ["#booksummary", "#nonfiction", "#calmlisten", "#longform"]
+
+
+def _fallback_publish_book_night(topic: str, language: str) -> dict[str, Any]:
+    t = re.sub(r"\s+", " ", str(topic or "").strip()) or (
+        "Спокойный пересказ книги" if language == "ru" else "Calm nonfiction book summary"
+    )
+    if language == "ru":
+        return {
+            "title": f"{t[:62]} — спокойный пересказ"[:72],
+            "description": (
+                f"Спокойный пересказ идей из книги «{t}»: структура, главные мысли и практические акценты в формате "
+                "длинной озвучки. Это не медитация и не гид «как уснуть» — просто неспешная подача, удобная для вечера.\n\n"
+                "Подходит тем, кто хочет услышать суть издания одним материалом: без скачков и агрессивного монтажа."
+            ),
+            "hashtags": _HASHTAGS_BOOK_NIGHT_RU,
+            "tags": _TAGS_BOOK_NIGHT_RU,
+            "first_comment": "Какую nonfiction-книгу или автора разобрать в следующем спокойном пересказе?",
+        }
+    return {
+        "title": f"{t[:56]} — calm summary"[:72],
+        "description": (
+            f"A calm long-form summary of the nonfiction book «{t}»: structure, core ideas, and takeaways in audiobook-style narration. "
+            "This is not a sleep meditation or a tutorial on falling asleep — just a steady, easy pace for evening listening.\n\n"
+            "Best for viewers who want one relaxed sitting that unpacks the book without hype or overload."
+        ),
+        "hashtags": _HASHTAGS_BOOK_NIGHT_EN,
+        "tags": _TAGS_BOOK_NIGHT_EN,
+        "first_comment": "Which nonfiction book or author should we summarize calmly next?",
+    }
+
+
 def _finalize(raw: dict[str, Any], *, fallback: dict[str, Any]) -> dict[str, Any]:
     title = raw.get("title") or fallback["title"]
     description = raw.get("description") or fallback["description"]
@@ -404,23 +501,40 @@ async def generate_mode5_publishing_metadata(
     language: str = "ru",
 ) -> dict[str, Any]:
     lang = "ru" if str(language).lower() == "ru" else "en"
-    fallback = _fallback_publish(topic, lang)
-    prompt = _PUBLISHING_PROMPT.format(
-        topic=re.sub(r"\s+", " ", str(topic or "").strip())[:220],
-        sub_mode=re.sub(r"\s+", " ", str(sub_mode or "").strip())[:80] or "manual",
-        duration_min=max(1, int(duration_min or 1)),
-        script_excerpt=re.sub(r"\s+", " ", str(script_excerpt or "").strip())[:2000],
-        language=lang,
-    )
+    sm_norm = re.sub(r"\s+", " ", str(sub_mode or "").strip()).lower()
+    if sm_norm == "book_night":
+        fallback = _fallback_publish_book_night(topic, lang)
+        prompt = _PUBLISHING_PROMPT_BOOK_NIGHT.format(
+            topic=re.sub(r"\s+", " ", str(topic or "").strip())[:220],
+            sub_mode=re.sub(r"\s+", " ", str(sub_mode or "").strip())[:80] or "book_night",
+            duration_min=max(1, int(duration_min or 1)),
+            script_excerpt=re.sub(r"\s+", " ", str(script_excerpt or "").strip())[:2000],
+            language=lang,
+        )
+        system_meta = (
+            "You are a senior YouTube metadata strategist for calm nonfiction book-summary and long-form audiobook-digest channels. "
+            "Lead with the book and ideas; sleep/meditation must not dominate. Write natural, modern, non-template metadata."
+        )
+    else:
+        fallback = _fallback_publish(topic, lang)
+        prompt = _PUBLISHING_PROMPT.format(
+            topic=re.sub(r"\s+", " ", str(topic or "").strip())[:220],
+            sub_mode=re.sub(r"\s+", " ", str(sub_mode or "").strip())[:80] or "manual",
+            duration_min=max(1, int(duration_min or 1)),
+            script_excerpt=re.sub(r"\s+", " ", str(script_excerpt or "").strip())[:2000],
+            language=lang,
+        )
+        system_meta = (
+            "You are a senior YouTube metadata strategist for sleep-focused long-form channels. "
+            "Write natural, modern, non-template metadata."
+        )
     try:
         model = getattr(settings, "openrouter_model", None)
         llm = make_llm(temperature=0.62, model=model, max_tokens=900)
         response = await asyncio.wait_for(
             llm.ainvoke(
                 [
-                    SystemMessage(
-                        content="You are a senior YouTube metadata strategist for sleep-focused long-form channels. Write natural, modern, non-template metadata."
-                    ),
+                    SystemMessage(content=system_meta),
                     HumanMessage(content=prompt),
                 ]
             ),
