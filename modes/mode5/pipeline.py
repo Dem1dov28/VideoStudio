@@ -45,11 +45,12 @@ from modes.mode5.prompt_builder import (
     mode5_style_lock_for_sub_mode,
     normalize_mode5_sub_mode,
 )
+from modes.mode5.book_cover_fetch import try_fetch_openlibrary_cover
 from modes.mode5.publishing_metadata import (
     generate_mode5_publishing_metadata,
     generate_mode5_thumbnail_prompt,
 )
-from modes.mode5.video_assembler import assemble_mode5_video
+from modes.mode5.video_assembler import assemble_mode5_video, mode5_watermark_bottom_crop_ratio
 from utils.ffmpeg_resolve import require_ffmpeg_or_raise, resolve_ffmpeg_executable
 from utils.llm import make_llm
 from utils.wav_pcm import slice_wav_time_range
@@ -1824,18 +1825,41 @@ async def _mode5_generate_publish_assets(
     from agents.content_generator import fastgen_playwright
 
     try:
+        cover_ref: Path | None = None
+        if (
+            sub_mode in ("book_night", "unwritten_chapter")
+            and bool(getattr(settings, "mode5_thumbnail_openlibrary_cover", True))
+        ):
+            cand = m5dir / "_thumbnail_book_cover_ref.jpg"
+            got = await asyncio.to_thread(try_fetch_openlibrary_cover, topic, cand)
+            if got and cand.is_file():
+                cover_ref = cand
+            else:
+                try:
+                    cand.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
         thumb_prompt = await generate_mode5_thumbnail_prompt(
             topic=topic,
             sub_mode=sub_mode,
             script_excerpt=excerpt,
+            use_reference_cover=cover_ref is not None,
         )
         thumb_prompt = _mode5_clean_prompt_text(thumb_prompt)
-        generated = await fastgen_playwright.generate_images_fastgen(
-            [thumb_prompt],
-            m5dir,
-            parallel=False,
-            aspect_ratio="16:9",
-        )
+        if cover_ref is not None:
+            generated = await fastgen_playwright.generate_images_with_references_fastgen(
+                [(thumb_prompt, [cover_ref])],
+                m5dir,
+                parallel=False,
+            )
+        else:
+            generated = await fastgen_playwright.generate_images_fastgen(
+                [thumb_prompt],
+                m5dir,
+                parallel=False,
+                aspect_ratio="16:9",
+            )
         src = Path(generated[0]) if generated and generated[0] else None
         if src is None or (not src.is_file()):
             raise RuntimeError("thumbnail image path missing")
@@ -2623,7 +2647,11 @@ def _mode5_effective_loop_duration_sec(path: Path) -> float:
     Keeps a safe minimum so we never over-trim short clips.
     """
     dur = _mode5_probe_video_duration_sec(path)
-    trim_tail = float(getattr(settings, "mode5_loop_trim_tail_sec", 1.6) or 1.6)
+    # Не использовать «or 1.6»: при 0.0 Python считает falsy и подставлялась бы обрезка хвоста всегда.
+    try:
+        trim_tail = float(getattr(settings, "mode5_loop_trim_tail_sec", 0.0))
+    except (TypeError, ValueError):
+        trim_tail = 0.0
     trim_tail = max(0.0, min(3.0, trim_tail))
     if trim_tail <= 1e-3:
         return dur
@@ -2798,8 +2826,7 @@ def _mode5_reencode_intro_preview_for_web(src: Path, out: Path) -> None:
     tw, th = settings.mode5_video_resolution
     target_sec = float(getattr(settings, "mode5_intro_preview_seconds", 8.0) or 8.0)
     target_sec = max(4.0, min(30.0, target_sec))
-    crop_ratio = float(getattr(settings, "mode5_video_bottom_crop", 0.028) or 0.028)
-    crop_ratio = max(0.0, min(0.08, crop_ratio))
+    crop_ratio = mode5_watermark_bottom_crop_ratio()
     src_keep_sec = _mode5_effective_loop_duration_sec(src)
     out.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -3392,7 +3419,8 @@ def _build_chunk_preview_sync(session_id: str, chunk_index: int, plan: dict[str,
                     "asset_type": "video",
                     "video_path": video_abs,
                     "audio_path": aud,
-                    "loop_offset_sec": float(seg.get("t0") or 0.0),
+                    # t0 — граница аудио-слайса внутри чанка, не фаза цикла; -ss по t0 отрезал начало ролика.
+                    "loop_offset_sec": 0.0,
                 }
             )
         else:

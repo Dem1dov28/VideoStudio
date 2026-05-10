@@ -122,6 +122,27 @@ JSON only, no markdown.
 
 _MODE5_BOOK_THUMBNAIL_SUBMODES = frozenset({"book_night", "unwritten_chapter"})
 
+# Превью с референсом обложки (Open Library): окружение — Ghibli-ночь, сама обложка — как на референсе.
+_BOOK_THUMBNAIL_TEMPLATE_REFERENCE_COVER = (
+    "A high-quality, whimsical YouTube thumbnail in a soft cartoon style inspired by Studio Ghibli. "
+    "The scene is {night_scene}. "
+    "REFERENCE IMAGE: the uploaded image is the real published book cover art. "
+    "Place it faithfully on the front face of one slightly angled physical hardcover in frame "
+    "(preserve the reference artwork, colors, typography, and layout; do not invent a different cover design; "
+    "do not painterly-repaint the cover — only integrate lighting shadows and gentle rim light so it sits in the scene). "
+    "Do not replace the reference with celebrities, athletes, or unrelated people — only what appears on the reference pixels. "
+    "The cozy illustrated treatment applies to the room and atmosphere (shelves, lamp, moon, curtains), not to replacing the cover graphic. "
+    "The book is a clear hero focal prop. "
+    "In the left half, there is a large, clean negative space for text. "
+    "Integrated into this space is large, bold typography using a friendly, rounded, bubble-like font "
+    "(white with a soft dark blue outline). "
+    'The text reads: "{overlay_title}" (arranged in two lines; emphasize the book title naturally). '
+    "Below it, in a slightly smaller, distinct font within a soft blue banner, the text reads: \"FOR SLEEP\". "
+    "Small, cute sleeping star icons surround the text. "
+    "The overall color palette is deep sapphire, warm amber glows, and pastel purples with cozy reading-lamp warmth. "
+    "Magical, relaxing bedtime-story atmosphere. 16:9 aspect ratio, cinematic lighting, zero clutter."
+)
+
 # Same thumbnail grammar as facts50 (Ghibli-like whimsical night + typography + FOR SLEEP), adapted for sleep-reading books; cover is mandatory.
 _BOOK_THUMBNAIL_TEMPLATE = (
     "A high-quality, whimsical YouTube thumbnail in a soft cartoon style inspired by Studio Ghibli. "
@@ -152,6 +173,20 @@ Return strict JSON only with keys:
 JSON only, no markdown.
 """
 
+_BOOK_THUMB_FIELDS_PROMPT_REF_ONLY = """You fill thumbnail variables for a sleep-oriented long-form video based on a BOOK.
+
+The image generator already has the REAL book cover as a reference upload — do not describe an alternate cover.
+
+Headline / book topic (may be Russian or English, may include author):
+{topic}
+
+Return strict JSON only with keys:
+- "night_scene": short English phrase — magical serene starry night mood tailored to reading this book (cozy nook, bedside table, quiet library bay window under moonlight, etc.); must feel calm and sleep-friendly.
+- "overlay_title": English uppercase thumbnail hook derived from the BOOK TITLE only (not author): compact like \"ATOMIC HABITS\" or \"THE SILMARILLION\" — maximum ~26 characters total including spaces; if title is long, abbreviate to strongest 2–4 recognizable words.
+
+JSON only, no markdown.
+"""
+
 
 def _book_thumbnail_fallback_fields(topic: str) -> tuple[str, str, str]:
     raw = re.sub(r"\s+", " ", str(topic or "").strip())
@@ -172,8 +207,41 @@ def _book_thumbnail_fallback_fields(topic: str) -> tuple[str, str, str]:
     return night, cover, overlay
 
 
-async def _book_modes_thumbnail_prompt(topic: str) -> str:
+def _book_thumbnail_fallback_fields_ref(topic: str) -> tuple[str, str]:
+    """Только night_scene + overlay при наличии референса обложки."""
+    night, _cover, overlay = _book_thumbnail_fallback_fields(topic)
+    return night, overlay
+
+
+async def _book_modes_thumbnail_prompt(topic: str, *, use_reference_cover: bool = False) -> str:
     base_topic = re.sub(r"\s+", " ", str(topic or "").strip())[:400] or "Book night"
+    if use_reference_cover:
+        night_scene, overlay_title = _book_thumbnail_fallback_fields_ref(base_topic)
+        try:
+            model = getattr(settings, "openrouter_model", None)
+            llm = make_llm(temperature=0.38, model=model, max_tokens=360)
+            response = await asyncio.wait_for(
+                llm.ainvoke(
+                    [
+                        SystemMessage(content="You return only valid JSON objects. No markdown."),
+                        HumanMessage(content=_BOOK_THUMB_FIELDS_PROMPT_REF_ONLY.format(topic=base_topic)),
+                    ]
+                ),
+                timeout=28.0,
+            )
+            data = _extract_json_dict(response.content if hasattr(response, "content") else str(response))
+            if isinstance(data, dict):
+                ns = re.sub(r"\s+", " ", str(data.get("night_scene") or "").strip())
+                ot = re.sub(r"\s+", " ", str(data.get("overlay_title") or "").strip()).upper()
+                if ns and ot and 3 <= len(ot) <= 34:
+                    night_scene, overlay_title = ns, ot
+        except Exception as e:
+            logger.warning(f"[Mode5 Thumbnail] book_modes (ref cover) field LLM fallback: {e}")
+        return _BOOK_THUMBNAIL_TEMPLATE_REFERENCE_COVER.format(
+            night_scene=night_scene,
+            overlay_title=overlay_title.replace('"', "").strip(),
+        )
+
     night_scene, cover_sentence, overlay_title = _book_thumbnail_fallback_fields(base_topic)
     try:
         model = getattr(settings, "openrouter_model", None)
@@ -371,6 +439,7 @@ async def generate_mode5_thumbnail_prompt(
     topic: str,
     sub_mode: str,
     script_excerpt: str,
+    use_reference_cover: bool = False,
 ) -> str:
     base_topic = re.sub(r"\s+", " ", str(topic or "").strip())[:220] or "Sleep facts video"
     sub_mode_clean = re.sub(r"\s+", " ", str(sub_mode or "").strip())[:80] or "manual"
@@ -378,7 +447,7 @@ async def generate_mode5_thumbnail_prompt(
     if sm_low == "facts50":
         return await _facts50_thumbnail_prompt(base_topic)
     if sm_low in _MODE5_BOOK_THUMBNAIL_SUBMODES:
-        return await _book_modes_thumbnail_prompt(base_topic)
+        return await _book_modes_thumbnail_prompt(base_topic, use_reference_cover=use_reference_cover)
     if re.search(r"\bfacts?\b", base_topic, flags=re.IGNORECASE):
         title_overlay_hint = base_topic.upper()
     else:

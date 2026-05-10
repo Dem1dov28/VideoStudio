@@ -45,6 +45,12 @@ _MOTION_PATTERNS: list[tuple[float, float, float, float]] = [
 _MIN_SEGMENT_AUDIO_SEC = 0.25
 
 
+def mode5_watermark_bottom_crop_ratio() -> float:
+    """Share of frame height to crop from the bottom (Veo / FastGen badge)."""
+    r = float(getattr(settings, "mode5_video_bottom_crop", 0.07) or 0.07)
+    return max(0.0, min(0.12, r))
+
+
 def _unlink_retry(path: Path, *, attempts: int = 12, delay_sec: float = 0.08) -> None:
     """Windows: MoviePy удаляет temp audio сразу после ffmpeg — часто WinError 32; чистим после close с ретраями."""
     for _ in range(max(1, attempts)):
@@ -229,9 +235,10 @@ def _make_segment_clip_static_still(
     duration = _wav_duration_sec(audio_path)
     render_crf = max(15, min(28, int(getattr(settings, "mode5_render_crf", 17) or 17)))
     # FastGen/Veo source clips may include a small bottom-right provider watermark.
-    # Remove a thin bottom strip before scaling/padding so the badge never appears in final output.
+    cr = mode5_watermark_bottom_crop_ratio()
+    crop_pre = f"crop=iw:ih-ceil(ih*{cr:.4f}):0:0," if cr > 1e-6 else ""
     vf = (
-        "crop=iw:ih-ceil(ih*0.055):0:0,"
+        f"{crop_pre}"
         f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease:flags=lanczos,"
         f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=#101318,"
         "unsharp=5:5:0.45:5:5:0.0,"
@@ -307,6 +314,8 @@ def _make_segment_clip(
         panx0, panx1, pany0, pany1 = (0.5, 0.5, 0.5, 0.5)
     duration = _wav_duration_sec(audio_path)
     render_crf = max(15, min(28, int(getattr(settings, "mode5_render_crf", 17) or 17)))
+    cr = mode5_watermark_bottom_crop_ratio()
+    crop_pre = f"crop=iw:ih-ceil(ih*{cr:.4f}):0:0," if cr > 1e-6 else ""
     total_frames = max(2, int(round(duration * render_fps)))
     # Use smoothstep easing so movement has zero velocity at segment endpoints.
     denom = max(1, total_frames - 1)
@@ -345,7 +354,7 @@ def _make_segment_clip(
 
     # Expressions are safe even when motion is disabled because panx is centered.
     vf = (
-        f"{scale_expr},"
+        f"{crop_pre}{scale_expr},"
         f"zoompan=z='{zoom_expr}':"
         f"x='{x_expr}':"
         f"y='{y_expr}':"
@@ -415,8 +424,7 @@ def _make_looped_video_segment_clip(
 
     duration = _wav_duration_sec(audio_path)
     render_crf = max(15, min(28, int(getattr(settings, "mode5_render_crf", 17) or 17)))
-    crop_ratio = float(getattr(settings, "mode5_video_bottom_crop", 0.028) or 0.028)
-    crop_ratio = max(0.0, min(0.08, crop_ratio))
+    crop_ratio = mode5_watermark_bottom_crop_ratio()
     vf = (
         f"crop=iw:ih-ceil(ih*{crop_ratio:.4f}):0:0,"
         f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease:flags=lanczos,"

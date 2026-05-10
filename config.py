@@ -153,13 +153,15 @@ class Settings(BaseSettings):
     )
     # Crop bottom X of video (0.0–0.2) to hide Veo watermark. 0.05 = hide bottom 5%.
     video_bottom_crop: float = Field(0.05, alias="VIDEO_BOTTOM_CROP")
-    # Mode5-specific bottom crop for provider watermark removal in looped/intro clips.
-    # Keep conservative to avoid cutting useful captions in source frames.
-    mode5_video_bottom_crop: float = Field(0.028, alias="MODE5_VIDEO_BOTTOM_CROP")
-    # Mode5: trim probable "dead tail" in generated loop source before tiling.
+    # Mode5-specific bottom crop for provider watermark removal (Veo badge etc.).
+    # Looped intro clips used smaller crop than static segments — unify via this setting.
+    mode5_video_bottom_crop: float = Field(0.07, alias="MODE5_VIDEO_BOTTOM_CROP")
+    # Mode5: trim probable "dead tail" (seconds) from generated loop source before tiling.
     # Helps remove end-of-clip freeze that causes visible stop each cycle.
-    # 0 disables tail trimming completely.
+    # 0 = keep full clip duration (default); set e.g. 1.2 only if loops show a frozen tail.
     mode5_loop_trim_tail_sec: float = Field(0.0, alias="MODE5_LOOP_TRIM_TAIL_SEC")
+    # Mode5: для превью YouTube (book_night / unwritten_chapter) подтянуть обложку с openlibrary.org и отдать в FastGen как reference.
+    mode5_thumbnail_openlibrary_cover: bool = Field(True, alias="MODE5_THUMBNAIL_OPENLIBRARY_COVER")
     # Mode5: freeze detector for generated loop clips (ffmpeg freezedetect).
     mode5_freeze_detect_noise: float = Field(0.0018, alias="MODE5_FREEZE_DETECT_NOISE")
     mode5_freeze_detect_min_sec: float = Field(0.35, alias="MODE5_FREEZE_DETECT_MIN_SEC")
