@@ -71,7 +71,7 @@ function VideoRow({
   const showYoutubeForm = v.status === 'ok' && v.file_ready && !v.youtube_id && accounts.length > 0;
 
   return (
-    <li className="rounded-xl border border-[#27272f] bg-[#0d0d14] p-4 space-y-2">
+    <li className="card p-4 space-y-2">
       <div className="text-sm font-medium text-[#e4e4f0]">{v.title || v.key}</div>
       <div className="text-xs text-[#71717a] flex flex-wrap gap-2 items-center">
         <span

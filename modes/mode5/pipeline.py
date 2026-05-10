@@ -4240,6 +4240,7 @@ async def run_mode5_pipeline(
                 "chunks": pre_chunks,
             }
             _save_mode5_plan(session_id, pre_plan, checkpoint=MODE5_CKPT_STUB)
+            effective_intro_backend = pre_backend
             try:
                 intro_rels = await _generate_mode5_intro_confirmation_pool(
                     session_id=session_id,
@@ -4247,12 +4248,28 @@ async def run_mode5_pipeline(
                     style_lock=style_lock_pre,
                     topic_seed=topic_input or (header_stripped_pre or ""),
                     pool_size_override=pre_pool_size,
-                    image_backend=pre_backend,
+                    image_backend=effective_intro_backend,
                 )
             except Exception as preview_err:
-                raise RuntimeError(f"Mode5 intro preflight failed: {preview_err}") from preview_err
+                if effective_intro_backend == "api":
+                    logger.warning(
+                        "[Mode5] Intro preflight failed with image backend=api ({}); retrying preview pool with playwright.",
+                        preview_err,
+                    )
+                    effective_intro_backend = "playwright"
+                    intro_rels = await _generate_mode5_intro_confirmation_pool(
+                        session_id=session_id,
+                        sub_mode=sm,
+                        style_lock=style_lock_pre,
+                        topic_seed=topic_input or (header_stripped_pre or ""),
+                        pool_size_override=pre_pool_size,
+                        image_backend=effective_intro_backend,
+                    )
+                else:
+                    raise RuntimeError(f"Mode5 intro preflight failed: {preview_err}") from preview_err
             if not intro_rels:
                 raise RuntimeError("Mode5 intro preflight produced no preview videos")
+            pre_plan["image_backend"] = effective_intro_backend
             pre_plan["await_intro_confirmation"] = True
             pre_plan["intro_preview_video"] = intro_rels[0]
             pre_plan["intro_preview_videos"] = intro_rels

@@ -736,9 +736,12 @@ async def generate_images_fastgen(
     workers = max(1, int(getattr(settings, "fastgen_image_parallel_workers", 10) or 10))
     timeout = httpx.Timeout(float(getattr(settings, "fastgen_http_timeout_sec", 600) or 600))
 
+    attempts_n = max(1, int(getattr(settings, "fastgen_max_attempts", 8) or 8))
+
     async def one(i: int, p: str) -> Path | None:
+        last_exc: BaseException | None = None
         async with httpx.AsyncClient(timeout=timeout) as client:
-            for _ in range(max(1, settings.fastgen_max_attempts)):
+            for _ in range(attempts_n):
                 if _cancel_requested(cancel_event):
                     raise FastGenCancelled()
                 try:
@@ -747,11 +750,16 @@ async def generate_images_fastgen(
                     )
                     if r:
                         return r
+                    last_exc = RuntimeError("generator returned no file path")
+                    logger.warning(f"[FastGen HTTP] image {i}: empty path (retry)")
                 except FastGenCancelled:
                     raise
                 except Exception as e:
+                    last_exc = e
                     logger.warning(f"[FastGen HTTP] image {i} retry: {e}")
                 await asyncio.sleep(1.5)
+            if last_exc:
+                logger.error("[FastGen HTTP] image {} exhausted {} attempts: {}", i, attempts_n, last_exc)
             return None
 
     if parallel and len(prompts) > 1:
@@ -762,10 +770,14 @@ async def generate_images_fastgen(
                 return await one(j, pr)
 
         results = await asyncio.gather(*[bounded(i, prompts[i]) for i in range(len(prompts))])
-        if any(r is None for r in results):
+        failed_ix = [j for j, r in enumerate(results) if r is None]
+        if failed_ix:
             if _cancel_requested(cancel_event):
                 raise FastGenCancelled()
-            raise RuntimeError("[FastGen HTTP] Some images failed to generate")
+            raise RuntimeError(
+                f"[FastGen HTTP] Some images failed to generate at indices {failed_ix} "
+                f"(see warnings above; often HTTP 4xx/5xx, API detail, or content_policy)."
+            )
         return list(results)  # type: ignore[return-value]
 
     all_paths: list[Path] = []
@@ -774,7 +786,8 @@ async def generate_images_fastgen(
             if _cancel_requested(cancel_event):
                 raise FastGenCancelled()
             ok = False
-            for _ in range(max(1, settings.fastgen_max_attempts)):
+            last_exc: BaseException | None = None
+            for _ in range(attempts_n):
                 if _cancel_requested(cancel_event):
                     raise FastGenCancelled()
                 try:
@@ -785,13 +798,19 @@ async def generate_images_fastgen(
                         all_paths.append(r)
                         ok = True
                         break
+                    logger.warning(f"[FastGen HTTP] sequential image index {i}: empty path from API (retry)")
+                    last_exc = RuntimeError("generator returned no file path")
                 except FastGenCancelled:
                     raise
                 except Exception as e:
+                    last_exc = e
                     logger.warning(f"[FastGen HTTP] sequential image retry: {e}")
                 await asyncio.sleep(1.5)
             if not ok:
-                raise RuntimeError(f"[FastGen HTTP] failed image at index {i}")
+                hint = f": {last_exc}" if last_exc else ""
+                raise RuntimeError(
+                    f"[FastGen HTTP] failed image at index {i} after {attempts_n} attempt(s){hint}"
+                ) from last_exc
             await asyncio.sleep(0.3)
     return all_paths
 

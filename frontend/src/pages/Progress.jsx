@@ -147,6 +147,8 @@ export default function Progress() {
   const [mode5ThumbRegenBusy, setMode5ThumbRegenBusy] = useState(false);
   const [mode5ThumbDownloadBusy, setMode5ThumbDownloadBusy] = useState(false);
   const [mode5ThumbNonce, setMode5ThumbNonce] = useState(0);
+  /** Снимок /review-state для шага степпера (checkpoint + hint), без привязки к превью на диске */
+  const [mode5ReviewProgress, setMode5ReviewProgress] = useState(null);
   const [streamNonce, setStreamNonce] = useState(0);
   const errorRef = useRef('');
   const isTransientReconnectError = useMemo(
@@ -208,6 +210,7 @@ export default function Progress() {
       setMode5PolicyNote('');
       setMode5ThumbRegenBusy(false);
       setMode5ThumbNonce(0);
+      setMode5ReviewProgress(null);
     }
 
     let cancelled = false;
@@ -316,6 +319,16 @@ export default function Progress() {
         if (cancelled) return;
         const hintRaw = snap?.mode5_progress_hint;
         const hint = typeof hintRaw === 'string' ? hintRaw.trim() : '';
+        setMode5ReviewProgress({
+          planPending: !!snap?.mode5_plan_pending,
+          checkpoint: snap?.mode5_checkpoint_stage ?? null,
+          hint,
+          segmentsImaged: snap?.mode5_segments_imaged,
+          segmentsTotal: snap?.mode5_segments_total,
+          previewsOnDisk: snap?.mode5_previews_on_disk,
+          totalChunks: snap?.mode5_total_chunks,
+          readyChunks: snap?.mode5_ready_chunks,
+        });
         if (hint) {
           setMode5WaitUi({
             hint,
@@ -414,6 +427,16 @@ export default function Progress() {
     Boolean(mode5Live?.mode5_waiting_confirmation) ||
     Boolean(mode5Live?.mode5_await_intro_confirmation);
   const isMode5IntroGate = sessionMode === 5 && mode5WaitingConfirmation;
+  const isMode5Session =
+    sessionMode === 5 || typeof done?.mode5_sub_mode === 'string';
+  const mode5HasFinalVideo = !!(
+    done?.video_path ||
+    (Array.isArray(done?.video_paths) && done.video_paths.length > 0)
+  );
+  /** Раньше любой merge mode5 в `done` считался «готово» — степпер зеленел целиком при первых превью. */
+  const stepIndicatorDone =
+    !isMode5IntroGate &&
+    (isMode5Session ? mode5HasFinalVideo : !!done);
 
   useEffect(() => {
     errorRef.current = error || '';
@@ -664,7 +687,15 @@ export default function Progress() {
 
       {/* Step indicator */}
       <div className="card p-5 mb-4">
-        <StepIndicator logs={logs} done={!!done && !isMode5IntroGate} error={!!error} />
+        <StepIndicator
+          logs={logs}
+          done={stepIndicatorDone}
+          error={!!error}
+          sessionMode={sessionMode}
+          mode5ReviewProgress={
+            isMode5Session && !stepIndicatorDone ? mode5ReviewProgress : null
+          }
+        />
       </div>
 
       {/* Error banner */}

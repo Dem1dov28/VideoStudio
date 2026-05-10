@@ -99,20 +99,33 @@ export function RateLimitProvider({ children }) {
       // Get backend status
       const backendStatus = await api.getRateLimitStatus();
       const backendQueue = await api.queueStatus();
-      
-      // Load from localStorage
-      const stored = loadFromStorage();
-      
+
+      const limit = backendStatus.limit;
+      const used = backendStatus.used;
+      const remaining = backendStatus.remaining;
+      const hourKey = backendStatus.hour_key ?? backendStatus.hourKey;
+      const nextReset = backendStatus.next_reset ?? backendStatus.nextReset;
+      const queue = backendQueue?.queue || [];
+
+      // Сервер — источник истины для лимита и счётчика (иначе localStorage мог показывать «10/час», а API — дефолт 2).
       setState(prev => ({
         ...prev,
-        limit: stored?.limit ?? backendStatus.limit,
-        used: backendStatus.used,
-        remaining: backendStatus.remaining,
-        hourKey: backendStatus.hour_key ?? backendStatus.hourKey,
-        nextReset: backendStatus.next_reset ?? backendStatus.nextReset,
-        queue: backendQueue?.queue || stored?.queue || [],
+        limit,
+        used,
+        remaining,
+        hourKey,
+        nextReset,
+        queue,
       }));
-      
+
+      saveToStorage({
+        limit,
+        hourKey,
+        used,
+        queue,
+        lastReset: new Date().toISOString(),
+      });
+
       backendAvailableRef.current = true;
       setIsInitialized(true);
     } catch (error) {
@@ -145,32 +158,13 @@ export function RateLimitProvider({ children }) {
 
     try {
       await api.setRateLimit(newLimit);
-      
-      setState(prev => {
-        const newState = {
-          ...prev,
-          limit: newLimit,
-          remaining: remainingForLimit(newLimit, prev.used),
-        };
-        
-        // Save to localStorage
-        saveToStorage({
-          limit: newLimit,
-          hourKey: newState.hourKey,
-          used: prev.used,
-          queue: prev.queue,
-          lastReset: new Date().toISOString(),
-        });
-        
-        return newState;
-      });
-      
+      await fetchRateLimitStatus();
       return true;
     } catch (error) {
       console.error('[RateLimit] Failed to set limit:', error);
       return false;
     }
-  }, []);
+  }, [fetchRateLimitStatus]);
 
   /**
    * Check if video generation is allowed and start it or add to queue
@@ -210,35 +204,14 @@ export function RateLimitProvider({ children }) {
       // Start pipeline immediately
       try {
         const startResult = await api.startPipeline(payload);
-        
-        // Update usage
-        setState(prev => {
-        const newUsed = prev.used + 1;
-        const newRemaining = remainingForLimit(prev.limit, newUsed);
-        
-        const newState = {
-          ...prev,
-          used: newUsed,
-          remaining: newRemaining,
-          isChecking: false,
+        // Счётчик на сервере уже увеличен в /api/pipeline/start — подтягиваем фактическое состояние (без «+1» по устаревшему prev.used).
+        await fetchRateLimitStatus();
+        setState(prev => ({ ...prev, isChecking: false }));
+
+        return {
+          status: 'started',
+          session_id: startResult.session_id,
         };
-        
-        // Save to localStorage
-        saveToStorage({
-          limit: prev.limit,
-          hourKey: prev.hourKey,
-          used: newUsed,
-          queue: prev.queue,
-          lastReset: new Date().toISOString(),
-        });
-        
-        return newState;
-      });
-      
-      return {
-        status: 'started',
-        session_id: startResult.session_id,
-      };
       } catch (pipelineError) {
         setState(prev => ({ ...prev, isChecking: false }));
         
@@ -266,7 +239,7 @@ export function RateLimitProvider({ children }) {
     const chained = checkMutexRef.current.then(runLocked, runLocked);
     checkMutexRef.current = chained.catch(() => {});
     return chained;
-  }, [state.isChecking, state.limit, state.used]);
+  }, [state.isChecking, fetchRateLimitStatus]);
 
   /**
    * Add video to queue

@@ -4,55 +4,98 @@
 
 @layer base {
   :root {
-    --bg: #09090b;
-    --surface: #121218;
-    --surface2: #1a1a24;
-    --border: #27272f;
-    --text: #e4e4f0;
-    --text-muted: #71717a;
+    --bg-deep: #050508;
+    --surface: rgba(16, 16, 22, 0.78);
+    --surface-solid: #13131c;
+    --border: rgba(255, 255, 255, 0.06);
+    --border-strong: rgba(255, 255, 255, 0.1);
+    --text: #f4f4f9;
+    --text-muted: #9494a8;
+    --brand-glow: rgba(139, 92, 246, 0.22);
   }
 
-  * { box-sizing: border-box; }
+  * {
+    box-sizing: border-box;
+  }
 
-  html, body, #root {
+  html,
+  body,
+  #root {
     height: 100%;
-    background-color: var(--bg);
+    background-color: var(--bg-deep);
     color: var(--text);
   }
 
   body {
-    font-family: 'Inter', system-ui, sans-serif;
+    font-family: 'Plus Jakarta Sans', Inter, system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    letter-spacing: -0.01em;
+    background-color: #050508;
+    background-image:
+      radial-gradient(ellipse 130% 85% at 50% -35%, rgba(124, 58, 237, 0.2), transparent 52%),
+      radial-gradient(ellipse 65% 45% at 105% 15%, rgba(56, 189, 248, 0.07), transparent 48%),
+      radial-gradient(ellipse 55% 40% at -5% 80%, rgba(139, 92, 246, 0.08), transparent 45%);
+    background-attachment: fixed;
   }
 
-  ::-webkit-scrollbar { width: 6px; height: 6px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: #3f3f50; border-radius: 3px; }
-  ::-webkit-scrollbar-thumb:hover { background: #7c3aed; }
+  ::selection {
+    background: rgba(139, 92, 246, 0.35);
+    color: #fff;
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 100px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(139, 92, 246, 0.45);
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
 }
 
 @layer components {
   .card {
-    @apply bg-[#121218] border border-[#27272f] rounded-2xl;
+    @apply rounded-2xl border border-white/[0.06]
+           bg-[rgba(18,18,26,0.72)] backdrop-blur-xl;
+    /* theme.extend boxShadow.panel — нельзя надёжно через @apply в CSS */
+    box-shadow: 0 8px 32px -8px rgba(0, 0, 0, 0.55);
   }
 
   .btn-primary {
-    @apply bg-brand-600 hover:bg-brand-700 text-white font-semibold
-           px-6 py-3 rounded-xl transition-all duration-200
-           disabled:opacity-50 disabled:cursor-not-allowed
-           active:scale-[0.98] shadow-lg shadow-brand-900/40;
+    @apply inline-flex items-center justify-center gap-2
+           bg-gradient-to-b from-brand-500 to-brand-700
+           hover:from-brand-400 hover:to-brand-600
+           text-white font-semibold px-6 py-3 rounded-xl
+           transition-all duration-200
+           disabled:opacity-45 disabled:cursor-not-allowed disabled:shadow-none
+           active:scale-[0.98]
+           shadow-lg shadow-brand-900/45 ring-1 ring-white/10;
   }
 
   .btn-secondary {
-    @apply bg-[#1a1a24] hover:bg-[#22222f] border border-[#27272f]
-           text-[#e4e4f0] font-medium px-4 py-2.5 rounded-xl
+    @apply inline-flex items-center justify-center gap-2
+           bg-white/[0.04] hover:bg-white/[0.07]
+           border border-white/[0.08] hover:border-white/[0.12]
+           text-[#ececf4] font-medium px-4 py-2.5 rounded-xl
            transition-all duration-200 active:scale-[0.98];
   }
 
   .input {
-    @apply w-full bg-[#1a1a24] border border-[#27272f] rounded-xl
-           px-4 py-3 text-[#e4e4f0] placeholder-[#52525b]
-           focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500/30
+    @apply w-full rounded-xl px-4 py-3 text-[#ececf4]
+           placeholder-[#5c5c6e]
+           bg-[rgba(14,14,20,0.85)] border border-white/[0.08]
+           focus:outline-none focus:border-brand-500/55 focus:ring-2 focus:ring-brand-500/20
            transition-colors duration-200;
   }
 
@@ -62,5 +105,23 @@
 
   .log-line {
     @apply font-mono text-xs leading-5 whitespace-pre-wrap break-all;
+  }
+
+  .scrollbar-subtle {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.1) transparent;
+  }
+  .scrollbar-subtle::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar-subtle::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 100px;
+  }
+
+  /* Алиас из RateLimitPanel */
+  .custom-scrollbar {
+    @apply scrollbar-subtle;
   }
 }

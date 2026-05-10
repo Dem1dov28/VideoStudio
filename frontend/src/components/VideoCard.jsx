@@ -198,7 +198,7 @@ export default function VideoCard({
     <motion.div
       whileHover={{ y: -2 }}
       transition={{ duration: 0.15 }}
-      className="card overflow-hidden cursor-pointer group h-fit max-w-full min-w-0 flex flex-col"
+      className="card overflow-hidden cursor-pointer group h-fit max-w-full min-w-0 flex flex-col transition-shadow duration-200 hover:shadow-glow hover:border-brand-500/20"
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       onClick={() => onClick(video)}

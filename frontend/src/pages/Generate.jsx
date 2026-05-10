@@ -2,9 +2,11 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  RiSparklingLine, RiSettings3Line, RiArrowRightLine, RiArrowLeftLine,
+  RiSparklingLine, RiArrowRightLine, RiArrowLeftLine,
   RiLoader4Line, RiEditLine, RiCheckboxCircleLine,
   RiRefreshLine, RiImageAddLine, RiCloseLine,
+  RiFileTextLine, RiBookOpenLine, RiLightbulbLine, RiDraftLine,
+  RiMoonLine, RiFileSearchLine, RiMovie2Line, RiPaletteLine,
 } from 'react-icons/ri';
 import { useLanguage } from '../context/LanguageContext';
 import { useMode } from '../context/ModeContext';
@@ -39,6 +41,46 @@ const HOUSE_TYPES = [
 /** Синхронно с modes/mode5/outline_generator.MIN_OUTLINE_BRIEF_CHARS */
 const MODE5_OUTLINE_MIN_BRIEF_CHARS = 40;
 
+/** Карточки подрежима 5 — иконки и короткие подписи для сетки выбора */
+const MODE5_SUBMODE_DEFS = [
+  {
+    id: 'manual',
+    label: 'Ручной текст',
+    hint: 'Ваш сценарий, разбивка по длительности чанка',
+    Icon: RiFileTextLine,
+  },
+  {
+    id: 'bible',
+    label: 'Bible',
+    hint: 'Как ручной, плюс библейский визуальный контекст',
+    Icon: RiBookOpenLine,
+  },
+  {
+    id: 'facts50',
+    label: '77 фактов',
+    hint: 'Только тема — AI пишет факты и озвучку по клипу',
+    Icon: RiLightbulbLine,
+  },
+  {
+    id: 'outline',
+    label: 'План из описания',
+    hint: 'Краткий сюжет → план и 10–18 блоков озвучки',
+    Icon: RiDraftLine,
+  },
+  {
+    id: 'book_night',
+    label: 'Книга на ночь',
+    hint: 'Книга по оглавлению — спокойные блоки как у «фактов»',
+    Icon: RiMoonLine,
+  },
+  {
+    id: 'unwritten_chapter',
+    label: 'The Unwritten Chapter',
+    hint: 'Тема расследования → документальный лонгрид 30–50 мин',
+    Icon: RiFileSearchLine,
+  },
+];
+
 const TOPICS_PRESETS = [
   'Топ-5 фактов о чёрных дырах',
   'Почему мы видим сны: наука',
@@ -64,11 +106,15 @@ function Toggle({ value, onChange }) {
     <button
       type="button"
       onClick={() => onChange(!value)}
-      className={`w-11 h-6 rounded-full transition-all duration-200 ${value ? 'bg-brand-600' : 'bg-[#27272f]'}`}
+      className={`w-11 h-6 rounded-full transition-all duration-200 ring-1 ring-inset ${
+        value
+          ? 'bg-gradient-to-r from-brand-500 to-brand-600 ring-brand-400/30 shadow-glow-sm'
+          : 'bg-white/[0.08] ring-white/[0.06]'
+      }`}
     >
       <motion.div
         animate={{ x: value ? 20 : 2 }}
-        className="w-5 h-5 rounded-full bg-white shadow-sm"
+        className="w-5 h-5 rounded-full bg-white shadow-md shadow-black/20"
       />
     </button>
   );
@@ -136,7 +182,6 @@ export default function Generate() {
   const [useScenario, setScenario]  = useState(true);
   const [localOnly, setLocalOnly]   = useState(true);
   const [showSubtitles, setShowSubtitles] = useState(true);
-  const [showSettings, setSettings] = useState(false);
   const [referenceImage, setReferenceImage] = useState(null); // { path, preview } — для fast-gen image-to-video
   const [uploadingRef, setUploadingRef] = useState(false);
   // Mode 3: восстановление домов — выбрать тип дома или загрузить 2 фото
@@ -210,12 +255,16 @@ export default function Generate() {
   const [mode5Script, setMode5Script] = useState('');
   const [mode5ChunkSeconds, setMode5ChunkSeconds] = useState(300);
   const [mode5SegmentSeconds, setMode5SegmentSeconds] = useState(15);
-  const [mode5ImageBackend, setMode5ImageBackend] = useState('api'); // api | playwright | auto
+  const [mode5ImageBackend, setMode5ImageBackend] = useState('api'); // api | playwright
   const [mode5HeaderTitle, setMode5HeaderTitle] = useState('');
   const [mode5SubMode, setMode5SubMode] = useState('manual');
   const [mode5Ideas, setMode5Ideas] = useState([]);
   const [mode5IdeasLoading, setMode5IdeasLoading] = useState(false);
+  /** Выкл. по умолчанию — без запросов к модели, пока пользователь не включит. */
+  const [mode5NeuralIdeasEnabled, setMode5NeuralIdeasEnabled] = useState(false);
   const [mode5IdeaLaunchKey, setMode5IdeaLaunchKey] = useState('');
+  /** Общий флаг «тест ~5 мин» для режима 5 (не привязан к отдельной карточке подрежима). */
+  const [mode5TestRun, setMode5TestRun] = useState(false);
   useEffect(() => {
     if (mode !== 5) return;
     if (
@@ -226,39 +275,34 @@ export default function Generate() {
     }
   }, [mode, mode5SubMode, mode5SegmentSeconds]);
   useEffect(() => {
-    if (mode !== 5 || !isMode5AiSubMode(mode5SubMode)) {
+    if (mode !== 5 || !isMode5AiSubMode(mode5SubMode) || !mode5NeuralIdeasEnabled) {
       setMode5Ideas([]);
+      setMode5IdeasLoading(false);
     }
-  }, [mode, mode5SubMode]);
+  }, [mode, mode5SubMode, mode5NeuralIdeasEnabled]);
   useEffect(() => {
     let cancelled = false;
-    async function loadCachedIdeas() {
-      if (mode !== 5 || !isMode5AiSubMode(mode5SubMode)) return;
+    async function loadCachedIdeasOnly() {
+      if (mode !== 5 || !isMode5AiSubMode(mode5SubMode) || !mode5NeuralIdeasEnabled) return;
       setMode5IdeasLoading(true);
+      setMode5Ideas([]);
       setError('');
       try {
         const cached = await api.mode5CachedTopicIdeas(mode5SubMode, 8);
         const rows = Array.isArray(cached?.ideas) ? cached.ideas : [];
         if (cancelled) return;
-        if (rows.length > 0) {
-          setMode5Ideas(rows);
-          return;
-        }
-        const seed = `${mode5SubMode}:${new Date().toISOString().slice(0, 10)}`;
-        const generated = await api.mode5TopicIdeas(mode5SubMode, 8, seed);
-        if (cancelled) return;
-        setMode5Ideas(Array.isArray(generated?.ideas) ? generated.ideas : []);
+        setMode5Ideas(rows);
       } catch (e) {
         if (!cancelled) setError(e.message || 'Не удалось загрузить темы');
       } finally {
         if (!cancelled) setMode5IdeasLoading(false);
       }
     }
-    loadCachedIdeas();
+    loadCachedIdeasOnly();
     return () => {
       cancelled = true;
     };
-  }, [mode, mode5SubMode]);
+  }, [mode, mode5SubMode, mode5NeuralIdeasEnabled]);
   // Mode 6: cartoon drama
   const [mode6NumCharacters, setMode6NumCharacters] = useState(3);
   // Mode 7: ASMR animal keyboard videos
@@ -351,6 +395,7 @@ export default function Generate() {
       setMode5ImageBackend,
       setMode5HeaderTitle,
       setMode5SubMode,
+      setMode5TestRun,
       setMode6NumCharacters,
       setMode7AnimalType,
       setMode7Keyboards,
@@ -611,7 +656,7 @@ export default function Generate() {
         mode5_video_header_title: headerTrim,
         mode5_bible_mode: effectiveSubMode === 'bible',
         mode5_sub_mode: effectiveSubMode,
-        mode5_test_run: Boolean(override?.testRun),
+        mode5_test_run: Boolean(override?.testRun ?? mode5TestRun),
         mode5_test_duration_sec: 300,
       };
       
@@ -631,7 +676,7 @@ export default function Generate() {
   }
 
   async function handleSuggestMode5Ideas() {
-    if (mode !== 5 || !isMode5AiSubMode(mode5SubMode)) return;
+    if (mode !== 5 || !isMode5AiSubMode(mode5SubMode) || !mode5NeuralIdeasEnabled) return;
     setError('');
     setMode5IdeasLoading(true);
     try {
@@ -1165,152 +1210,206 @@ export default function Generate() {
             ) : null}
 
             {/* Header */}
-            <div className="mb-6">
-              <h1 className="text-2xl font-bold text-white mb-1">
-                {mode === 3 ? 'Реставрация дома' : mode === 4 ? 'Цитата + фото' : mode === 5 ? 'Длинные видео' : mode === 6 ? 'Cartoon Drama' : mode === 7 ? 'ASMR Keyboard' : mode === 8 ? 'House Timelapse' : mode === 9 ? 'Vehicle Assembly' : mode === 10 ? 'Уборка пляжа' : mode === 11 ? 'Выбор постройки' : mode === 13 ? 'Аудио → слайды' : 'Создать видео'}
-              </h1>
-              <p className="text-[#71717a] text-sm">
-                {mode === 3
-                  ? 'Маленький дом, одна комната-студия. AI создаст промпты и фото. 8 фрагментов: intro, 3 экстерьер, 3 интерьер (как снаружи), финал (скриншот clip 3 → снаружи→внутри). Музыка.'
-                  : mode === 4
-                    ? 'Цитата и имя автора. Один абзац — один короткий ролик (RU+EN или один язык). Несколько абзацев через пустую строку — несколько клипов: только один язык (RU или EN), превью фрагментов и финальный монтаж; стиль субтитров — в настройках режима.'
-                    : mode === 5
-                      ? 'Длинное видео: ручной текст, Bible, «77 фактов», «план из описания» или «книга на ночь» — у «плана» и «книги» суммарный объём озвучки того же порядка, что у «77 фактов» (длина одного блока считается от числа частей); затем превью и финальный монтаж.'
-                      : mode === 6
-                        ? 'AI генерирует абсурдные вирусные истории с овощными персонажами. Драма, конфликт, шокирующие повороты. Идеально для TikTok/Reels/Shorts.'
-                        : mode === 7
-                          ? 'ASMR видео: животные нажимают клавиши разных поверхностей (мёд, желе, лёд, шоколад). Без голоса и субтитров — только качественные звуки нажатий.'
-                          : mode === 8
-                            ? 'Timelapse видео: пустой участок → фундамент → стены → крыша → готовый дом. Фотореалистичный стиль, как снято на смартфон.'
-                            : mode === 9
-                              ? 'Timelapse сборки транспорта: рама → двигатель → кузов → колёса → готовый автомобиль/самолёт/трактор. Фотореалистичный стиль.'
-                              : mode === 10
-                                ? 'Timelapse уборки: загрязнённый пляж → сбор мусора, грабли, техника → чистый берег. Тот же пайплайн, что у стройки дома, но сюжет — экология.'
-                                : mode === 11
-                                  ? 'Выберите постройку и нажмите «Генерировать». Сцены фиксируются в одной локации и одном ракурсе.'
-                                  : mode === 13
-                                    ? 'Загрузите длинное аудио: тембр слегка меняется фильтрами, текст извлекается Whisper по частям ~5 мин, картинки по ~30 с в едином стиле. Проверка превью, перегенерация отдельных слайдов, затем склейка в один ролик.'
-                                    : mode === 5
-                                      ? 'Режим 5: «77 фактов» — тема → факты → короткая озвучка на клип. «План из описания» — описание → немного длинных частей. «Книга на ночь» — название книги → план по настоящему оглавлению (число частей как в книге) → спокойная озвучка блоками того же объёма, что один клип «77 фактов». «The Unwritten Chapter» — тема расследования → 5–7 документальных блоков на 30–50 минут. Ручной — ваш текст по чанкам.'
+            <div className={mode === 5 ? 'mb-8' : 'mb-6'}>
+              {mode === 5 ? (
+                <div className="relative overflow-hidden rounded-2xl border border-[#2a2a38] bg-gradient-to-br from-[#15151f] via-[#121218] to-brand-900/[0.2] px-5 py-6 sm:px-8 sm:py-7 shadow-xl shadow-black/25">
+                  <div className="pointer-events-none absolute -right-10 top-0 h-44 w-44 rounded-full bg-brand-500/18 blur-3xl" />
+                  <div className="pointer-events-none absolute -left-12 bottom-0 h-36 w-36 rounded-full bg-violet-600/12 blur-3xl" />
+                  <div className="relative flex flex-col gap-3">
+                    <div className="inline-flex w-fit items-center gap-2 rounded-full border border-brand-500/35 bg-brand-600/12 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-brand-300">
+                      <RiMovie2Line className="text-base text-brand-400 shrink-0" aria-hidden />
+                      Режим 5 · Long-form
+                    </div>
+                    <h1 className="text-2xl sm:text-3xl font-bold text-white tracking-tight">
+                      Длинные видео
+                    </h1>
+                    <p className="text-sm text-[#a1a1aa] max-w-3xl leading-relaxed">
+                      Ручной текст, Bible, «77 фактов», план из описания, «книга на ночь» или документальное расследование — сценарий и озвучка по частям, превью каждого блока и финальный монтаж в одном потоке.
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <h1 className="text-2xl font-bold text-white mb-1">
+                    {mode === 3 ? 'Реставрация дома' : mode === 4 ? 'Цитата + фото' : mode === 6 ? 'Cartoon Drama' : mode === 7 ? 'ASMR Keyboard' : mode === 8 ? 'House Timelapse' : mode === 9 ? 'Vehicle Assembly' : mode === 10 ? 'Уборка пляжа' : mode === 11 ? 'Выбор постройки' : mode === 13 ? 'Аудио → слайды' : 'Создать видео'}
+                  </h1>
+                  <p className="text-[#71717a] text-sm">
+                    {mode === 3
+                      ? 'Маленький дом, одна комната-студия. AI создаст промпты и фото. 8 фрагментов: intro, 3 экстерьер, 3 интерьер (как снаружи), финал (скриншот clip 3 → снаружи→внутри). Музыка.'
+                      : mode === 4
+                        ? 'Цитата и имя автора. Один абзац — один короткий ролик (RU+EN или один язык). Несколько абзацев через пустую строку — несколько клипов: только один язык (RU или EN), превью фрагментов и финальный монтаж; стиль субтитров — в настройках режима.'
+                        : mode === 6
+                          ? 'AI генерирует абсурдные вирусные истории с овощными персонажами. Драма, конфликт, шокирующие повороты. Идеально для TikTok/Reels/Shorts.'
+                          : mode === 7
+                            ? 'ASMR видео: животные нажимают клавиши разных поверхностей (мёд, желе, лёд, шоколад). Без голоса и субтитров — только качественные звуки нажатий.'
+                            : mode === 8
+                              ? 'Timelapse видео: пустой участок → фундамент → стены → крыша → готовый дом. Фотореалистичный стиль, как снято на смартфон.'
+                              : mode === 9
+                                ? 'Timelapse сборки транспорта: рама → двигатель → кузов → колёса → готовый автомобиль/самолёт/трактор. Фотореалистичный стиль.'
+                                : mode === 10
+                                  ? 'Timelapse уборки: загрязнённый пляж → сбор мусора, грабли, техника → чистый берег. Тот же пайплайн, что у стройки дома, но сюжет — экология.'
+                                  : mode === 11
+                                    ? 'Выберите постройку и нажмите «Генерировать». Сцены фиксируются в одной локации и одном ракурсе.'
+                                    : mode === 13
+                                      ? 'Загрузите длинное аудио: тембр слегка меняется фильтрами, текст извлекается Whisper по частям ~5 мин, картинки по ~30 с в едином стиле. Проверка превью, перегенерация отдельных слайдов, затем склейка в один ролик.'
                                       : 'AI-агенты напишут сценарий, сгенерируют изображения и смонтируют видео.'}
-              </p>
+                  </p>
+                </>
+              )}
             </div>
 
             {/* Mode 5: длинные видео */}
             {mode === 5 ? (
-              <div className="space-y-4">
-                <div className="card p-5">
-                  <div className="text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
-                    Подрежим
+              <div className="space-y-6">
+                <div className="rounded-2xl border border-[#2e2e3c] bg-[#121218]/90 p-5 sm:p-6 shadow-lg shadow-black/20">
+                  <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between mb-4">
+                    <div>
+                      <h2 className="text-sm font-semibold text-white tracking-tight">
+                        Подрежим пайплайна
+                      </h2>
+                      <p className="text-xs text-[#71717a] mt-1 max-w-xl">
+                        Сначала выберите подрежим, затем при необходимости включите тестовый прогон (~5 мин озвучки) переключателем ниже.
+                      </p>
+                    </div>
                   </div>
-                  <div className="flex flex-col sm:flex-row sm:flex-wrap gap-2">
-                    {[
-                      { id: 'manual', label: 'Ручной текст', hint: 'Ваш сценарий, разбивка по длительности чанка' },
-                      { id: 'bible', label: 'Bible', hint: 'Как ручной, плюс библейский визуальный контекст' },
-                      { id: 'facts50', label: '77 фактов', hint: 'Только тема — AI пишет 77 фактов и озвучку по одному на клип' },
-                      {
-                        id: 'outline',
-                        label: 'План из описания',
-                        hint: 'Краткое описание сюжета — план и 10–18 блоков озвучки; длина каждого блока подгоняется под тот же суммарный объём, что у «77 фактов»',
-                      },
-                      {
-                        id: 'book_night',
-                        label: 'Книга на ночь',
-                        hint: 'Название книги — план по реальному оглавлению; чем меньше верхних глав, тем длиннее текст на подглаву (при многих главах — ближе к одному клипу «77 фактов»)',
-                      },
-                      {
-                        id: 'unwritten_chapter',
-                        label: 'The Unwritten Chapter',
-                        hint: 'Только тема — AI делает расследовательский лонгрид 30–50 минут в стиле архивного документального разбора',
-                      },
-                    ].map(({ id, label, hint }) => (
-                      <div key={id} className="flex flex-col gap-1.5 flex-1 min-w-[140px]">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+                    {MODE5_SUBMODE_DEFS.map(({ id, label, hint, Icon }) => {
+                      const active = mode5SubMode === id;
+                      return (
                         <button
+                          key={id}
                           type="button"
                           title={hint}
                           onClick={() => setMode5SubMode(id)}
-                          className={`flex-1 py-3 px-3 rounded-lg text-sm font-medium text-left transition-all border ${
-                            mode5SubMode === id
-                              ? 'bg-brand-600/20 text-brand-400 border-brand-600/40'
-                              : 'text-[#71717a] hover:text-[#e4e4f0] border-[#27272f] hover:border-[#3f3f50]'
+                          className={`flex flex-col gap-2 p-4 text-left rounded-xl border transition-all duration-200 ${
+                            active
+                              ? 'border-brand-500/50 bg-gradient-to-br from-brand-600/20 via-brand-600/5 to-transparent shadow-[0_0_0_1px_rgba(139,92,246,0.25)]'
+                              : 'border-[#2b2b38] bg-[#16161f]/80 hover:border-[#3f3f52] hover:bg-[#1a1a26]'
                           }`}
                         >
-                          {label}
+                          <div className="flex items-start gap-3">
+                            <span
+                              className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border ${
+                                active
+                                  ? 'border-brand-500/40 bg-brand-600/25 text-brand-300'
+                                  : 'border-[#2f2f3d] bg-[#1c1c28] text-[#71717a]'
+                              }`}
+                            >
+                              <Icon className="text-lg" aria-hidden />
+                            </span>
+                            <span className="min-w-0 flex-1">
+                              <span className="block text-sm font-semibold text-[#f4f4fb] leading-snug">{label}</span>
+                              <span className="mt-1 block text-[11px] leading-relaxed text-[#71717a]">{hint}</span>
+                            </span>
+                          </div>
                         </button>
-                        <button
-                          type="button"
-                          title="Короткий прогон: по оценке длины текста ~5 минут озвучки, чтобы посмотреть, как ведёт себя этот подрежим"
-                          disabled={step === 'launching'}
-                          onClick={() => void handleMode5Launch({ subMode: id, testRun: true })}
-                          className="py-1.5 px-2 rounded-md text-xs font-medium text-center border border-[#27272f] text-[#71717a] hover:text-brand-400 hover:border-brand-600/40 transition-colors disabled:opacity-40"
-                        >
-                          Тест ~5 мин
-                        </button>
-                      </div>
-                    ))}
+                      );
+                    })}
+                  </div>
+
+                  <div className="mt-5 pt-4 border-t border-white/[0.06] flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <div className="text-sm font-semibold text-[#ececf4]">Тестовый прогон (~5 мин)</div>
+                      <p className="text-xs text-[#71717a] mt-0.5 max-w-md leading-relaxed">
+                        Короткая озвучка без полного объёма — чтобы проверить подрежим. Выкл. — обычная полная генерация.
+                      </p>
+                    </div>
+                    <Toggle value={mode5TestRun} onChange={setMode5TestRun} />
                   </div>
                 </div>
-                <div className="card p-5">
-                  <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
-                    {mode5SubMode === 'outline'
-                      ? 'Краткое описание сюжета'
-                      : mode5SubMode === 'facts50' || mode5SubMode === 'book_night' || mode5SubMode === 'unwritten_chapter'
-                        ? mode5SubMode === 'book_night'
-                          ? 'Название книги'
-                          : mode5SubMode === 'unwritten_chapter'
-                            ? 'Тема расследования'
-                          : 'Тема / заголовок'
-                        : 'Текст для озвучки'}
-                  </label>
-                  <textarea
-                    className="input text-sm min-h-[240px] leading-relaxed"
-                    placeholder={
-                      mode5SubMode === 'facts50'
-                        ? 'Например: 77 фактов о Франции — нейросеть придумает 77 интересных фактов и отдельный связный текст озвучки для каждого.'
-                        : mode5SubMode === 'book_night'
-                          ? 'Например: Семь навыков высокоэффективных людей, Стивен Кови — модель построит план по структуре книги и спокойно изложит суть по подглавам (их число — как в оглавлении, не фиксировано).'
-                          : mode5SubMode === 'unwritten_chapter'
-                            ? 'Например: Почему официальная версия Карибского кризиса скрывает реальные договоренности и влияние теневых переговоров. Укажите одну тему; сценарий 30–50 минут будет создан автоматически.'
-                          : mode5SubMode === 'outline'
-                            ? 'Например: Старый маяк на туманном острове. Смотритель живёт один, по вечерам зажигает лампу и слушает волны. Однажды к берегу прибивает странный предмет — не страшно, но меняет его рутину. Нужно именно описание, не одна фраза-название.'
-                            : 'Вставьте сюда полный текст для озвучки. Система разобьёт его на чанки примерно по выбранной длительности и окна для картинок.'
-                    }
-                    value={mode5Script}
-                    onChange={e => setMode5Script(e.target.value)}
-                  />
-                  <p className="text-xs text-[#52525b] mt-2">
-                    {mode5SubMode === 'facts50'
-                      ? 'После запуска сначала генерируется сценарий (факты + тексты), затем 50 отдельных превью. Можно переозвучить любой фрагмент и собрать финальное видео кнопкой «Финальный монтаж».'
-                      : mode5SubMode === 'book_night'
-                        ? 'Сначала план по структуре выбранной книги, затем озвучка по каждой подглаве (объём блока — как у одного «факта» в режиме 77). Одна подглава = одно превью.'
-                        : mode5SubMode === 'unwritten_chapter'
-                          ? 'По одной теме генерируется расследовательский документальный сценарий: 5–7 блоков, микровыводы, подача в стиле архивного детектива, целевой объём 30–50 минут. Далее — обычный review превью по частям.'
-                        : mode5SubMode === 'outline'
-                          ? 'Сначала по вашему описанию строится план (главы и подглавы), затем — спокойные тексты под каждую подглаву. Число превью 10–18; длина блоков такая, чтобы в сумме выйти примерно на тот же объём озвучки, что у режима «77 фактов».'
-                          : 'Текст берётся из этого поля. После старта — превью по чанкам: перегенерация кадров и переозвучка отдельных частей.'}
-                  </p>
-                </div>
-                {isMode5AiSubMode(mode5SubMode) && (
-                  <div className="card p-5">
-                    <div className="flex items-center justify-between gap-3 mb-3">
-                      <div className="text-xs font-semibold text-[#71717a] uppercase tracking-wider">
-                        Идеи от нейросети
-                      </div>
-                      <button
-                        type="button"
-                        onClick={handleSuggestMode5Ideas}
-                        disabled={mode5IdeasLoading || step === 'launching'}
-                        className="btn-ghost text-sm px-3 py-2 flex items-center gap-2"
-                      >
-                        <RiRefreshLine className={mode5IdeasLoading ? 'animate-spin' : ''} />
-                        {mode5IdeasLoading ? 'Обновляю темы…' : 'Перегенерировать темы'}
-                      </button>
+
+                <div className="relative rounded-2xl border border-[#2e2e3c] bg-gradient-to-b from-[#16161f] to-[#121218] p-5 sm:p-6 overflow-hidden">
+                  <div className="pointer-events-none absolute left-0 top-0 h-full w-1 bg-gradient-to-b from-brand-500/70 via-brand-500/30 to-transparent rounded-l-2xl" />
+                  <div className="relative pl-2 sm:pl-3">
+                    <div className="flex flex-wrap items-baseline justify-between gap-2 mb-3">
+                      <label className="text-xs font-semibold uppercase tracking-wider text-[#a1a1aa]">
+                        {mode5SubMode === 'outline'
+                          ? 'Краткое описание сюжета'
+                          : mode5SubMode === 'facts50' || mode5SubMode === 'book_night' || mode5SubMode === 'unwritten_chapter'
+                            ? mode5SubMode === 'book_night'
+                              ? 'Название книги'
+                              : mode5SubMode === 'unwritten_chapter'
+                                ? 'Тема расследования'
+                                : 'Тема / заголовок'
+                            : 'Текст для озвучки'}
+                      </label>
+                      <span className="text-[10px] font-medium text-[#52525b] tabular-nums">
+                        {mode5Script.length.toLocaleString()} симв.
+                      </span>
                     </div>
-                    <p className="text-xs text-[#52525b] mb-3">
-                      Темы сохраняются и всегда подгружаются в этот блок. Нажмите на идею — тема и заголовок подставятся автоматически, запуск начнётся сразу.
+                    <textarea
+                      className="input text-sm min-h-[260px] leading-relaxed bg-[#14141d]/90 border-[#323242] focus:border-brand-500/60"
+                      placeholder={
+                        mode5SubMode === 'facts50'
+                          ? 'Например: 77 фактов о Франции — нейросеть придумает 77 интересных фактов и отдельный связный текст озвучки для каждого.'
+                          : mode5SubMode === 'book_night'
+                            ? 'Например: Семь навыков высокоэффективных людей, Стивен Кови — модель построит план по структуре книги и спокойно изложит суть по подглавам (их число — как в оглавлении, не фиксировано).'
+                            : mode5SubMode === 'unwritten_chapter'
+                              ? 'Например: Почему официальная версия Карибского кризиса скрывает реальные договоренности и влияние теневых переговоров. Укажите одну тему; сценарий 30–50 минут будет создан автоматически.'
+                              : mode5SubMode === 'outline'
+                                ? 'Например: Старый маяк на туманном острове. Смотритель живёт один, по вечерам зажигает лампу и слушает волны. Однажды к берегу прибивает странный предмет — не страшно, но меняет его рутину. Нужно именно описание, не одна фраза-название.'
+                                : 'Вставьте сюда полный текст для озвучки. Система разобьёт его на чанки примерно по выбранной длительности и окна для картинок.'
+                      }
+                      value={mode5Script}
+                      onChange={e => setMode5Script(e.target.value)}
+                    />
+                    <p className="text-xs text-[#71717a] mt-3 leading-relaxed border-t border-[#27272f]/80 pt-3">
+                      {mode5SubMode === 'facts50'
+                        ? 'После запуска сначала генерируется сценарий (факты + тексты), затем отдельные превью по клипам. Можно переозвучить фрагменты и собрать финальное видео кнопкой «Финальный монтаж».'
+                        : mode5SubMode === 'book_night'
+                          ? 'Сначала план по структуре выбранной книги, затем озвучка по каждой подглаве (объём блока — как у одного «факта» в режиме 77). Одна подглава = одно превью.'
+                          : mode5SubMode === 'unwritten_chapter'
+                            ? 'По одной теме генерируется расследовательский документальный сценарий: 5–7 блоков, микровыводы, подача в стиле архивного детектива, целевой объём 30–50 минут. Далее — review превью по частям.'
+                            : mode5SubMode === 'outline'
+                              ? 'По описанию строится план (главы и подглавы), затем спокойные тексты под каждую подглаву. Превью 10–18; суммарный объём озвучки сопоставим с режимом «77 фактов».'
+                              : 'После старта — превью по чанкам: перегенерация кадров и переозвучка отдельных частей.'}
                     </p>
-                    {mode5Ideas.length > 0 ? (
-                      <div className="space-y-2">
+                  </div>
+                </div>
+
+                {isMode5AiSubMode(mode5SubMode) && (
+                  <div className="rounded-2xl border border-[#2e2e3c] bg-[#121218] p-5 sm:p-6">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between mb-4">
+                      <div className="min-w-0 flex-1">
+                        <div className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-[#a1a1aa]">
+                          <RiSparklingLine className="text-brand-400 text-base" aria-hidden />
+                          Идеи от нейросети
+                        </div>
+                        <p className="text-xs text-[#71717a] mt-2 max-w-xl leading-relaxed">
+                          По умолчанию выключено, чтобы не расходовать запросы к модели. После включения подтягиваются сохранённые темы; новая подборка — кнопкой «Новые темы». Клик по карточке подставит заголовок и запустит генерацию с учётом «Тестовый прогон» выше.
+                        </p>
+                      </div>
+                      <div className="flex flex-col gap-3 sm:items-end shrink-0">
+                        <div className="flex items-center gap-3 w-full sm:w-auto justify-between sm:justify-end rounded-xl border border-[#2c2c38] bg-[#16161f]/80 px-3 py-2">
+                          <div className="text-left">
+                            <div className="text-xs font-semibold text-[#ececf4]">Подборка тем</div>
+                            <p className="text-[10px] text-[#71717a] mt-0.5 max-w-[200px] leading-snug">
+                              Вкл. — кэш и кнопка «Новые темы» (тратит токены)
+                            </p>
+                          </div>
+                          <Toggle value={mode5NeuralIdeasEnabled} onChange={setMode5NeuralIdeasEnabled} />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleSuggestMode5Ideas}
+                          disabled={
+                            !mode5NeuralIdeasEnabled || mode5IdeasLoading || step === 'launching'
+                          }
+                          className="btn-secondary shrink-0 inline-flex items-center justify-center gap-2 text-sm py-2.5 px-4 disabled:opacity-45"
+                        >
+                          <RiRefreshLine className={mode5IdeasLoading ? 'animate-spin' : ''} />
+                          {mode5IdeasLoading ? 'Обновляю…' : 'Новые темы'}
+                        </button>
+                      </div>
+                    </div>
+                    {!mode5NeuralIdeasEnabled ? (
+                      <div className="rounded-xl border border-dashed border-[#333342] bg-[#16161f]/50 px-4 py-8 text-center">
+                        <p className="text-sm text-[#71717a]">
+                          Включите «Подборка тем», чтобы загрузить сохранённые идеи или запросить новые.
+                        </p>
+                      </div>
+                    ) : mode5Ideas.length > 0 ? (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                         {mode5Ideas.map((idea, idx) => {
                           const title = String(idea?.project_title || '').trim();
                           const topicLine = String(idea?.topic || '').trim();
@@ -1322,70 +1421,86 @@ export default function Generate() {
                               type="button"
                               onClick={() => handleLaunchMode5FromIdea(idea, idx)}
                               disabled={!topicLine || step === 'launching' || mode5IdeaLaunchKey === key}
-                              className="w-full text-left rounded-lg border border-[#2b2b35] hover:border-brand-600/40 px-3 py-3 transition-colors"
+                              className="group text-left rounded-xl border border-[#2c2c38] bg-[#16161f]/90 p-4 transition-all hover:border-brand-500/45 hover:bg-[#1c1c28] hover:shadow-lg hover:shadow-brand-900/10 disabled:opacity-50 disabled:hover:border-[#2c2c38]"
                             >
-                              <div className="text-sm font-semibold text-[#f4f4fb]">
+                              <div className="text-sm font-semibold text-[#f4f4fb] group-hover:text-white leading-snug">
                                 {title || topicLine}
                               </div>
-                              {title && (
-                                <div className="text-xs text-[#a1a1aa] mt-1">{topicLine}</div>
-                              )}
-                              {hook && (
-                                <div className="text-xs text-[#71717a] mt-1 line-clamp-2">{hook}</div>
-                              )}
+                              {title ? (
+                                <div className="text-xs text-brand-400/90 mt-2 font-medium line-clamp-2">{topicLine}</div>
+                              ) : null}
+                              {hook ? (
+                                <div className="text-xs text-[#71717a] mt-2 line-clamp-2 leading-relaxed">{hook}</div>
+                              ) : null}
+                              <div className="mt-3 text-[10px] font-semibold uppercase tracking-wider text-brand-500/80 opacity-0 transition-opacity group-hover:opacity-100">
+                                Запустить →
+                              </div>
                             </button>
                           );
                         })}
                       </div>
                     ) : (
-                      <p className="text-xs text-[#71717a]">
-                        Темы пока не загружены. Нажмите «Перегенерировать темы», чтобы получить новый набор.
-                      </p>
+                      <div className="rounded-xl border border-dashed border-[#333342] bg-[#16161f]/50 px-4 py-8 text-center">
+                        <p className="text-sm text-[#71717a]">
+                          Сохранённых тем пока нет. Нажмите «Новые темы», чтобы сгенерировать подборку (расход токенов).
+                        </p>
+                      </div>
                     )}
                   </div>
                 )}
-                <div className="card p-5">
-                  <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
-                    Генерация изображений
-                  </label>
-                  <div className="flex flex-col sm:flex-row gap-2">
-                    {[
-                      { id: 'api', label: 'API', hint: 'Быстрее и стабильнее: fastgen_http' },
-                      { id: 'playwright', label: 'Playwright', hint: 'Через браузер, как в старом mode12' },
-                      { id: 'auto', label: 'Auto', hint: 'Старое автоповедение (mode13 strategy)' },
-                    ].map(({ id, label, hint }) => (
-                      <button
-                        key={id}
-                        type="button"
-                        title={hint}
-                        onClick={() => setMode5ImageBackend(id)}
-                        className={`flex-1 py-2.5 px-3 rounded-lg text-sm font-medium text-left transition-all border ${
-                          mode5ImageBackend === id
-                            ? 'bg-brand-600/20 text-brand-400 border-brand-600/40'
-                            : 'text-[#71717a] hover:text-[#e4e4f0] border-[#27272f] hover:border-[#3f3f50]'
-                        }`}
-                      >
-                        {label}
-                      </button>
-                    ))}
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <div className="rounded-2xl border border-[#2e2e3c] bg-[#121218] p-5 sm:p-6">
+                    <div className="flex items-center gap-2 mb-4">
+                      <span className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#323242] bg-[#181822] text-brand-400">
+                        <RiPaletteLine className="text-lg" aria-hidden />
+                      </span>
+                      <div>
+                        <div className="text-xs font-semibold uppercase tracking-wider text-[#a1a1aa]">
+                          Генерация изображений
+                        </div>
+                        <p className="text-[11px] text-[#52525b] mt-0.5">Бэкенд для кадров в этом запуске</p>
+                      </div>
+                    </div>
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      {[
+                        { id: 'api', label: 'API', hint: 'Быстрее и стабильнее: fastgen_http' },
+                        { id: 'playwright', label: 'Playwright', hint: 'Через браузер, как в старом mode12' },
+                      ].map(({ id, label, hint }) => (
+                        <button
+                          key={id}
+                          type="button"
+                          title={hint}
+                          onClick={() => setMode5ImageBackend(id)}
+                          className={`flex-1 rounded-xl py-3 px-3 text-sm font-semibold transition-all border ${
+                            mode5ImageBackend === id
+                              ? 'border-brand-500/50 bg-brand-600/15 text-brand-300 shadow-inner shadow-brand-900/20'
+                              : 'border-[#2b2b38] text-[#71717a] hover:border-[#404050] hover:text-[#e4e4f0] bg-[#16161f]'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-[11px] text-[#52525b] mt-3 leading-relaxed">
+                      Параметр сохраняется в теле запроса и истории сессии.
+                    </p>
                   </div>
-                  <p className="text-xs text-[#52525b] mt-2">
-                    Выбор применяется к текущему запуску mode5 и сохраняется в истории запроса.
-                  </p>
-                </div>
-                <div className="card p-5">
-                  <label className="block text-xs font-semibold text-[#71717a] uppercase tracking-wider mb-3">
-                    Заголовок проекта
-                  </label>
-                  <input
-                    className="input text-base"
-                    placeholder="Например: История Древнего Рима"
-                    value={mode5HeaderTitle}
-                    onChange={e => setMode5HeaderTitle(e.target.value)}
-                  />
-                  <p className="text-xs text-[#52525b] mt-2">
-                    Используется как подпись сессии и заголовок в review.
-                  </p>
+
+                  <div className="rounded-2xl border border-[#2e2e3c] bg-[#121218] p-5 sm:p-6 flex flex-col">
+                    <label className="text-xs font-semibold uppercase tracking-wider text-[#a1a1aa] mb-2">
+                      Заголовок проекта
+                    </label>
+                    <input
+                      className="input text-base bg-[#14141d]/90 border-[#323242]"
+                      placeholder="Например: История Древнего Рима"
+                      value={mode5HeaderTitle}
+                      onChange={e => setMode5HeaderTitle(e.target.value)}
+                    />
+                    <p className="text-[11px] text-[#71717a] leading-relaxed mt-auto pt-3">
+                      Подпись сессии и заголовок на экране review.
+                    </p>
+                  </div>
                 </div>
               </div>
             ) : mode === 6 ? (
@@ -2654,7 +2769,7 @@ export default function Generate() {
                   <div>
                     <div className="text-sm font-medium text-[#e4e4f0]">Субтитры</div>
                     <div className="text-xs text-[#71717a] mt-0.5">
-                      Показывать на слайде текст сегмента (как распознал Whisper). Тот же переключатель есть в «Настройки».
+                      Показывать на слайде текст сегмента (как распознал Whisper).
                     </div>
                   </div>
                   <Toggle value={mode13ShowSubtitles} onChange={setMode13ShowSubtitles} />
@@ -3072,157 +3187,6 @@ export default function Generate() {
               </div>
             )}
 
-            {/* Settings */}
-            <div className="card overflow-hidden">
-              <button
-                type="button"
-                onClick={() => setSettings(s => !s)}
-                className="w-full flex items-center justify-between px-5 py-3.5 text-sm text-[#71717a] hover:text-[#e4e4f0] transition-colors"
-              >
-                <div className="flex items-center gap-2">
-                  <RiSettings3Line className="text-base" />
-                  <span className="font-medium">Настройки</span>
-                </div>
-                <motion.span animate={{ rotate: showSettings ? 180 : 0 }} transition={{ duration: 0.2 }}>▾</motion.span>
-              </button>
-
-              <AnimatePresence>
-                {showSettings && (
-                  <motion.div
-                    initial={{ height: 0 }}
-                    animate={{ height: 'auto' }}
-                    exit={{ height: 0 }}
-                    className="overflow-hidden"
-                  >
-                    <div className="px-5 pb-5 border-t border-[#27272f] pt-4 space-y-4">
-                      {mode !== 3 && mode !== 4 && mode !== 6 && mode !== 7 && mode !== 8 && mode !== 9 && mode !== 10 && mode !== 11 && (
-                      <div>
-                        <div className="flex justify-between mb-2">
-                          <label className="text-xs font-medium text-[#a1a1aa]">Количество сцен</label>
-                          <span className="text-xs font-bold text-brand-400">{scenes}</span>
-                        </div>
-                        <input
-                          type="range" min={3} max={8} value={scenes}
-                          onChange={e => setScenes(+e.target.value)}
-                          className="w-full accent-brand-500"
-                        />
-                        <div className="flex justify-between text-[10px] text-[#52525b] mt-1">
-                          <span>3 (быстро)</span><span>8 (детально)</span>
-                        </div>
-                      </div>
-                      )}
-
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <div className="text-sm font-medium text-[#e4e4f0]">Только локально</div>
-                          <div className="text-xs text-[#71717a]">Не публиковать в соцсети</div>
-                        </div>
-                        <Toggle value={localOnly} onChange={setLocalOnly} />
-                      </div>
-
-                      {((mode !== 3 && mode !== 5 && mode !== 7 && mode !== 8 && mode !== 9 && mode !== 10 && mode !== 11) || mode === 4 || mode === 13) ? (
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <div className="text-sm font-medium text-[#e4e4f0]">Субтитры</div>
-                          <div className="text-xs text-[#71717a]">
-                            {mode === 4 ? 'Показывать текст реплики на видео (синхрон с речью)' : mode === 13 ? 'Показывать текст сегмента на слайде (как в сценарии)' : 'Показывать текст озвучки на видео'}
-                          </div>
-                        </div>
-                        <Toggle value={mode === 13 ? mode13ShowSubtitles : showSubtitles} onChange={mode === 13 ? setMode13ShowSubtitles : setShowSubtitles} />
-                      </div>
-                      ) : null}
-
-                      {mode !== 3 && mode !== 4 && mode !== 5 && mode !== 7 && mode !== 8 && mode !== 9 && mode !== 10 && mode !== 11 && (
-                      <div>
-                        <div className="text-sm font-medium text-[#e4e4f0] mb-2">Язык субтитров</div>
-                        <div className="text-xs text-[#71717a] mb-2">Язык озвучки и текста на видео</div>
-                        <div className="flex gap-2">
-                          <button
-                            type="button"
-                            onClick={() => setLang('ru')}
-                            title="Русский"
-                            className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-all ${
-                              lang === 'ru'
-                                ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
-                                : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
-                            }`}
-                          >
-                            RU
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setLang('en')}
-                            title="English"
-                            className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-all ${
-                              lang === 'en'
-                                ? 'bg-brand-600/20 text-brand-400 border border-brand-600/40'
-                                : 'text-[#71717a] hover:text-[#e4e4f0] border border-[#27272f] hover:border-[#3f3f50]'
-                            }`}
-                          >
-                            EN
-                          </button>
-                        </div>
-                      </div>
-                      )}
-                      {mode === 5 && (
-                      <div>
-                        <div className="text-sm font-medium text-[#e4e4f0] mb-2">Язык озвучки</div>
-                        <div className="text-xs text-[#71717a] mb-2">Определяется автоматически по тексту</div>
-                        <div className="mt-4 grid grid-cols-1 gap-4">
-                          {mode5SubMode !== 'facts50' && mode5SubMode !== 'outline' && mode5SubMode !== 'book_night' && mode5SubMode !== 'unwritten_chapter' ? (
-                            <div>
-                              <div className="text-sm font-medium text-[#e4e4f0] mb-2">Длина чанка</div>
-                              <input
-                                type="range"
-                                min="180"
-                                max="600"
-                                step="30"
-                                value={mode5ChunkSeconds}
-                                onChange={e => setMode5ChunkSeconds(Number(e.target.value))}
-                                className="w-full accent-brand-500"
-                              />
-                              <div className="text-xs text-[#71717a] mt-1">~{Math.round(mode5ChunkSeconds / 60)} мин на одну часть</div>
-                            </div>
-                          ) : mode5SubMode === 'facts50' ? (
-                            <p className="text-xs text-[#71717a]">
-                              В режиме «77 фактов» добавляются вступление и концовка (обычно 79 клипов: Intro + 77 фактов + Outro). Длина чанка не задаётся.
-                            </p>
-                          ) : mode5SubMode === 'outline' ? (
-                            <p className="text-xs text-[#71717a]">
-                              В режиме «План из описания» в большое поле — краткое описание сюжета; одна подглава = одна часть превью. Длина текста на блок считается автоматически (мало частей — длиннее блок, много — короче), суммарно — около того же, что «77 фактов».
-                            </p>
-                          ) : mode5SubMode === 'unwritten_chapter' ? (
-                            <p className="text-xs text-[#71717a]">
-                              В режиме «The Unwritten Chapter» укажите только тему. Модель построит 5–7 расследовательских блоков под 30–50 минут и подготовит озвучку по частям. Длина чанка не задаётся.
-                            </p>
-                          ) : (
-                            <p className="text-xs text-[#71717a]">
-                              В режиме «Книга на ночь» введите название книги; число превью = число подглав по оглавлению книги (не 77). Длина чанка не задаётся.
-                            </p>
-                          )}
-                          <div>
-                            <div className="text-sm font-medium text-[#e4e4f0] mb-2">Окно для одной картинки</div>
-                            <input
-                              type="range"
-                              min="15"
-                              max="60"
-                              step="5"
-                              value={mode5SegmentSeconds}
-                              onChange={e => setMode5SegmentSeconds(Number(e.target.value))}
-                              className="w-full accent-brand-500"
-                            />
-                            <div className="text-xs text-[#71717a] mt-1">Картинка меняется примерно каждые {mode5SegmentSeconds} секунд</div>
-                          </div>
-                        </div>
-                      </div>
-                      )}
-
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
-
             {/* Started in background */}
             {startedSession && (
               <motion.div
@@ -3327,7 +3291,7 @@ export default function Generate() {
                   className="btn-primary flex-1 flex items-center justify-center gap-2 text-base py-4"
                 >
                   <RiSparklingLine className="text-lg" />
-                  {mode5SubMode === 'facts50'
+                  {(mode5SubMode === 'facts50'
                     ? 'Сгенерировать 77 фактов и превью'
                     : mode5SubMode === 'outline'
                       ? 'Сгенерировать план и превью'
@@ -3335,7 +3299,7 @@ export default function Generate() {
                         ? 'Сгенерировать книгу на ночь'
                         : mode5SubMode === 'unwritten_chapter'
                           ? 'Сгенерировать расследование'
-                        : 'Запустить review long-form'}
+                          : 'Запустить review long-form') + (mode5TestRun ? ' · тест ~5 мин' : '')}
                 </button>
               ) : mode === 13 ? (
                 <button

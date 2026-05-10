@@ -329,6 +329,7 @@ export const api = {
         : '';
     return request(`/api/videos/${sid}${q}`, { method: 'DELETE' });
   },
+  clearAllVideos:     ()           => request('/api/videos', { method: 'DELETE' }),
   // Keyframe video generation (start + end frame)
   generateKeyframeVideo: (data) => request('/api/video/keyframe', { method: 'POST', body: JSON.stringify(data) }),
   regenerateVideo: (sid, opts = {}) =>

@@ -13,8 +13,13 @@ const Progress = lazy(() => import('./pages/Progress'));
 
 function Spinner() {
   return (
-    <div className="flex items-center justify-center h-full min-h-[60vh]">
-      <div className="w-8 h-8 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
+    <div className="flex flex-col items-center justify-center gap-4 h-full min-h-[60vh]">
+      <div className="relative h-12 w-12">
+        <div className="absolute inset-0 rounded-full border-2 border-white/[0.08]" />
+        <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-brand-500 border-r-brand-400/50 animate-spin" />
+        <div className="absolute inset-2 rounded-full bg-brand-500/15 blur-md" />
+      </div>
+      <p className="text-xs font-medium text-[#7c7c8e] tracking-wide">Загрузка интерфейса…</p>
     </div>
   );
 }

@@ -35,24 +35,24 @@ export default function LogConsole({ logs, className, sessionId }) {
 
   return (
     <div className={clsx(
-      'bg-[#0d0d12] border border-[#1e1e2a] rounded-xl overflow-hidden',
+      'rounded-2xl overflow-hidden border border-white/[0.06] bg-black/40 backdrop-blur-xl shadow-[0_8px_32px_-8px_rgba(0,0,0,0.55)] ring-1 ring-white/[0.03]',
       className
     )}>
       {/* Header */}
-      <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[#1e1e2a] bg-[#111117]">
+      <div className="flex items-center gap-2 px-4 py-2.5 border-b border-white/[0.06] bg-white/[0.03]">
         <div className="flex gap-1.5">
-          <div className="w-3 h-3 rounded-full bg-[#ff5f57]" />
-          <div className="w-3 h-3 rounded-full bg-[#febc2e]" />
-          <div className="w-3 h-3 rounded-full bg-[#28c840]" />
+          <div className="w-3 h-3 rounded-full bg-[#ff5f57]/95 shadow-sm" />
+          <div className="w-3 h-3 rounded-full bg-[#febc2e]/95 shadow-sm" />
+          <div className="w-3 h-3 rounded-full bg-[#28c840]/95 shadow-sm" />
         </div>
-        <span className="text-xs text-[#52525b] font-mono ml-2">{sessionLabel}.log</span>
-        <span className="ml-auto text-[10px] text-[#3f3f50] font-mono">{logs.length} lines</span>
+        <span className="text-xs text-[#7c7c8e] font-mono ml-2">{sessionLabel}.log</span>
+        <span className="ml-auto text-[10px] text-[#5c5c6e] font-mono tabular-nums">{logs.length} lines</span>
       </div>
 
       {/* Log lines */}
-      <div ref={scrollRef} className="p-4 h-80 overflow-y-auto space-y-0.5 font-mono">
+      <div ref={scrollRef} className="p-4 h-80 overflow-y-auto space-y-0.5 font-mono scrollbar-subtle">
         {logs.length === 0 ? (
-          <div className="text-[#3f3f50] text-xs">Waiting for pipeline to start...</div>
+          <div className="text-[#5c5c6e] text-xs">Waiting for pipeline to start...</div>
         ) : (
           logs.map((log, i) => (
             <div key={i} className="flex gap-2">

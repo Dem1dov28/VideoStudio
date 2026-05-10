@@ -91,6 +91,176 @@ Return strict JSON only:
 {{"prompt":"..."}}
 """
 
+# Fixed creative shell for facts50 ("77 facts") publish thumbnails — only scene/title slots vary (English on-image copy).
+_FACTS50_THUMBNAIL_TEMPLATE = (
+    "A high-quality, whimsical YouTube thumbnail in a soft cartoon style inspired by Studio Ghibli. "
+    "The scene is {night_scene}. {landmark_sentence} "
+    "In the left half, there is a large, clean negative space for text. "
+    "Integrated into this space is large, bold typography using a friendly, rounded, bubble-like font "
+    "(white with a soft dark blue outline). "
+    'The text reads: "{overlay_title}" (arranged in two lines, with \'77\' being the largest). '
+    "Below it, in a slightly smaller, distinct font within a soft blue banner, the text reads: \"FOR SLEEP\". "
+    "Small, cute sleeping star icons surround the text. "
+    "The overall color palette is deep sapphire, warm amber glows, and pastel purples. "
+    "Magical, relaxing atmosphere. 16:9 aspect ratio, cinematic lighting, zero clutter."
+)
+
+_FACTS50_THUMB_FIELDS_PROMPT = """You fill thumbnail variables for a sleep-oriented \"77 facts\" YouTube video.
+
+Headline/topic (may be Russian or English):
+{topic}
+
+Return strict JSON only with keys:
+- "night_scene": short phrase starting with \"a serene, starry night\" and naming the real-world place (city/region) that matches the topic (English).
+- "landmark_sentence": ONE English sentence: a stylized gently glowing recognizable landmark from that place stands under a massive smiling crescent moon (match topic; no unrelated countries).
+- "overlay_title": English uppercase thumbnail title, format like \"77 FRANCE FACTS\" or \"77 RUSSIA FACTS\" — always starts with 77, ends with FACTS, middle words summarize the topic geography/theme in English (max ~28 chars for the middle part).
+
+Example for France topic: night_scene \"a serene, starry night in Paris\", landmark_sentence \"A stylized, gently glowing Eiffel Tower stands under a massive, smiling crescent moon.\", overlay_title \"77 FRANCE FACTS\".
+
+JSON only, no markdown.
+"""
+
+_MODE5_BOOK_THUMBNAIL_SUBMODES = frozenset({"book_night", "unwritten_chapter"})
+
+# Same thumbnail grammar as facts50 (Ghibli-like whimsical night + typography + FOR SLEEP), adapted for sleep-reading books; cover is mandatory.
+_BOOK_THUMBNAIL_TEMPLATE = (
+    "A high-quality, whimsical YouTube thumbnail in a soft cartoon style inspired by Studio Ghibli. "
+    "The scene is {night_scene}. {cover_sentence} "
+    "The composition MUST include one clear, prominent illustrated book cover angled slightly toward the viewer "
+    "(whimsical painterly faux-cover art that evokes this specific book's themes and palette — iconic imagery only, "
+    "no tiny readable paragraphs on the cover; title wording belongs only in the overlay typography area). "
+    "In the left half, there is a large, clean negative space for text. "
+    "Integrated into this space is large, bold typography using a friendly, rounded, bubble-like font "
+    "(white with a soft dark blue outline). "
+    'The text reads: "{overlay_title}" (arranged in two lines; emphasize the book title naturally). '
+    "Below it, in a slightly smaller, distinct font within a soft blue banner, the text reads: \"FOR SLEEP\". "
+    "Small, cute sleeping star icons surround the text. "
+    "The overall color palette is deep sapphire, warm amber glows, and pastel purples with cozy reading-lamp warmth on the book. "
+    "Magical, relaxing bedtime-story atmosphere. 16:9 aspect ratio, cinematic lighting, zero clutter."
+)
+
+_BOOK_THUMB_FIELDS_PROMPT = """You fill thumbnail variables for a sleep-oriented long-form video based on a BOOK (bedtime listen / slow narration).
+
+Headline / book topic (may be Russian or English, may include author):
+{topic}
+
+Return strict JSON only with keys:
+- "night_scene": short English phrase — magical serene starry night mood tailored to reading this book (cozy nook, bedside table, quiet library bay window under moonlight, etc.); must feel calm and sleep-friendly.
+- "cover_sentence": ONE English sentence describing how the illustrated book cover appears as the hero focal prop (soft glowing edges, gentle tilt, warm lamp or moonlight catching it). Optionally include a massive smiling crescent moon in soft focus through a window or above shelves — keep harmonious with a dreamy thumbnail.
+- "overlay_title": English uppercase thumbnail hook derived from the BOOK TITLE only (not author): compact like \"ATOMIC HABITS\" or \"THE SILMARILLION\" — maximum ~26 characters total including spaces; if title is long, abbreviate to strongest 2–4 recognizable words.
+
+JSON only, no markdown.
+"""
+
+
+def _book_thumbnail_fallback_fields(topic: str) -> tuple[str, str, str]:
+    raw = re.sub(r"\s+", " ", str(topic or "").strip())
+    words = re.findall(r"[A-Za-zÀ-ÿА-Яа-яІіЇїЄєҐґ0-9]+", raw)
+    if words:
+        overlay = " ".join(words[:5]).upper()
+        if len(overlay) > 26:
+            overlay = overlay[:26].rsplit(" ", 1)[0] if " " in overlay[:26] else overlay[:26]
+    else:
+        overlay = "BEDTIME READ"
+    night = (
+        "a serene, starry night in a cozy reading nook with warm lamplight and shelves softly fading into violet shadow"
+    )
+    cover = (
+        "A tilted illustrated book cover glows as the focal prop beside tea steam and drifting dust motes, "
+        "while a gentle crescent moon smiles through the window."
+    )
+    return night, cover, overlay
+
+
+async def _book_modes_thumbnail_prompt(topic: str) -> str:
+    base_topic = re.sub(r"\s+", " ", str(topic or "").strip())[:400] or "Book night"
+    night_scene, cover_sentence, overlay_title = _book_thumbnail_fallback_fields(base_topic)
+    try:
+        model = getattr(settings, "openrouter_model", None)
+        llm = make_llm(temperature=0.38, model=model, max_tokens=420)
+        response = await asyncio.wait_for(
+            llm.ainvoke(
+                [
+                    SystemMessage(content="You return only valid JSON objects. No markdown."),
+                    HumanMessage(content=_BOOK_THUMB_FIELDS_PROMPT.format(topic=base_topic)),
+                ]
+            ),
+            timeout=28.0,
+        )
+        data = _extract_json_dict(response.content if hasattr(response, "content") else str(response))
+        if isinstance(data, dict):
+            ns = re.sub(r"\s+", " ", str(data.get("night_scene") or "").strip())
+            cs = re.sub(r"\s+", " ", str(data.get("cover_sentence") or "").strip())
+            ot = re.sub(r"\s+", " ", str(data.get("overlay_title") or "").strip()).upper()
+            if ns and cs and ot and 3 <= len(ot) <= 34:
+                night_scene, cover_sentence, overlay_title = ns, cs, ot
+    except Exception as e:
+        logger.warning(f"[Mode5 Thumbnail] book_modes field LLM fallback: {e}")
+    if not cover_sentence.endswith("."):
+        cover_sentence = cover_sentence + "."
+    return _BOOK_THUMBNAIL_TEMPLATE.format(
+        night_scene=night_scene,
+        cover_sentence=cover_sentence.strip(),
+        overlay_title=overlay_title.replace('"', "").strip(),
+    )
+
+
+def _facts50_thumbnail_fallback_fields(topic: str) -> tuple[str, str, str]:
+    """Cheap fallback when LLM fails: generic night + moon + title from topic words."""
+    raw = re.sub(r"\s+", " ", str(topic or "").strip())
+    stripped = re.sub(
+        r"(?i)^\s*(77\s*)?(facts|фактов)\s*(about|о|об)?\s*",
+        "",
+        raw,
+    ).strip(" —–-:|")
+    words = re.findall(r"[A-Za-zÀ-ÿА-Яа-яІіЇїЄєҐґ]+", stripped)
+    if words:
+        mid = " ".join(words[:4]).upper()
+        if len(mid) > 36:
+            mid = mid[:36].rsplit(" ", 1)[0] if " " in mid[:36] else mid[:36]
+        overlay = f"77 {mid} FACTS"
+    else:
+        overlay = "77 CALM FACTS"
+    night = "a serene, starry night tied to the video topic"
+    landmark = (
+        "A stylized, gently glowing iconic landmark suggested by the topic "
+        "stands under a massive, smiling crescent moon."
+    )
+    return night, landmark, overlay[:44]
+
+
+async def _facts50_thumbnail_prompt(topic: str) -> str:
+    base_topic = re.sub(r"\s+", " ", str(topic or "").strip())[:400] or "77 facts"
+    night_scene, landmark_sentence, overlay_title = _facts50_thumbnail_fallback_fields(base_topic)
+    try:
+        model = getattr(settings, "openrouter_model", None)
+        llm = make_llm(temperature=0.35, model=model, max_tokens=400)
+        response = await asyncio.wait_for(
+            llm.ainvoke(
+                [
+                    SystemMessage(content="You return only valid JSON objects. No markdown."),
+                    HumanMessage(content=_FACTS50_THUMB_FIELDS_PROMPT.format(topic=base_topic)),
+                ]
+            ),
+            timeout=25.0,
+        )
+        data = _extract_json_dict(response.content if hasattr(response, "content") else str(response))
+        if isinstance(data, dict):
+            ns = re.sub(r"\s+", " ", str(data.get("night_scene") or "").strip())
+            ls = re.sub(r"\s+", " ", str(data.get("landmark_sentence") or "").strip())
+            ot = re.sub(r"\s+", " ", str(data.get("overlay_title") or "").strip()).upper()
+            if ns and ls and ot and ot.startswith("77") and "FACTS" in ot:
+                night_scene, landmark_sentence, overlay_title = ns, ls, ot
+    except Exception as e:
+        logger.warning(f"[Mode5 Thumbnail] facts50 field LLM fallback: {e}")
+    if not landmark_sentence.endswith("."):
+        landmark_sentence = landmark_sentence + "."
+    return _FACTS50_THUMBNAIL_TEMPLATE.format(
+        night_scene=night_scene,
+        landmark_sentence=landmark_sentence.strip(),
+        overlay_title=overlay_title.replace('"', "").strip(),
+    )
+
 
 def _fallback_publish(topic: str, language: str) -> dict[str, Any]:
     t = re.sub(r"\s+", " ", str(topic or "").strip()) or ("Успокаивающие факты для сна" if language == "ru" else "Calming Facts for Sleep")
@@ -204,6 +374,11 @@ async def generate_mode5_thumbnail_prompt(
 ) -> str:
     base_topic = re.sub(r"\s+", " ", str(topic or "").strip())[:220] or "Sleep facts video"
     sub_mode_clean = re.sub(r"\s+", " ", str(sub_mode or "").strip())[:80] or "manual"
+    sm_low = sub_mode_clean.strip().lower()
+    if sm_low == "facts50":
+        return await _facts50_thumbnail_prompt(base_topic)
+    if sm_low in _MODE5_BOOK_THUMBNAIL_SUBMODES:
+        return await _book_modes_thumbnail_prompt(base_topic)
     if re.search(r"\bfacts?\b", base_topic, flags=re.IGNORECASE):
         title_overlay_hint = base_topic.upper()
     else:

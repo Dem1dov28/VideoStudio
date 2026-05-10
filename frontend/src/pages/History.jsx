@@ -7,6 +7,7 @@ import {
   RiCloseLine,
   RiFileCopyLine,
   RiRestartLine,
+  RiDeleteBinLine,
 } from 'react-icons/ri';
 import { api } from '../services/api';
 import VideoCard from '../components/VideoCard';
@@ -67,6 +68,7 @@ export default function History() {
   const [selected, setSelected] = useState(null);
   const [regenBusy, setRegenBusy] = useState(false);
   const [mode5AssembleBusy, setMode5AssembleBusy] = useState(false);
+  const [clearAllBusy, setClearAllBusy] = useState(false);
   const [ytStatus, setYtStatus] = useState(null);
   /** Пока true — не полагаемся на ytStatus (быстрый первый paint без «пропавшей» кнопки). */
   const [ytLoading, setYtLoading] = useState(true);
@@ -195,7 +197,37 @@ export default function History() {
         animate={{ opacity: 1, y: 0 }}
         className="mb-8"
       >
-        <h1 className="text-2xl font-bold text-white mb-1">История видео</h1>
+        <div className="flex flex-wrap items-start justify-between gap-3 mb-1">
+          <h1 className="text-2xl font-bold text-white">История видео</h1>
+          {videos.length > 0 && !loading && !networkError && (
+            <button
+              type="button"
+              disabled={clearAllBusy}
+              onClick={async () => {
+                if (
+                  !confirm(
+                    `Удалить все ${videos.length} видео с диска и убрать их из журнала тем? Действие необратимо.`,
+                  )
+                )
+                  return;
+                setClearAllBusy(true);
+                try {
+                  await api.clearAllVideos();
+                  setSelected(null);
+                  load();
+                } catch (err) {
+                  alert(err.message || 'Не удалось очистить историю');
+                } finally {
+                  setClearAllBusy(false);
+                }
+              }}
+              className="flex items-center gap-2 text-sm font-medium px-3 py-2 rounded-xl border border-red-900/50 bg-red-950/25 text-red-300 hover:bg-red-950/40 hover:border-red-800/60 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+            >
+              <RiDeleteBinLine className="text-lg shrink-0" />
+              {clearAllBusy ? 'Удаляем…' : 'Очистить всё'}
+            </button>
+          )}
+        </div>
         <p className="text-[#71717a] text-sm">
           {videos.length} видео сгенерировано
         </p>

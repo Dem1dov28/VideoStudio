@@ -2455,6 +2455,52 @@ async def list_videos():
     return {"videos": data}
 
 
+@app.delete("/api/videos")
+async def delete_all_videos():
+    """Удалить все видео из каталога и соответствующие записи в topics_history."""
+    import shutil
+
+    from agents.topics_history import remove_topic
+
+    videos_dir = settings.videos_dir
+    sessions_removed: set[str] = set()
+
+    if videos_dir.exists():
+        for mp4 in list(videos_dir.glob("video_*.mp4")):
+            try:
+                sid = mp4.stem.replace("video_", "")
+                if sid:
+                    sessions_removed.add(sid)
+                mp4.unlink()
+            except Exception as ex:
+                logger.warning(f"[API DELETE /videos] flat unlink {mp4}: {ex}")
+
+        for session_dir in list(videos_dir.iterdir()):
+            if not session_dir.is_dir() or session_dir.name.startswith("_"):
+                continue
+            sid = session_dir.name
+            try:
+                shutil.rmtree(session_dir)
+                sessions_removed.add(sid)
+            except Exception as ex:
+                logger.warning(f"[API DELETE /videos] rmtree {session_dir}: {ex}")
+
+    topics_entries_removed = 0
+    for sid in sessions_removed:
+        if remove_topic(sid):
+            topics_entries_removed += 1
+
+    logger.info(
+        f"[API DELETE /videos] cleared sessions={len(sessions_removed)}, "
+        f"topics_rows_removed={topics_entries_removed}",
+    )
+    return {
+        "deleted": True,
+        "sessions": len(sessions_removed),
+        "topics_entries_removed": topics_entries_removed,
+    }
+
+
 def _read_google_credential_token_for_revoke(path: Path) -> str | None:
     """refresh_token (лучше) или access token из JSON от google.auth."""
     if not path.is_file():

@@ -115,7 +115,8 @@ export function applyStartRequestToForm(req, f, options = {}) {
     const mpi = Number(req.mode5_max_parallel_images);
     if (Number.isFinite(mpi) && mpi >= 1) f.setMode5MaxParallelImages?.(Math.min(10, mpi));
     const ib = String(req.mode5_image_backend || '').trim().toLowerCase();
-    if (ib === 'api' || ib === 'playwright' || ib === 'auto') f.setMode5ImageBackend?.(ib);
+    if (ib === 'api' || ib === 'playwright') f.setMode5ImageBackend?.(ib);
+    else if (ib === 'auto') f.setMode5ImageBackend?.('api');
     if (typeof req.mode5_video_header_title === 'string') f.setMode5HeaderTitle?.(req.mode5_video_header_title);
     const sm5 = req.mode5_sub_mode;
     if (
@@ -130,6 +131,8 @@ export function applyStartRequestToForm(req, f, options = {}) {
     }
     else if (req.mode5_bible_mode === true) f.setMode5SubMode?.('bible');
     else f.setMode5SubMode?.('manual');
+    if (req.mode5_test_run === true) f.setMode5TestRun?.(true);
+    else if (req.mode5_test_run === false) f.setMode5TestRun?.(false);
   }
 
   if (m === 6) {
