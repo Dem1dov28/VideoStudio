@@ -40,6 +40,14 @@ const HOUSE_TYPES = [
 
 /** Синхронно с modes/mode5/outline_generator.MIN_OUTLINE_BRIEF_CHARS */
 const MODE5_OUTLINE_MIN_BRIEF_CHARS = 40;
+const MODE5_LANGUAGE_OPTIONS = [
+  { id: 'auto', label: 'Авто' },
+  { id: 'ru', label: 'Русский' },
+  { id: 'en', label: 'English' },
+  { id: 'es', label: 'Español' },
+  { id: 'fr', label: 'Français' },
+  { id: 'de', label: 'Deutsch' },
+];
 
 /** Карточки подрежима 5 — иконки и короткие подписи для сетки выбора */
 const MODE5_SUBMODE_DEFS = [
@@ -257,6 +265,7 @@ export default function Generate() {
   const [mode5SegmentSeconds, setMode5SegmentSeconds] = useState(15);
   const [mode5ImageBackend, setMode5ImageBackend] = useState('api'); // api | playwright
   const [mode5HeaderTitle, setMode5HeaderTitle] = useState('');
+  const [mode5Lang, setMode5Lang] = useState('auto');
   const [mode5SubMode, setMode5SubMode] = useState('manual');
   const [mode5Ideas, setMode5Ideas] = useState([]);
   const [mode5IdeasLoading, setMode5IdeasLoading] = useState(false);
@@ -390,6 +399,7 @@ export default function Generate() {
       setMode4LocationHint,
       setMode4LocationOptions,
       setMode5Script,
+      setMode5Lang,
       setMode5ChunkSeconds,
       setMode5SegmentSeconds,
       setMode5ImageBackend,
@@ -646,9 +656,9 @@ export default function Generate() {
         show_watermark: false,
         scenario: null,
         mode: 5,
-        language: 'auto',
+        language: mode5Lang,
         mode5_script_text: scriptTrim,
-        mode5_language: 'auto',
+        mode5_language: mode5Lang,
         mode5_chunk_seconds: mode5ChunkSeconds,
         mode5_segment_seconds: mode5SegmentSeconds,
         mode5_image_backend: mode5ImageBackend,
@@ -1450,6 +1460,30 @@ export default function Generate() {
                 )}
 
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <div className="rounded-2xl border border-[#2e2e3c] bg-[#121218] p-5 sm:p-6">
+                    <div className="text-xs font-semibold uppercase tracking-wider text-[#a1a1aa] mb-3">
+                      Язык генерации
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      {MODE5_LANGUAGE_OPTIONS.map(({ id, label }) => (
+                        <button
+                          key={id}
+                          type="button"
+                          onClick={() => setMode5Lang(id)}
+                          className={`rounded-xl py-2.5 px-3 text-sm font-semibold transition-all border ${
+                            mode5Lang === id
+                              ? 'border-brand-500/50 bg-brand-600/15 text-brand-300 shadow-inner shadow-brand-900/20'
+                              : 'border-[#2b2b38] text-[#71717a] hover:border-[#404050] hover:text-[#e4e4f0] bg-[#16161f]'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-[11px] text-[#71717a] mt-3 leading-relaxed">
+                      Выбранный язык применяется к тексту, озвучке и метаданным mode 5.
+                    </p>
+                  </div>
                   <div className="rounded-2xl border border-[#2e2e3c] bg-[#121218] p-5 sm:p-6">
                     <div className="flex items-center gap-2 mb-4">
                       <span className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#323242] bg-[#181822] text-brand-400">

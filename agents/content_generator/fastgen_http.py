@@ -1094,6 +1094,7 @@ async def generate_video_from_keyframes(
     end_frame_path: Path,
     index: int = 0,
     *,
+    cancel_event: threading.Event | None = None,
     video_aspect_ratio: str | None = None,
 ) -> Path | None:
     _require_base()
@@ -1107,7 +1108,7 @@ async def generate_video_from_keyframes(
             output_dir,
             index,
             None,
-            None,
+            cancel_event,
             mode4_veo_flow_flower=False,
             keyframes=True,
             start_frame=Path(start_frame_path),

@@ -106,8 +106,8 @@ export function applyStartRequestToForm(req, f, options = {}) {
 
   if (m === 5) {
     if (typeof req.mode5_script_text === 'string') f.setMode5Script?.(req.mode5_script_text);
-    if (req.mode5_language === 'ru' || req.mode5_language === 'en' || req.mode5_language === 'auto') f.setMode5Lang?.(req.mode5_language);
-    else if (req.language === 'ru' || req.language === 'en' || req.language === 'auto') f.setMode5Lang?.(req.language);
+    if (['ru', 'en', 'es', 'fr', 'de', 'auto'].includes(req.mode5_language)) f.setMode5Lang?.(req.mode5_language);
+    else if (['ru', 'en', 'es', 'fr', 'de', 'auto'].includes(req.language)) f.setMode5Lang?.(req.language);
     const cs = Number(req.mode5_chunk_seconds);
     if (Number.isFinite(cs) && cs >= 120) f.setMode5ChunkSeconds?.(Math.min(900, cs));
     const ss = Number(req.mode5_segment_seconds);

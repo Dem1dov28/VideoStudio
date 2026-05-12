@@ -136,6 +136,63 @@ def _norm_word_align(w: str) -> str:
     return raw[:1] if raw else "\u200b"
 
 
+def _alignment_parts_for_display_words(words: list[str]) -> tuple[list[str], list[tuple[int, int]]]:
+    """
+    Экранные токены могут быть склейками коротких слов: "of teachers", "a long".
+    Whisper возвращает эти слова отдельно, поэтому выравниваем по внутренним частям,
+    а потом схлопываем интервалы обратно к экранному токену.
+    """
+    parts: list[str] = []
+    spans: list[tuple[int, int]] = []
+    for word in words:
+        start = len(parts)
+        raw_parts = [p for p in str(word or "").split() if p.strip()]
+        if not raw_parts:
+            raw_parts = [str(word or "")]
+        for part in raw_parts:
+            parts.append(_norm_word_align(part))
+        spans.append((start, len(parts)))
+    return parts, spans
+
+
+def _collapse_part_times_to_display_words(
+    part_times: list[tuple[float, float]],
+    spans: list[tuple[int, int]],
+) -> list[tuple[float, float]] | None:
+    if not part_times:
+        return None
+    out: list[tuple[float, float]] = []
+    for start, end in spans:
+        if start < 0 or end <= start or end > len(part_times):
+            return None
+        out.append((float(part_times[start][0]), float(part_times[end - 1][1])))
+    return out
+
+
+def _script_alignment_head_timeline_skewed(
+    aligned: list[tuple[float, float]],
+    word_timestamps: list[tuple[float, float]],
+    *,
+    n_script: int,
+) -> bool:
+    """
+    Если первые ~25% слов скрипта по выравниванию укладываются в доли секунды на общей
+    шкале речи Whisper, пословный SequenceMatcher почти наверняка склеил начало фразы в
+    один короткий чанк — подсветка «перелетает» к середине («pray … a long time»).
+    """
+    if n_script < 12 or len(aligned) != n_script or len(word_timestamps) < 2:
+        return False
+    t_audio0 = float(word_timestamps[0][0])
+    t_audio1 = float(word_timestamps[-1][1])
+    span = t_audio1 - t_audio0
+    if span < 1.0:
+        return False
+    q = max(3, n_script // 4)
+    t_q_end = float(aligned[q - 1][1])
+    head_frac = (t_q_end - t_audio0) / span
+    return head_frac < 0.088
+
+
 def _align_script_to_whisper_proportional(
     script_words: list[str],
     word_timestamps: list[tuple[float, float]],
@@ -212,6 +269,69 @@ def _enforce_monotonic_word_times(
             b = a + eps
         out.append((a, b))
     return out
+
+
+def sanitize_quote_word_timestamps_for_display(
+    ts: list[tuple[float, float]],
+    duration: float,
+    *,
+    min_span: float = 0.056,
+    max_gap: float = 0.42,
+    max_passes: int = 8,
+) -> list[tuple[float, float]]:
+    """
+    Лёгкая постобработка после align_script_to_whisper.
+
+    Раньше здесь «схлопывали» большие зазоры между словами (ставили следующее слово
+    ближе по времени). Это убирало залипание подсветки в паузах, но сдвигало *start*
+    следующего слова раньше реальной речи — после первой части абзаца или второго клипа
+    накапливался явный рассинхрон («каша»).
+
+    Сейчас: только монотонность, слегка удлиняем слишком короткие интервалы за счёт
+    зазора *до следующего слова* (не трогаем start следующего слова) и хвоста клипа.
+    Большие паузы в распознавании Whisper остаются — подсветка может чуть запаздывать
+    в паузе, зато не опережает голос.
+    """
+    if not ts or duration <= 0.02:
+        return ts
+    out = [(float(a), float(b)) for a, b in ts]
+    out = _enforce_monotonic_word_times(out)
+
+    for _ in range(max_passes):
+        out = _enforce_monotonic_word_times(out)
+        changed = False
+        for i in range(len(out)):
+            a, b = out[i]
+            if b - a >= min_span - 1e-9:
+                continue
+            need = min_span - (b - a)
+            if i + 1 < len(out):
+                na, nb = out[i + 1]
+                gap = na - b
+                floor_gap = min(max_gap * 0.5, 0.12)
+                take = min(need, max(0.0, gap - floor_gap))
+                if take <= 1e-9:
+                    continue
+                out[i] = (a, b + take)
+                changed = True
+            else:
+                tail = duration - b
+                take = min(need, max(0.0, tail - 0.035))
+                if take <= 1e-9:
+                    continue
+                out[i] = (a, b + take)
+                changed = True
+        if not changed:
+            break
+
+    out = _enforce_monotonic_word_times(out)
+    eps = 0.015
+    fixed: list[tuple[float, float]] = []
+    for a, b in out:
+        a = max(0.0, min(a, max(0.0, duration - eps * 2)))
+        b = max(a + 0.032, min(b, duration))
+        fixed.append((a, b))
+    return _enforce_monotonic_word_times(fixed)
 
 
 def _enforce_min_word_span(
@@ -298,20 +418,47 @@ def align_script_to_whisper(
     """
     Сопоставляет слова скрипта (после merge коротких) с таймкодами Whisper.
     Сначала выравнивание по тексту (SequenceMatcher), иначе — пропорциональный fallback.
+
+    Сначала разворачивает экранные склейки коротких слов ("of the", "a long") в
+    внутренние части, сопоставимые с токенами Whisper. Иначе даже идеальный транскрипт
+    получает низкий ratio и ошибочно уходит в пропорциональный fallback.
     """
+    # Ниже этого порога пословное выравнивание чаще ломает тайминг, чем помогает.
+    _MIN_TEXT_MATCH_RATIO = 0.78
+
     if not word_timestamps or not script_words:
         return None
-    K, N = len(word_timestamps), len(script_words)
+    K = len(word_timestamps)
+    align_words, display_spans = _alignment_parts_for_display_words(script_words)
+    N = len(align_words)
+    if not align_words:
+        return None
     if whisper_words is None or len(whisper_words) != K:
-        raw = _align_script_to_whisper_proportional(script_words, word_timestamps)
-        return _enforce_monotonic_word_times(raw) if raw else None
+        raw = _align_script_to_whisper_proportional(align_words, word_timestamps)
+        if not raw:
+            return None
+        collapsed = _collapse_part_times_to_display_words(
+            _enforce_monotonic_word_times(raw), display_spans
+        )
+        return _enforce_monotonic_word_times(collapsed) if collapsed else None
 
-    seq_a = [_norm_word_align(w) for w in script_words]
+    seq_a = align_words
     seq_b = [_norm_word_align(w) for w in whisper_words]
     if N == K and seq_a == seq_b:
-        return _enforce_monotonic_word_times(list(word_timestamps))
+        collapsed = _collapse_part_times_to_display_words(
+            _enforce_monotonic_word_times(list(word_timestamps)), display_spans
+        )
+        return _enforce_monotonic_word_times(collapsed) if collapsed else None
 
     sm = SequenceMatcher(a=seq_a, b=seq_b, autojunk=False)
+    if sm.ratio() < _MIN_TEXT_MATCH_RATIO:
+        raw = _align_script_to_whisper_proportional(align_words, word_timestamps)
+        if not raw:
+            return None
+        collapsed = _collapse_part_times_to_display_words(
+            _enforce_monotonic_word_times(raw), display_spans
+        )
+        return _enforce_monotonic_word_times(collapsed) if collapsed else None
     result: list[tuple[float, float] | None] = [None] * N
     pending_lead_start: float | None = None
 
@@ -323,7 +470,7 @@ def align_script_to_whisper(
                     float(word_timestamps[j1 + di][1]),
                 )
         elif tag == "replace":
-            ws = script_words[i1:i2]
+            ws = align_words[i1:i2]
             chunk = word_timestamps[j1:j2]
             if not chunk or not ws:
                 continue
@@ -333,12 +480,32 @@ def align_script_to_whisper(
             else:
                 weights = [max(1, len(_norm_word_align(w)) or 1) for w in ws]
                 total_w = sum(weights)
-                cur = t0
                 span = max(t1w - t0, 0.02)
+                nws = len(ws)
+                # Нижняя доля чанка на каждое слово скрипта — иначе 5–15 слов в 0.15–0.25 с
+                # дают «пролёт» подсветки и длинную паузу до следующего токена Whisper.
+                floor_each = min(0.10, span / max(nws, 1) * 1.65)
+                if floor_each * nws > span - 1e-9:
+                    floor_each = span / nws
+                remainder = max(0.0, span - floor_each * nws)
+                durs: list[float] = []
                 for idx, w in enumerate(ws):
-                    dur = span * (weights[idx] / total_w)
-                    result[i1 + idx] = (cur, cur + dur)
-                    cur += dur
+                    share = (weights[idx] / total_w) if total_w else 1.0 / nws
+                    durs.append(max(0.032, floor_each + remainder * share))
+                tot = sum(durs)
+                if tot > span + 1e-9:
+                    sf = span / tot
+                    durs = [max(0.03, d * sf) for d in durs]
+                    tot2 = sum(durs)
+                    if tot2 < span - 1e-9:
+                        durs[-1] += span - tot2
+                cur = t0
+                for idx in range(nws):
+                    ne = t1w if idx == nws - 1 else min(t1w, cur + durs[idx])
+                    if ne <= cur + 0.028:
+                        ne = min(t1w, cur + 0.036)
+                    result[i1 + idx] = (cur, ne)
+                    cur = ne
         elif tag == "insert":
             if j2 <= j1:
                 continue
@@ -388,15 +555,35 @@ def align_script_to_whisper(
         elif next_t:
             result[i] = (max(0.0, next_t[0] - 0.08), next_t[0])
         else:
-            raw = _align_script_to_whisper_proportional(script_words, word_timestamps)
-            return _enforce_monotonic_word_times(raw) if raw else None
+            raw = _align_script_to_whisper_proportional(align_words, word_timestamps)
+            if not raw:
+                return None
+            collapsed = _collapse_part_times_to_display_words(
+                _enforce_monotonic_word_times(raw), display_spans
+            )
+            return _enforce_monotonic_word_times(collapsed) if collapsed else None
 
     if any(r is None for r in result):
-        raw = _align_script_to_whisper_proportional(script_words, word_timestamps)
-        return _enforce_monotonic_word_times(raw) if raw else None
+        raw = _align_script_to_whisper_proportional(align_words, word_timestamps)
+        if not raw:
+            return None
+        collapsed = _collapse_part_times_to_display_words(
+            _enforce_monotonic_word_times(raw), display_spans
+        )
+        return _enforce_monotonic_word_times(collapsed) if collapsed else None
 
     out = [(float(a), float(b)) for a, b in result]
-    return _enforce_monotonic_word_times(out)
+    out = _enforce_monotonic_word_times(out)
+    if _script_alignment_head_timeline_skewed(out, word_timestamps, n_script=N):
+        raw = _align_script_to_whisper_proportional(align_words, word_timestamps)
+        if not raw:
+            return None
+        collapsed = _collapse_part_times_to_display_words(
+            _enforce_monotonic_word_times(raw), display_spans
+        )
+        return _enforce_monotonic_word_times(collapsed) if collapsed else None
+    collapsed = _collapse_part_times_to_display_words(out, display_spans)
+    return _enforce_monotonic_word_times(collapsed) if collapsed else None
 
 
 def _active_word_index(
@@ -622,6 +809,9 @@ def _render_subtitle_timed_plain(
         return np.array(img)
     if ts_for_display and len(ts_for_display) == len(words):
         ts_for_display = _enforce_min_word_span(ts_for_display, float(duration))
+        ts_for_display = sanitize_quote_word_timestamps_for_display(
+            ts_for_display, float(duration)
+        )
 
     active_index = _active_word_index(t, duration, words, ts_for_display)
     max_text_w = int(width * dt.SUBTITLE_MAX_WIDTH_FRAC) - 2 * dt.SUBTITLE_PAD_X
@@ -766,6 +956,9 @@ def render_subtitle_overlay(
 
     if ts_for_display and len(ts_for_display) == len(words):
         ts_for_display = _enforce_min_word_span(ts_for_display, float(duration))
+        ts_for_display = sanitize_quote_word_timestamps_for_display(
+            ts_for_display, float(duration)
+        )
 
     preroll = bool(
         ts_for_display and len(ts_for_display) > 0 and t < float(ts_for_display[0][0])
@@ -1030,6 +1223,9 @@ def render_mode4_quote_karaoke_overlay(
 
     if ts_for_display and len(ts_for_display) == len(words):
         ts_for_display = _enforce_min_word_span(ts_for_display, float(duration))
+        ts_for_display = sanitize_quote_word_timestamps_for_display(
+            ts_for_display, float(duration)
+        )
 
     max_text_w = int(width * dt.SUBTITLE_MAX_WIDTH_FRAC) - 2 * dt.SUBTITLE_PAD_X
     lines: list[list[tuple[str, int]]] = []

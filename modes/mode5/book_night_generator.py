@@ -171,7 +171,9 @@ async def _expand_one_book_night_narration(
             f"You lengthen ONE calm sleep-time audiobook paragraph. Output language: {lang_name} only.\n"
             f"The paragraph must be at least {floor} characters (plain letters/spaces/punctuation — not counting filler).\n"
             "Keep the same ideas and tone; do NOT add new statistics, named studies, dates, dialogue, long quotes, or invented book details. "
-            "You may add: gentle transitions, reframing the same thought in other words, sensory atmosphere, and a softer closing. "
+            "You may add: one clarifying angle, one concrete everyday implication, gentle transitions, and a softer closing. "
+            "Do not loop the same thesis with synonyms. "
+            "Avoid decorative metaphor chains and avoid cliche poetic images. "
             "One continuous paragraph, no bullet points, no title line, no markdown fences."
         )
     )
@@ -292,6 +294,63 @@ async def _dedupe_book_night_neighboring_blocks(
                 logger.info(f"[Mode5 book_night] Deduped neighboring subsection {idx + 1} (overlap={score:.3f})")
         except Exception as e:
             logger.warning(f"[Mode5 book_night] Neighbor dedup skipped for subsection {idx + 1}: {e}")
+    return out
+
+
+async def _tighten_book_night_narrations(
+    items: list[str],
+    *,
+    flat_rows: list[dict[str, Any]],
+    lang_name: str,
+    book_query: str,
+    narr_lo: int,
+    narr_hi: int,
+) -> list[str]:
+    """
+    Сжимает избыточные абзацы: убирает повторы, метафорическую «воду» и выравнивает ритм.
+    """
+    out = list(items)
+    target_mid = max(900, (int(narr_lo) + int(narr_hi)) // 2)
+    for idx, text in enumerate(out):
+        base = (text or "").replace(NONSPOKEN_LEN_FILLER_CHAR, "").strip()
+        if not base:
+            continue
+        if len(base) < int(target_mid * 1.08):
+            continue
+        row = flat_rows[idx] if idx < len(flat_rows) else {}
+        sys = SystemMessage(
+            content=(
+                f"You are a strict nonfiction editor for calm narration. Output language: {lang_name} only.\n"
+                "Rewrite ONE paragraph to be tighter and clearer while preserving meaning and tone.\n"
+                "Hard rules:\n"
+                "- Remove repeated thesis statements and synonym loops.\n"
+                "- Keep one main idea thread for this subsection; no topic jumping.\n"
+                "- Prefer concrete wording over abstract poetic phrasing.\n"
+                "- At most one short metaphor; no cliche metaphor chains.\n"
+                "- Keep sentence rhythm varied: mix shorter and longer sentences naturally.\n"
+                "- Keep one paragraph only, no markdown.\n"
+                "- Do not add new facts, names, dates, statistics, quotes, or anecdotes."
+            )
+        )
+        hum = HumanMessage(
+            content=(
+                f"Book:\n{book_query}\n\n"
+                f"Subsection:\n{row.get('chapter_title', '')} / {row.get('subchapter_title', '')}\n"
+                f"Plan anchor:\n{row.get('coverage', '')}\n\n"
+                f"Current paragraph ({len(base)} chars):\n{base}\n\n"
+                f"Return a tighter version around {target_mid} characters (acceptable range: {narr_lo}-{narr_hi})."
+            )
+        )
+        try:
+            llm = _scenario_llm(temperature=0.2, max_tokens=min(9000, 1000 + int(len(base) * 0.8)))
+            resp = await llm.ainvoke([sys, hum])
+            raw = resp.content if isinstance(resp.content, str) else str(resp.content)
+            candidate = _strip_code_fence_like(raw).strip().strip('"').strip("'")
+            cand_len = _spoken_plain_len(candidate)
+            if candidate and cand_len >= int(narr_lo * 0.78):
+                out[idx] = candidate
+        except Exception as e:
+            logger.warning(f"[Mode5 book_night] tighten pass skipped for subsection {idx + 1}: {e}")
     return out
 
 
@@ -511,9 +570,16 @@ async def generate_book_night_script(
         raise ValueError("Mode 5 (книга на ночь): введите название книги (от 8 символов), можно с автором")
 
     lang = (language or "ru").strip().lower()
-    if lang not in ("ru", "en"):
+    lang_map = {
+        "ru": "Russian",
+        "en": "English",
+        "es": "Spanish",
+        "fr": "French",
+        "de": "German",
+    }
+    if lang not in lang_map:
         lang = "ru"
-    lang_name = "Russian" if lang == "ru" else "English"
+    lang_name = lang_map[lang]
 
     await checkpoint(control)
     evidence_outline, evidence_sources = await _book_grounding_evidence(q)
@@ -726,6 +792,11 @@ Truthfulness / anti-hallucination (mandatory):
 
 For EACH subsection in the batch, write ONE continuous paragraph to be read aloud (no bullet points).
 Style anchor (keep stable across batches): warm reflective narrator, gentle cadence, medium-long flowing sentences, no sudden tonal shifts.
+- Clarity rules (strict): no rhetorical self-repetition, no synonym chains for the same claim, no "same thought said 3 times".
+- Structure rules (strict): build each paragraph as a mini-arc with 4 steps: core point → plain explanation → concrete everyday implication/example → soft closing line.
+- Rhythm rules (strict): vary sentence length; include at least one short sentence among longer ones.
+- Language rules (strict): prefer concrete verbs and nouns; avoid abstract decorative prose.
+- Metaphor rules (strict): zero or one brief metaphor; avoid cliche images (echoes/corridors/canvas/storm/dance/ripple style wording).
 - This outline has **{n_chapters_final}** top-level book chapters. **Fewer chapters → longer, richer paragraphs per subsection** (more of the book per block); **more chapters → slightly shorter paragraphs** so the night rhythm stays calm. Follow the character and sentence targets below.
 - Tone: slow, warm, reflective — like a trusted narrator before sleep; NOT hype, NOT a book review with scores, NOT preaching.
 - Summarize **ideas and mental models** faithfully at the level of justified content above; do NOT invent long direct quotes or dialogue. Paraphrase principles calmly.
@@ -791,6 +862,14 @@ Style anchor (keep stable across batches): warm reflective narrator, gentle cade
         flat_rows=flat_rows,
         lang_name=lang_name,
         book_query=q,
+    )
+    narrations = await _tighten_book_night_narrations(
+        narrations,
+        flat_rows=flat_rows,
+        lang_name=lang_name,
+        book_query=q,
+        narr_lo=narr_lo,
+        narr_hi=narr_hi,
     )
     narrations = [_ensure_book_night_voiceapi_floor(x, language=lang) for x in narrations]
 

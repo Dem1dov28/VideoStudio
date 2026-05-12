@@ -395,8 +395,9 @@ async def _facts50_thumbnail_prompt(topic: str) -> str:
 
 
 def _fallback_publish(topic: str, language: str) -> dict[str, Any]:
-    t = re.sub(r"\s+", " ", str(topic or "").strip()) or ("Успокаивающие факты для сна" if language == "ru" else "Calming Facts for Sleep")
-    if language == "ru":
+    lang = str(language or "ru").strip().lower()
+    t = re.sub(r"\s+", " ", str(topic or "").strip()) or ("Успокаивающие факты для сна" if lang == "ru" else "Calming Facts for Sleep")
+    if lang == "ru":
         return {
             "title": f"{t[:62]}",
             "description": (
@@ -406,6 +407,39 @@ def _fallback_publish(topic: str, language: str) -> dict[str, Any]:
             "hashtags": _HASHTAGS_RU,
             "tags": _TAGS_RU,
             "first_comment": "Какую тему в спокойном формате для сна сделать следующей?",
+        }
+    if lang == "es":
+        return {
+            "title": f"{t[:62]}",
+            "description": (
+                f"{t}. Formato largo y tranquilo para la noche, con ritmo suave y sin sobrecarga.\n\n"
+                "Narracion serena, visuales atmosfericos y una presentacion pensada para escuchar con calma."
+            ),
+            "hashtags": _HASHTAGS_EN,
+            "tags": _TAGS_EN,
+            "first_comment": "Que tema relajado te gustaria para el siguiente episodio?",
+        }
+    if lang == "fr":
+        return {
+            "title": f"{t[:62]}",
+            "description": (
+                f"{t}. Un format long et calme pour le soir, avec un rythme doux et sans surcharge.\n\n"
+                "Narration paisible, visuels atmospheriques et presentation confortable a ecouter."
+            ),
+            "hashtags": _HASHTAGS_EN,
+            "tags": _TAGS_EN,
+            "first_comment": "Quel sujet calme voulez-vous pour le prochain episode?",
+        }
+    if lang == "de":
+        return {
+            "title": f"{t[:62]}",
+            "description": (
+                f"{t}. Ruhiges Longform-Format fur den Abend, mit sanftem Tempo und ohne Reizuberflutung.\n\n"
+                "Gelassene Erzahlung, atmospharische Bilder und ein entspannter Horfokus."
+            ),
+            "hashtags": _HASHTAGS_EN,
+            "tags": _TAGS_EN,
+            "first_comment": "Welches ruhige Thema soll die nachste Folge haben?",
         }
     return {
         "title": f"{t[:62]}",
@@ -424,10 +458,11 @@ _HASHTAGS_BOOK_NIGHT_EN = ["#booksummary", "#nonfiction", "#calmlisten", "#longf
 
 
 def _fallback_publish_book_night(topic: str, language: str) -> dict[str, Any]:
+    lang = str(language or "ru").strip().lower()
     t = re.sub(r"\s+", " ", str(topic or "").strip()) or (
-        "Спокойный пересказ книги" if language == "ru" else "Calm nonfiction book summary"
+        "Спокойный пересказ книги" if lang == "ru" else "Calm nonfiction book summary"
     )
-    if language == "ru":
+    if lang == "ru":
         return {
             "title": f"{t[:62]} — спокойный пересказ"[:72],
             "description": (
@@ -438,6 +473,42 @@ def _fallback_publish_book_night(topic: str, language: str) -> dict[str, Any]:
             "hashtags": _HASHTAGS_BOOK_NIGHT_RU,
             "tags": _TAGS_BOOK_NIGHT_RU,
             "first_comment": "Какую nonfiction-книгу или автора разобрать в следующем спокойном пересказе?",
+        }
+    if lang == "es":
+        return {
+            "title": f"{t[:56]} — resumen sereno"[:72],
+            "description": (
+                f"Un resumen tranquilo y extenso del libro de no ficcion «{t}»: estructura, ideas principales y aprendizajes clave. "
+                "No es una meditacion para dormir; es una narracion pausada para escuchar con calma por la noche.\n\n"
+                "Ideal para quien quiere entender el libro en una sola sesion, sin prisas ni ruido."
+            ),
+            "hashtags": _HASHTAGS_BOOK_NIGHT_EN,
+            "tags": _TAGS_BOOK_NIGHT_EN,
+            "first_comment": "Que libro o autor de no ficcion te gustaria para el siguiente resumen?",
+        }
+    if lang == "fr":
+        return {
+            "title": f"{t[:56]} — resume calme"[:72],
+            "description": (
+                f"Un resume long et calme du livre de non-fiction «{t}»: structure, idees principales et points pratiques. "
+                "Ce n'est pas une meditation du sommeil, mais une narration douce pour l'ecoute du soir.\n\n"
+                "Parfait pour comprendre le livre en une seule session, sans surcharge."
+            ),
+            "hashtags": _HASHTAGS_BOOK_NIGHT_EN,
+            "tags": _TAGS_BOOK_NIGHT_EN,
+            "first_comment": "Quel livre ou auteur de non-fiction faut-il resumer ensuite?",
+        }
+    if lang == "de":
+        return {
+            "title": f"{t[:56]} — ruhige zusammenfassung"[:72],
+            "description": (
+                f"Eine ruhige, lange Zusammenfassung des Sachbuchs «{t}»: Struktur, Kerngedanken und praktische Einsichten. "
+                "Keine Schlafmeditation, sondern ein gleichmassiger Erzahlrhythmus fur den Abend.\n\n"
+                "Ideal, wenn du den Kern des Buches in einer Sitzung verstehen willst."
+            ),
+            "hashtags": _HASHTAGS_BOOK_NIGHT_EN,
+            "tags": _TAGS_BOOK_NIGHT_EN,
+            "first_comment": "Welches Sachbuch oder welcher Autor soll als nachstes zusammengefasst werden?",
         }
     return {
         "title": f"{t[:56]} — calm summary"[:72],
@@ -500,7 +571,9 @@ async def generate_mode5_publishing_metadata(
     duration_min: int,
     language: str = "ru",
 ) -> dict[str, Any]:
-    lang = "ru" if str(language).lower() == "ru" else "en"
+    lang = str(language or "ru").strip().lower()
+    if lang not in {"ru", "en", "es", "fr", "de"}:
+        lang = "en"
     sm_norm = re.sub(r"\s+", " ", str(sub_mode or "").strip()).lower()
     if sm_norm == "book_night":
         fallback = _fallback_publish_book_night(topic, lang)

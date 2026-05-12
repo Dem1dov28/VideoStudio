@@ -658,6 +658,7 @@ export default function Progress() {
                 try {
                   await api.resumePipeline(sid);
                   setStatus('running');
+                  setStreamNonce((n) => n + 1);
                 } catch (e) { setError(e.message); }
                 finally { setBusy(false); }
               }}

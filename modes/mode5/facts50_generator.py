@@ -210,9 +210,16 @@ async def generate_facts50_script(
         raise ValueError("Mode 5 (77 фактов): введите тему или заголовок")
 
     lang = (language or "ru").strip().lower()
-    if lang not in ("ru", "en"):
+    lang_map = {
+        "ru": "Russian",
+        "en": "English",
+        "es": "Spanish",
+        "fr": "French",
+        "de": "German",
+    }
+    if lang not in lang_map:
         lang = "ru"
-    lang_name = "Russian" if lang == "ru" else "English"
+    lang_name = lang_map[lang]
 
     sys1 = f"""You write structured factual entertainment scripts for short-form / long compilations.
 The user gives a HEADLINE or THEME (e.g. "facts about France"). You must produce EXACTLY {FACTS50_TARGET} distinct, interesting, verifiable facts related to that theme.

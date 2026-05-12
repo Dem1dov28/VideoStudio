@@ -559,9 +559,16 @@ async def generate_unwritten_chapter_script(
         )
 
     lang = (language or "ru").strip().lower()
-    if lang not in ("ru", "en"):
+    lang_map = {
+        "ru": "Russian",
+        "en": "English",
+        "es": "Spanish",
+        "fr": "French",
+        "de": "German",
+    }
+    if lang not in lang_map:
         lang = "ru"
-    lang_name = "Russian" if lang == "ru" else "English"
+    lang_name = lang_map[lang]
 
     await checkpoint(control)
     evidence_outline, evidence_sources = await gather_mode5_grounding_snippets(topic_clean)

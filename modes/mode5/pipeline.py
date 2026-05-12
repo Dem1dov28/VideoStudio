@@ -96,6 +96,7 @@ def _ensure_mode5_live_defaults(plan: dict[str, Any]) -> None:
         plan["live_events"] = []
     if not str(plan.get("live_policy") or "").strip():
         plan["live_policy"] = "hybrid"
+    plan["pipeline_paused"] = bool(plan.get("pipeline_paused"))
     for ch in list(plan.get("chunks") or []):
         if not isinstance(ch, dict):
             continue
@@ -213,6 +214,20 @@ def _update_mode5_plan_atomic(
         return plan
 
 
+def set_mode5_pipeline_paused(session_id: str, paused: bool) -> dict[str, Any]:
+    """Persist the user's global Mode 5 pause intent across backend restarts."""
+
+    def _mutate(plan: dict[str, Any]) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        plan["pipeline_paused"] = bool(paused)
+        if paused:
+            plan["pipeline_paused_at"] = now
+        else:
+            plan["pipeline_resumed_at"] = now
+
+    return _update_mode5_plan_atomic(session_id, _mutate)
+
+
 def _touch_mode5_checkpoint(plan: dict[str, Any], stage: str, **extra: Any) -> None:
     payload: dict[str, Any] = {
         "stage": stage,
@@ -246,6 +261,42 @@ def _record_mode5_stage_metric(plan: dict[str, Any], stage: str) -> None:
         counts = {}
         metrics["stage_entries"] = counts
     counts[stage] = int(counts.get(stage, 0)) + 1
+
+
+def _mode5_metrics(plan: dict[str, Any]) -> dict[str, Any]:
+    metrics = plan.get("mode5_metrics")
+    if not isinstance(metrics, dict):
+        metrics = {}
+        plan["mode5_metrics"] = metrics
+    return metrics
+
+
+def _record_mode5_operation_seconds(
+    plan: dict[str, Any],
+    name: str,
+    started_at: float,
+    *,
+    count: int | None = None,
+) -> None:
+    elapsed = max(0.0, time.monotonic() - started_at)
+    metrics = _mode5_metrics(plan)
+    ops = metrics.get("operation_seconds")
+    if not isinstance(ops, dict):
+        ops = {}
+        metrics["operation_seconds"] = ops
+    ops[name] = round(float(ops.get(name, 0.0)) + elapsed, 3)
+    runs = metrics.get("operation_runs")
+    if not isinstance(runs, dict):
+        runs = {}
+        metrics["operation_runs"] = runs
+    runs[name] = int(runs.get(name, 0)) + 1
+    if count is not None:
+        counts = metrics.get("operation_counts")
+        if not isinstance(counts, dict):
+            counts = {}
+            metrics["operation_counts"] = counts
+        counts[name] = int(counts.get(name, 0)) + int(count)
+    logger.info("[Mode5 metrics] {} took {:.1f}s", name, elapsed)
 
 
 def _validate_mode5_stage_transition(
@@ -405,6 +456,7 @@ _MODE5_BLOCK_LOOP_STILL_STYLE_OVERRIDE = (
 )
 # Bump when block-loop still/motion prompt contract changes so narr_fp cache invalidates.
 _MODE5_BLOCK_LOOP_CACHE_SALT = "painterly_loop_v17_motion_prompt_trim"
+_MODE5_SUPPORTED_LANGS = {"ru", "en", "es", "fr", "de"}
 def _mode5_output_format() -> str:
     fmt = str(getattr(settings, "mode5_video_format", "horizontal") or "horizontal").strip().lower()
     return "horizontal" if fmt == "horizontal" else "vertical"
@@ -434,6 +486,35 @@ def _clamp_mode5_parallel_images(value: int | None) -> int:
     return min(cap, v)
 
 
+def _mode5_longform_chunk_image_parallel() -> int:
+    """
+    Chunk-level image lanes for long-form Mode5.
+    Segment-level fan-out still controlled by _generate_chunk_images.
+    """
+    raw = int(getattr(settings, "mode5_longform_chunk_image_parallel", 2) or 2)
+    return max(1, min(8, raw))
+
+
+def _mode5_facts50_image_parallel() -> int:
+    raw = int(getattr(settings, "mode5_facts50_image_parallel", 2) or 2)
+    return max(1, min(8, raw))
+
+
+def _mode5_intro_pool_parallel() -> int:
+    raw = int(getattr(settings, "mode5_intro_pool_parallel", 2) or 2)
+    return max(1, min(6, raw))
+
+
+def _mode5_block_loop_parallel() -> int:
+    raw = int(getattr(settings, "mode5_block_loop_parallel", 2) or 2)
+    return max(1, min(6, raw))
+
+
+def _mode5_sleep_tail_image_parallel() -> int:
+    raw = int(getattr(settings, "mode5_sleep_tail_image_parallel", 2) or 2)
+    return max(1, min(6, raw))
+
+
 def _normalize_mode5_image_backend(value: str | None) -> str:
     raw = str(value or "").strip().lower()
     if raw in {"api", "playwright", "auto"}:
@@ -449,6 +530,7 @@ async def _generate_one_image(
     *,
     aspect_ratio: str | None = None,
     image_backend: str | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> Path:
     """
     Mode5-specific router for image backend:
@@ -477,13 +559,21 @@ async def _generate_one_image(
             from agents.content_generator import fastgen_http
 
             paths = await fastgen_http.generate_images_fastgen(
-                [prompt_text], dest.parent, parallel=False, aspect_ratio=aspect_ratio
+                [prompt_text],
+                dest.parent,
+                parallel=False,
+                cancel_event=cancel_event,
+                aspect_ratio=aspect_ratio,
             )
         else:  # backend == "playwright"
             from agents.content_generator import fastgen_playwright
 
             paths = await fastgen_playwright.generate_images_fastgen(
-                [prompt_text], dest.parent, parallel=False, aspect_ratio=aspect_ratio
+                [prompt_text],
+                dest.parent,
+                parallel=False,
+                cancel_event=cancel_event,
+                aspect_ratio=aspect_ratio,
             )
 
         if not paths:
@@ -1118,7 +1208,7 @@ def _rel_session(session_root: Path, path: Path) -> str:
 
 def detect_mode5_language(text: str, preferred: str | None = None) -> str:
     pref = (preferred or "").strip().lower()
-    if pref in {"ru", "en"}:
+    if pref in _MODE5_SUPPORTED_LANGS:
         return pref
     sample = " ".join((text or "").split())[:4000]
     if not sample:
@@ -1332,6 +1422,10 @@ def mode5_resume_snapshot_for_plan(session_id: str, plan: dict[str, Any]) -> dic
     if not chunks:
         return {"can_resume": False, "stage": stage, "reason": "no_chunks"}
     sm = (plan.get("sub_mode") or "").strip().lower()
+    if stage == MODE5_CKPT_STUB:
+        # STUB plans intentionally may contain only chunk text stubs. The resume path
+        # bootstraps missing TTS/WAV files from these texts before continuing.
+        return {"can_resume": True, "stage": stage, "reason": "resume_from_stub"}
     if sm == "unwritten_chapter" and stage in (MODE5_CKPT_STUB, MODE5_CKPT_AFTER_IMAGES):
         return {"can_resume": True, "stage": stage, "reason": "resume_before_tts"}
     for ch in chunks:
@@ -1341,8 +1435,6 @@ def mode5_resume_snapshot_for_plan(session_id: str, plan: dict[str, Any]) -> dic
     if _all_chunk_previews_on_disk(root, chunks):
         # Previews may be complete while final assembly/publish stage is still missing.
         return {"can_resume": True, "stage": stage or MODE5_CKPT_AFTER_PREVIEWS, "reason": "previews_complete"}
-    if stage == MODE5_CKPT_STUB:
-        return {"can_resume": True, "stage": stage, "reason": "resume_from_stub"}
     return {"can_resume": True, "stage": stage, "reason": ""}
 
 
@@ -1589,8 +1681,15 @@ def _fact_overlay_title(index: int) -> str:
 
 def _fact_spoken_prefix(index: int, language: str) -> str:
     n = index + 1
-    if (language or "").strip().lower() == "ru":
+    lang = (language or "").strip().lower()
+    if lang == "ru":
         return f"Факт {n}."
+    if lang == "es":
+        return f"Hecho {n}."
+    if lang == "fr":
+        return f"Fait {n}."
+    if lang == "de":
+        return f"Fakt {n}."
     return f"Fact {n}."
 
 
@@ -1610,10 +1709,26 @@ def _facts50_intro_text(topic: str, language: str) -> str:
     Короткое настроение + тема. Без формулы «N фактов о …» — её дублирует финал и озвучка фактов.
     """
     clean_topic = re.sub(r"\s+", " ", (topic or "").strip())
-    if (language or "").strip().lower() == "ru":
+    lang = (language or "").strip().lower()
+    if lang == "ru":
         return (
             "Устройтесь поудобнее. Дальше — спокойный рассказ: один факт за другим, без суеты, в темпе для фона и сна. "
             f"Тема этого выпуска — «{clean_topic}»."
+        )
+    if lang == "es":
+        return (
+            "Ponte comodo. A continuacion, un relato tranquilo: un dato tras otro, sin prisa, con ritmo suave para fondo y descanso. "
+            f"El tema de este episodio es: {clean_topic}."
+        )
+    if lang == "fr":
+        return (
+            "Installez-vous confortablement. La suite est un recit calme: un fait apres l'autre, sans precipitation, "
+            f"dans un rythme doux. Le theme de cet episode est: {clean_topic}."
+        )
+    if lang == "de":
+        return (
+            "Mach es dir bequem. Es folgt eine ruhige Erzahlung: eine Tatsache nach der anderen, ohne Eile, "
+            f"in einem sanften Tempo. Das Thema dieser Folge ist: {clean_topic}."
         )
     return (
         "Settle in. What follows is a calm voiceover—one fact after another, unhurried, meant as gentle background. "
@@ -1626,11 +1741,33 @@ def _facts50_outro_text(_topic: str, language: str) -> str:
     Мягкое завершение без повторения той же формулы, что была во вступлении (без «N фактов по теме …»).
     Тему намеренно не произносим снова — она уже в интро и в теле фактов.
     """
-    if (language or "").strip().lower() == "ru":
+    lang = (language or "").strip().lower()
+    if lang == "ru":
         variants = [
             "Спасибо, что были со мной до конца. Пусть останется лёгкое настроение — и спокойной ночи.",
             "На сегодня у меня всё. Дышите ровно; если захотите продолжения — задайте новую тему, сделаем ещё один выпуск.",
             "Я поблагодарю за внимание и отпущу вас отдыхать. До встречи в следующем спокойном выпуске.",
+        ]
+        return random.choice(variants)
+    if lang == "es":
+        variants = [
+            "Gracias por escuchar hasta el final. Te deseo una noche tranquila.",
+            "Eso es todo por hoy. Respira con calma; cuando quieras, elegimos un nuevo tema.",
+            "Te dejo descansar. Nos vemos en el proximo episodio sereno.",
+        ]
+        return random.choice(variants)
+    if lang == "fr":
+        variants = [
+            "Merci d'avoir ecoute jusqu'au bout. Je vous souhaite une nuit paisible.",
+            "C'est tout pour aujourd'hui. Respirez calmement; si vous voulez, on choisira un nouveau theme.",
+            "Je vous laisse vous reposer. A bientot pour un prochain episode calme.",
+        ]
+        return random.choice(variants)
+    if lang == "de":
+        variants = [
+            "Danke, dass du bis zum Ende zugehort hast. Ich wunsche dir eine ruhige Nacht.",
+            "Das war's fur heute. Atme ruhig; wenn du magst, machen wir als nachstes ein neues Thema.",
+            "Ich lasse dich hier zur Ruhe kommen. Bis zur nachsten entspannten Folge.",
         ]
         return random.choice(variants)
     variants = [
@@ -1736,6 +1873,7 @@ def _result_payload(
         "mode5_await_intro_confirmation": bool(plan.get("await_intro_confirmation")),
         "mode5_intro_preview_video": plan.get("intro_preview_video"),
         "mode5_intro_preview_videos": list(plan.get("intro_preview_videos") or []),
+        "mode5_pipeline_paused": bool(plan.get("pipeline_paused")),
     }
 
 
@@ -1798,19 +1936,21 @@ async def _mode5_generate_publish_assets(
     duration_min = _mode5_duration_minutes(plan)
 
     try:
-        ru = await generate_mode5_publishing_metadata(
-            topic=topic,
-            sub_mode=sub_mode,
-            script_excerpt=excerpt,
-            duration_min=duration_min,
-            language="ru",
-        )
-        en = await generate_mode5_publishing_metadata(
-            topic=topic,
-            sub_mode=sub_mode,
-            script_excerpt=excerpt,
-            duration_min=duration_min,
-            language="en",
+        ru, en = await asyncio.gather(
+            generate_mode5_publishing_metadata(
+                topic=topic,
+                sub_mode=sub_mode,
+                script_excerpt=excerpt,
+                duration_min=duration_min,
+                language="ru",
+            ),
+            generate_mode5_publishing_metadata(
+                topic=topic,
+                sub_mode=sub_mode,
+                script_excerpt=excerpt,
+                duration_min=duration_min,
+                language="en",
+            ),
         )
         plan["publishing"] = {"ru": ru, "en": en}
     except Exception as e:
@@ -1894,6 +2034,7 @@ async def _generate_chunk_images(
     refresh_all: bool = False,
     on_segment_ready: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     topic_seed_override: str | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> None:
     session_root = _session_dir(session_id)
     topic_seed = (
@@ -1942,6 +2083,7 @@ async def _generate_chunk_images(
                     img_path,
                     aspect_ratio=_mode5_image_aspect_ratio(),
                     image_backend=image_backend,
+                    cancel_event=cancel_event,
                 )
                 seg["image_fallback"] = False
                 seg.pop("image_fallback_reason", None)
@@ -1969,12 +2111,14 @@ async def _generate_chunk_images(
                     "Retry topic lock: keep exactly the same segment topic, same literal location class, and same topic-linked props. "
                     "Do not switch to a generic room/lab/office/hospital unless the segment explicitly asks for it."
                 ).strip()
-                await _generate_one_image(
-                    retry_prompt,
-                    target,
-                    aspect_ratio=_mode5_image_aspect_ratio(),
-                    image_backend=image_backend,
-                )
+                async with sem:
+                    await _generate_one_image(
+                        retry_prompt,
+                        target,
+                        aspect_ratio=_mode5_image_aspect_ratio(),
+                        image_backend=image_backend,
+                        cancel_event=cancel_event,
+                    )
                 seg["image_fallback"] = True
                 seg["image_fallback_reason"] = f"topic-locked retry fallback: {type(err).__name__}"
                 logger.warning(
@@ -2229,6 +2373,7 @@ async def _generate_mode5_intro_confirmation_pool(
     topic_seed: str,
     pool_size_override: int | None = None,
     image_backend: str | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> list[str]:
     """
     Generate fixed pool of animated preview clips before full long-mode pipeline starts.
@@ -2253,8 +2398,11 @@ async def _generate_mode5_intro_confirmation_pool(
         seed, sub_mode, pool_size, run_nonce=run_nonce
     )
     topic_lock = _mode5_intro_topic_lock(seed)
-    out_rels: list[str] = []
-    for i in range(pool_size):
+    parallel = min(pool_size, _mode5_intro_pool_parallel())
+    sem = asyncio.Semaphore(parallel)
+    out_rels_by_index: list[str | None] = [None] * pool_size
+
+    async def _generate_one_intro(i: int) -> None:
         story_seed = story_prompts[i] if i < len(story_prompts) else seed
         still_path = m5dir / f"block_loop_{i:04d}_still.jpg"
         out_path = m5dir / f"block_loop_{i:04d}.mp4"
@@ -2267,14 +2415,16 @@ async def _generate_mode5_intro_confirmation_pool(
             variants_total=pool_size,
         )
         img_prompt = _sanitize_mode5_image_prompt(img_prompt)
-        await _generate_one_image(
-            img_prompt,
-            still_path,
-            aspect_ratio=_mode5_image_aspect_ratio(),
-            image_backend=backend,
-        )
+        async with sem:
+            await _generate_one_image(
+                img_prompt,
+                still_path,
+                aspect_ratio=_mode5_image_aspect_ratio(),
+                image_backend=backend,
+                cancel_event=cancel_event,
+            )
         if not still_path.is_file():
-            continue
+            return
 
         motion_prompt = _build_mode5_intro_single_motion_prompt(
             sub_mode=sub_mode,
@@ -2284,24 +2434,27 @@ async def _generate_mode5_intro_confirmation_pool(
             variant_index=i,
             variants_total=pool_size,
         )
-        if backend == "api":
-            raw_clip = await fastgen_http.generate_video_from_keyframes(
-                motion_prompt,
-                m5dir,
-                still_path,
-                still_path,
-                index=99001 + i,
-                video_aspect_ratio=_mode5_image_aspect_ratio(),
-            )
-        else:
-            raw_clip = await fastgen_playwright.generate_video_from_keyframes(
-                motion_prompt,
-                m5dir,
-                still_path,
-                still_path,
-                index=99001 + i,
-                video_aspect_ratio=_mode5_image_aspect_ratio(),
-            )
+        async with sem:
+            if backend == "api":
+                raw_clip = await fastgen_http.generate_video_from_keyframes(
+                    motion_prompt,
+                    m5dir,
+                    still_path,
+                    still_path,
+                    index=99001 + i,
+                    cancel_event=cancel_event,
+                    video_aspect_ratio=_mode5_image_aspect_ratio(),
+                )
+            else:
+                raw_clip = await fastgen_playwright.generate_video_from_keyframes(
+                    motion_prompt,
+                    m5dir,
+                    still_path,
+                    still_path,
+                    index=99001 + i,
+                    cancel_event=cancel_event,
+                    video_aspect_ratio=_mode5_image_aspect_ratio(),
+                )
         clip = Path(raw_clip) if raw_clip else None
         if not clip or not clip.is_file():
             raise RuntimeError("Mode5 intro preview single-clip animation was not generated.")
@@ -2315,8 +2468,11 @@ async def _generate_mode5_intro_confirmation_pool(
                 clip.unlink()
             except OSError:
                 pass
-        out_rels.append(_rel_session(session_root, out_path))
-    return out_rels
+        out_rels_by_index[i] = _rel_session(session_root, out_path)
+
+    logger.info("[Mode5] Intro confirmation pool: generating {} item(s), parallel={}", pool_size, parallel)
+    await asyncio.gather(*[_generate_one_intro(i) for i in range(pool_size)])
+    return [rel for rel in out_rels_by_index if rel]
 
 
 async def _regenerate_mode5_intro_confirmation_item(
@@ -2948,6 +3104,7 @@ async def _ensure_mode5_block_loop_videos(
     *,
     force: bool = False,
     target_block_ids: set[int] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> None:
     """
     Для длинного Mode5: один короткий motion-клип на «блок» wall-clock (MODE5_BLOCK_LOOP_SECONDS),
@@ -3116,15 +3273,24 @@ async def _ensure_mode5_block_loop_videos(
                     seg.pop("video", None)
                     seg.pop("asset_type", None)
 
-    prev_theme = ""
     book_anchor = _mode5_block_loop_series_anchor(plan)
     from agents.content_generator import fastgen_http, fastgen_playwright
 
     smart_still = bool(getattr(settings, "mode5_block_loop_still_then_animate", True))
+    block_ids = [
+        bid
+        for bid in range(pool_size)
+        if target_ids is None or bid in target_ids
+    ]
+    parallel = min(len(block_ids), _mode5_block_loop_parallel()) if block_ids else 1
+    block_sem = asyncio.Semaphore(max(1, parallel))
+    logger.info("[Mode5] Block loop video: {} block(s), parallel={}", len(block_ids), parallel)
 
-    for bid in range(pool_size):
-        if target_ids is not None and bid not in target_ids:
-            continue
+    async def _process_block_loop(bid: int) -> None:
+        async with block_sem:
+            await _process_block_loop_unbounded(bid)
+
+    async def _process_block_loop_unbounded(bid: int) -> None:
         rows = blocks.get(bid, [])
         for ch, _seg, _t0, _d in rows:
             ch["block_loop_id"] = int(bid)
@@ -3173,8 +3339,7 @@ async def _ensure_mode5_block_loop_videos(
             for ch, seg, _t0, _d in rows:
                 seg["video"] = rel
                 seg["asset_type"] = "video"
-            prev_theme = (narr or prev_theme)[:500]
-            continue
+            return
 
         img_a = session_root / rows[0][1]["image"] if rows else None
         img_b = session_root / rows[-1][1]["image"] if rows else None
@@ -3239,7 +3404,7 @@ async def _ensure_mode5_block_loop_videos(
                             [img_prompt],
                             m5dir,
                             parallel=False,
-                            cancel_event=None,
+                            cancel_event=cancel_event,
                             aspect_ratio=_mode5_image_aspect_ratio(),
                         )
                     else:
@@ -3247,6 +3412,7 @@ async def _ensure_mode5_block_loop_videos(
                             [img_prompt],
                             m5dir,
                             parallel=False,
+                            cancel_event=cancel_event,
                             aspect_ratio=_mode5_image_aspect_ratio(),
                         )
                     if not still_list or not still_list[0]:
@@ -3281,7 +3447,7 @@ async def _ensure_mode5_block_loop_videos(
                         block_index=bid,
                         block_sec=block_sec,
                         narration_snippet=narr,
-                        prev_snippet=prev_theme,
+                        prev_snippet=_seed_narration_for_block(max(0, bid - 1))[:500] if bid > 0 else "",
                         book_anchor=book_anchor,
                     )
                     clip_idx = 8000 + int(bid)
@@ -3291,7 +3457,7 @@ async def _ensure_mode5_block_loop_videos(
                             m5dir,
                             clip_idx,
                             reference_image_path=still_path,
-                            cancel_event=None,
+                            cancel_event=cancel_event,
                             mode4_veo_flow_flower=False,
                             video_aspect_ratio=_mode5_image_aspect_ratio(),
                         )
@@ -3301,6 +3467,7 @@ async def _ensure_mode5_block_loop_videos(
                             m5dir,
                             clip_idx,
                             reference_image_path=still_path,
+                            cancel_event=cancel_event,
                             mode4_veo_flow_flower=False,
                             video_aspect_ratio=_mode5_image_aspect_ratio(),
                         )
@@ -3326,27 +3493,26 @@ async def _ensure_mode5_block_loop_videos(
                     for _ch, seg, _t0, _d in rows:
                         seg["video"] = rel
                         seg["asset_type"] = "video"
-                    prev_theme = narr[:500]
                     motion_ok = True
             except Exception as smart_err:
                 logger.warning("[Mode5] Block loop {}: still→motion не удалось — fallback keyframes: {}", bid, smart_err)
 
         if motion_ok:
-            continue
+            return
 
         if not img_a or not img_b or (not img_a.is_file()) or (not img_b.is_file()):
             logger.warning("[Mode5] Block loop {}: нет keyframe-изображений, оставляем image", bid)
             for _ch, seg, _t0, _d in rows:
                 seg.pop("video", None)
                 seg.pop("asset_type", None)
-            continue
+            return
 
         prompt = _build_mode5_block_loop_video_prompt(
             sub_mode=plan.get("sub_mode"),
             block_index=bid,
             block_sec=block_sec,
             narration_snippet=narr,
-            prev_snippet=prev_theme,
+            prev_snippet=_seed_narration_for_block(max(0, bid - 1))[:500] if bid > 0 else "",
             book_anchor=book_anchor,
         )
         try:
@@ -3358,6 +3524,7 @@ async def _ensure_mode5_block_loop_videos(
                     start_frame_path=img_a,
                     end_frame_path=img_b if img_b.resolve() != img_a.resolve() else img_a,
                     index=1000 + bid,
+                    cancel_event=cancel_event,
                     video_aspect_ratio=_mode5_image_aspect_ratio(),
                 )
             else:
@@ -3367,6 +3534,7 @@ async def _ensure_mode5_block_loop_videos(
                     start_frame_path=img_a,
                     end_frame_path=img_b if img_b.resolve() != img_a.resolve() else img_a,
                     index=1000 + bid,
+                    cancel_event=cancel_event,
                     video_aspect_ratio=_mode5_image_aspect_ratio(),
                 )
             resolved = Path(video_path) if video_path else None
@@ -3377,7 +3545,6 @@ async def _ensure_mode5_block_loop_videos(
                 for _ch, seg, _t0, _d in rows:
                     seg["video"] = rel
                     seg["asset_type"] = "video"
-                prev_theme = narr[:500]
                 logger.info("[Mode5] Block loop video готов (keyframes): {} ({} сегм.)", out_path.name, len(rows))
             else:
                 raise RuntimeError("empty path")
@@ -3386,6 +3553,8 @@ async def _ensure_mode5_block_loop_videos(
             for _ch, seg, _t0, _d in rows:
                 seg.pop("video", None)
                 seg.pop("asset_type", None)
+
+    await asyncio.gather(*[_process_block_loop(bid) for bid in block_ids])
 
 
 def _build_chunk_preview_sync(session_id: str, chunk_index: int, plan: dict[str, Any]) -> Path:
@@ -3457,7 +3626,7 @@ def _build_all_chunk_previews_parallel(session_id: str, plan: dict[str, Any]) ->
     chunks = plan.get("chunks") or []
     if not chunks:
         return
-    workers = max(1, min(8, int(getattr(settings, "mode13_preview_mp4_workers", 4) or 4)))
+    workers = max(1, min(16, int(getattr(settings, "mode5_preview_mp4_workers", 4) or 4)))
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futs = {
             executor.submit(_build_chunk_preview_sync, session_id, idx, plan): idx
@@ -3514,9 +3683,16 @@ async def _finalize_mode5_outputs(
     _save_mode5_plan(session_id, plan)
 
     loop = asyncio.get_event_loop()
+    previews_started = time.monotonic()
     await loop.run_in_executor(
         None,
         functools.partial(_build_all_chunk_previews_parallel, session_id, plan),
+    )
+    _record_mode5_operation_seconds(
+        plan,
+        "preview_mp4_build",
+        previews_started,
+        count=len(plan.get("chunks") or []),
     )
     _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_PREVIEWS)
 
@@ -3530,10 +3706,16 @@ async def _finalize_mode5_outputs(
     final_path = session_root / "video_mode5.mp4"
     await loop.run_in_executor(None, functools.partial(_rebuild_mode5_missing_previews, session_id, plan))
     preview_paths = [session_root / ch["preview_relpath"] for ch in (plan.get("chunks") or [])]
+    concat_started = time.monotonic()
     await loop.run_in_executor(None, lambda: _ffmpeg_concat(preview_paths, final_path))
+    _record_mode5_operation_seconds(plan, "final_concat", concat_started, count=len(preview_paths))
+    sleep_tail_started = time.monotonic()
     final_path = await loop.run_in_executor(None, lambda: _append_mode5_sleep_tail(session_id, plan, final_path))
+    _record_mode5_operation_seconds(plan, "sleep_tail", sleep_tail_started)
     rel_final = _rel_session(session_root, final_path)
+    publishing_started = time.monotonic()
     await _mode5_generate_publish_assets(session_id, plan, force_thumbnail=False)
+    _record_mode5_operation_seconds(plan, "publishing_assets", publishing_started)
     _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_COMPLETED)
     logger.success(f"{done_log_message} | video={final_path}")
     return _attach_mode5_resume_flags_from_plan(
@@ -3553,10 +3735,11 @@ async def _generate_mode5_sleep_tail_theme_images(
     """One thematic still per sleep-tail segment; fail-soft copies previous or fallback."""
     style = _ensure_mode5_style_lock(plan)
     m5 = _mode5_dir(session_id)
-    out: list[Path] = []
-    prev_ok: Path | None = fallback_still if fallback_still.is_file() else None
+    out: list[Path | None] = [None] * max(0, int(n))
+    parallel = min(max(1, int(n)), _mode5_sleep_tail_image_parallel()) if n > 0 else 1
+    sem = asyncio.Semaphore(parallel)
 
-    for i in range(n):
+    async def _generate_one_tail_image(i: int) -> None:
         idx = i + 1
         dest = m5 / f"sleep_tail_theme_{idx:03d}.jpg"
         scene_hint = (
@@ -3573,27 +3756,38 @@ async def _generate_mode5_sleep_tail_theme_images(
                 output_format=_mode5_output_format(),
             )
             prompt = _sanitize_mode5_image_prompt(prompt)
-            await _generate_one_image(
-                prompt,
-                dest,
-                aspect_ratio=_mode5_image_aspect_ratio(),
-                image_backend=plan.get("image_backend"),
-            )
+            async with sem:
+                await _generate_one_image(
+                    prompt,
+                    dest,
+                    aspect_ratio=_mode5_image_aspect_ratio(),
+                    image_backend=plan.get("image_backend"),
+                )
         except Exception as e:
             logger.warning(f"[Mode5] sleep tail theme image {idx} failed: {e}")
         if dest.is_file():
-            out.append(dest)
+            out[i] = dest
+
+    await asyncio.gather(*[_generate_one_tail_image(i) for i in range(max(0, int(n)))])
+
+    filled: list[Path] = []
+    prev_ok: Path | None = fallback_still if fallback_still.is_file() else None
+    for i in range(max(0, int(n))):
+        idx = i + 1
+        dest = m5 / f"sleep_tail_theme_{idx:03d}.jpg"
+        if out[i] is not None and dest.is_file():
+            filled.append(dest)
             prev_ok = dest
         elif prev_ok is not None:
             shutil.copy2(prev_ok, dest)
-            out.append(dest)
+            filled.append(dest)
         else:
             if not fallback_still.is_file():
                 raise FileNotFoundError("sleep tail fallback still missing")
             shutil.copy2(fallback_still, dest)
-            out.append(dest)
+            filled.append(dest)
             prev_ok = dest
-    return out
+    return filled
 
 
 def _append_mode5_sleep_tail(session_id: str, plan: dict[str, Any], final_path: Path) -> Path:
@@ -3743,7 +3937,9 @@ def _append_mode5_sleep_tail(session_id: str, plan: dict[str, Any], final_path: 
         else:
             seg_mp4s: list[Path] = []
             try:
-                for i, dur in enumerate(segment_durs):
+                workers = max(1, min(8, int(getattr(settings, "mode5_preview_mp4_workers", 4) or 4)))
+
+                def _render_tail_segment(i: int, dur: float) -> Path:
                     seg_out = session_root / f"mode5_sleep_tail_seg_{i:03d}.mp4"
                     subprocess.run(
                         [
@@ -3772,7 +3968,18 @@ def _append_mode5_sleep_tail(session_id: str, plan: dict[str, Any], final_path: 
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )
-                    seg_mp4s.append(seg_out)
+                    return seg_out
+
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    futs = {
+                        executor.submit(_render_tail_segment, i, dur): i
+                        for i, dur in enumerate(segment_durs)
+                    }
+                    ordered: list[Path | None] = [None] * len(segment_durs)
+                    for fut in as_completed(futs):
+                        idx = futs[fut]
+                        ordered[idx] = fut.result()
+                    seg_mp4s = [p for p in ordered if p is not None]
 
                 concat_list = session_root / "mode5_sleep_tail_concat.txt"
                 concat_list.write_text(
@@ -4009,7 +4216,7 @@ async def run_mode5_pipeline(
     test_duration_sec: int = 300,
     control: dict | None = None,
 ) -> dict[str, Any]:
-    from pipeline_control import checkpoint
+    from pipeline_control import checkpoint, fastgen_cancel_event
 
     require_ffmpeg_or_raise()
     if not (getattr(settings, "voiceapi_api_key", "") or "").strip():
@@ -4025,6 +4232,7 @@ async def run_mode5_pipeline(
 
     test_target = max(60, min(7200, int(test_duration_sec or 300)))
     gen_control = dict(control or {})
+    fg_cancel_event = fastgen_cancel_event(control)
     if bool(test_run):
         gen_control["_mode5_test_run"] = True
         gen_control["_mode5_test_target_sec"] = float(test_target)
@@ -4094,8 +4302,10 @@ async def run_mode5_pipeline(
             raise ValueError(
                 "Mode 5 (The Unwritten Chapter): укажите тему расследования (от 8 символов)."
             )
-        # Product requirement: The Unwritten Chapter narration + TTS must always be English.
-        language = "en"
+        language = detect_mode5_language(
+            f"{topic_input} {(video_header_title or '').strip()}",
+            language,
+        )
         from modes.mode5.unwritten_chapter_generator import generate_unwritten_chapter_script
 
         outline_doc, chunk_texts, script_clean = await generate_unwritten_chapter_script(
@@ -4270,6 +4480,7 @@ async def run_mode5_pipeline(
             _save_mode5_plan(session_id, pre_plan, checkpoint=MODE5_CKPT_STUB)
             effective_intro_backend = pre_backend
             try:
+                intro_started = time.monotonic()
                 intro_rels = await _generate_mode5_intro_confirmation_pool(
                     session_id=session_id,
                     sub_mode=sm,
@@ -4277,6 +4488,10 @@ async def run_mode5_pipeline(
                     topic_seed=topic_input or (header_stripped_pre or ""),
                     pool_size_override=pre_pool_size,
                     image_backend=effective_intro_backend,
+                    cancel_event=fg_cancel_event,
+                )
+                _record_mode5_operation_seconds(
+                    pre_plan, "intro_confirmation_pool", intro_started, count=pre_pool_size
                 )
             except Exception as preview_err:
                 if effective_intro_backend == "api":
@@ -4285,6 +4500,7 @@ async def run_mode5_pipeline(
                         preview_err,
                     )
                     effective_intro_backend = "playwright"
+                    intro_started = time.monotonic()
                     intro_rels = await _generate_mode5_intro_confirmation_pool(
                         session_id=session_id,
                         sub_mode=sm,
@@ -4292,6 +4508,10 @@ async def run_mode5_pipeline(
                         topic_seed=topic_input or (header_stripped_pre or ""),
                         pool_size_override=pre_pool_size,
                         image_backend=effective_intro_backend,
+                        cancel_event=fg_cancel_event,
+                    )
+                    _record_mode5_operation_seconds(
+                        pre_plan, "intro_confirmation_pool", intro_started, count=pre_pool_size
                     )
                 else:
                     raise RuntimeError(f"Mode5 intro preflight failed: {preview_err}") from preview_err
@@ -4434,6 +4654,7 @@ async def run_mode5_pipeline(
                 return ci, pack
 
         logger.info(f"[Mode5 facts50] TTS parallel workers={par} ({len(chunk_texts)} facts)")
+        tts_started = time.monotonic()
         tts_pairs = await asyncio.gather(
             *[_facts50_tts(ci, ct) for ci, ct in enumerate(chunk_texts)]
         )
@@ -4475,9 +4696,12 @@ async def run_mode5_pipeline(
 
         plan = load_mode5_plan(session_id)
         plan["chunks"] = chunks_plan
+        _record_mode5_operation_seconds(plan, "tts_facts50", tts_started, count=len(chunk_texts))
         _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_TTS)
 
-        sem_img = asyncio.Semaphore(par)
+        img_par = _mode5_facts50_image_parallel()
+        sem_img = asyncio.Semaphore(img_par)
+        logger.info("[Mode5 facts50] Image chunk lanes={} (TTS lanes={})", img_par, par)
 
         async def _facts50_images(ch: dict[str, Any]) -> None:
             async with sem_img:
@@ -4495,17 +4719,27 @@ async def run_mode5_pipeline(
                     image_backend=plan.get("image_backend"),
                     refresh_all=True,
                     topic_seed_override=str(plan.get("facts_topic") or plan.get("header_title") or ""),
+                    cancel_event=fg_cancel_event,
                 )
                 _save_mode5_plan(
                     session_id, plan, checkpoint=MODE5_CKPT_AFTER_IMAGES, chunk_index=idx
                 )
 
+        images_started = time.monotonic()
         await asyncio.gather(*[_facts50_images(ch) for ch in chunks_plan])
+        _record_mode5_operation_seconds(plan, "images_facts50", images_started, count=len(chunks_plan))
 
         for ch in chunks_plan:
             _render_chunk_audio_slices(session_id, ch)
         if _mode5_block_loop_applies(plan):
-            await _ensure_mode5_block_loop_videos(session_id, plan, force=False)
+            block_started = time.monotonic()
+            await _ensure_mode5_block_loop_videos(
+                session_id,
+                plan,
+                force=False,
+                cancel_event=fg_cancel_event,
+            )
+            _record_mode5_operation_seconds(plan, "block_loop_videos", block_started)
         else:
             await _ensure_mode5_looped_intro_video(session_id, plan, force=False)
         _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_SLICES)
@@ -4520,7 +4754,7 @@ async def run_mode5_pipeline(
         sem_tts = asyncio.Semaphore(par)
         # _generate_chunk_images already fans out segment image requests inside one chunk,
         # so keep one chunk-level image lane to avoid explosive API concurrency.
-        sem_img = asyncio.Semaphore(1)
+        sem_img = asyncio.Semaphore(_mode5_longform_chunk_image_parallel())
 
         plan = load_mode5_plan(session_id)
         chunks_plan = plan.get("chunks") or []
@@ -4529,12 +4763,14 @@ async def run_mode5_pipeline(
             async with sem_tts:
                 logger.info(f"[Mode5] Chunk {ci + 1}/{len(chunk_texts)}: TTS (voiceapi/template) synthesis")
                 await checkpoint(control)
+                tts_started = time.monotonic()
                 mp3_path, wav_path, dur, wts, words, tts_plain = await _synthesize_chunk(
                     session_id,
                     ci,
                     chunk_text,
                     language=language,
                 )
+                _record_mode5_operation_seconds(plan, "tts_longform", tts_started, count=1)
 
             segs = _segments_for_chunk(tts_plain, dur, seg_sec, wts, words)
             preview_path = session_root / f"mode5_preview_{ci:03d}.mp4"
@@ -4569,6 +4805,7 @@ async def run_mode5_pipeline(
                 logger.info(
                     f"[Mode5] Chunk {ci + 1}/{len(chunk_texts)}: image generation for {len(ch_entry['segments'])} window(s)"
                 )
+                images_started = time.monotonic()
                 await _generate_chunk_images(
                     session_id,
                     ch_entry,
@@ -4578,7 +4815,9 @@ async def run_mode5_pipeline(
                     image_backend=plan.get("image_backend"),
                     refresh_all=True,
                     topic_seed_override=str(plan.get("facts_topic") or plan.get("header_title") or ""),
+                    cancel_event=fg_cancel_event,
                 )
+                _record_mode5_operation_seconds(plan, "images_longform", images_started, count=1)
                 _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_IMAGES, chunk_index=ci)
                 await asyncio.to_thread(_render_chunk_audio_slices, session_id, ch_entry)
                 _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_SLICES, chunk_index=ci)
@@ -4620,6 +4859,7 @@ async def run_mode5_pipeline(
                 async def _on_seg_ready(_seg: dict[str, Any], idx: int = ci) -> None:
                     _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_IMAGES, chunk_index=idx)
 
+                images_started = time.monotonic()
                 await _generate_chunk_images(
                     session_id,
                     ch_entry,
@@ -4630,7 +4870,9 @@ async def run_mode5_pipeline(
                     refresh_all=True,
                     on_segment_ready=_on_seg_ready,
                     topic_seed_override=str(plan.get("facts_topic") or plan.get("header_title") or ""),
+                    cancel_event=fg_cancel_event,
                 )
+                _record_mode5_operation_seconds(plan, "images_unwritten", images_started, count=1)
                 _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_IMAGES, chunk_index=ci)
                 await checkpoint(control)
 
@@ -4660,7 +4902,14 @@ async def run_mode5_pipeline(
             )
         await checkpoint(control)
         if _mode5_block_loop_applies(plan):
-            await _ensure_mode5_block_loop_videos(session_id, plan, force=False)
+            block_started = time.monotonic()
+            await _ensure_mode5_block_loop_videos(
+                session_id,
+                plan,
+                force=False,
+                cancel_event=fg_cancel_event,
+            )
+            _record_mode5_operation_seconds(plan, "block_loop_videos", block_started)
         else:
             await _ensure_mode5_looped_intro_video(session_id, plan, force=False)
 
@@ -4683,7 +4932,7 @@ async def resume_mode5_pipeline(
     Продолжить mode5 после сбоя: на диске уже есть mode5_plan.json с озвучкой и (частично) картинками.
     Пропускает готовые файлы (refresh_all=False), дорисовывает недостающее, затем превью как в основном пайплайне.
     """
-    from pipeline_control import checkpoint
+    from pipeline_control import checkpoint, fastgen_cancel_event
 
     require_ffmpeg_or_raise()
     if not (getattr(settings, "voiceapi_api_key", "") or "").strip():
@@ -4697,6 +4946,7 @@ async def resume_mode5_pipeline(
         raise ValueError(f"Продолжение недоступно: {reason}")
 
     plan = load_mode5_plan(session_id)
+    fg_cancel_event = fastgen_cancel_event(control)
     if bool(plan.get("await_intro_confirmation")):
         plan["await_intro_confirmation"] = False
         _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_STUB)
@@ -4743,17 +4993,22 @@ async def resume_mode5_pipeline(
                     control={**(control or {}), "_mode5_skip_intro_confirmation": True},
                 )
             raise ValueError("Mode5 resume: no chunks in stub plan")
-        for ch in chunks_boot:
+        tts_par = max(1, min(16, int(getattr(settings, "mode5_facts50_parallel", 10) or 10)))
+        tts_par = min(tts_par, voiceapi_mode5_recommended_tts_parallel())
+        sem_resume_tts = asyncio.Semaphore(tts_par)
+
+        async def _bootstrap_one(ch: dict[str, Any]) -> None:
             ci = int(ch.get("index") or 0)
             text = str(ch.get("text") or "").strip()
             if not text:
                 raise ValueError(f"Mode5 resume: empty chunk text at index {ci}")
-            mp3_path, wav_path, dur, wts, words, tts_plain = await _synthesize_chunk(
-                session_id,
-                ci,
-                text,
-                language=language,
-            )
+            async with sem_resume_tts:
+                mp3_path, wav_path, dur, wts, words, tts_plain = await _synthesize_chunk(
+                    session_id,
+                    ci,
+                    text,
+                    language=language,
+                )
             ch["text"] = tts_plain
             ch["chunk_audio"] = _rel_session(session_root, mp3_path)
             ch["chunk_audio_wav"] = _rel_session(session_root, wav_path)
@@ -4770,8 +5025,16 @@ async def resume_mode5_pipeline(
                     overlay_title=overlay_title,
                 )
             else:
-                ch["segments"] = _segments_for_chunk(tts_plain, dur, int(plan.get("segment_seconds") or SEG_SEC_DEFAULT), wts, words)
+                ch["segments"] = _segments_for_chunk(
+                    tts_plain,
+                    dur,
+                    int(plan.get("segment_seconds") or SEG_SEC_DEFAULT),
+                    wts,
+                    words,
+                )
             _rebuild_chunk_segment_paths(session_id, ch)
+
+        await asyncio.gather(*[_bootstrap_one(ch) for ch in chunks_boot])
         _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_TTS)
         stage = MODE5_CKPT_AFTER_TTS
 
@@ -4870,6 +5133,7 @@ async def resume_mode5_pipeline(
                         )
                     ),
                     topic_seed_override=str(plan.get("facts_topic") or plan.get("header_title") or ""),
+                    cancel_event=fg_cancel_event,
                 )
                 _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_IMAGES, chunk_index=ci)
             if sm == "unwritten_chapter":
@@ -4894,7 +5158,14 @@ async def resume_mode5_pipeline(
             await checkpoint(control)
 
         if _mode5_block_loop_applies(plan):
-            await _ensure_mode5_block_loop_videos(session_id, plan, force=False)
+            block_started = time.monotonic()
+            await _ensure_mode5_block_loop_videos(
+                session_id,
+                plan,
+                force=False,
+                cancel_event=fg_cancel_event,
+            )
+            _record_mode5_operation_seconds(plan, "block_loop_videos", block_started)
         else:
             await _ensure_mode5_looped_intro_video(session_id, plan, force=False)
         _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_SLICES)
@@ -4908,8 +5179,9 @@ async def resume_mode5_pipeline(
             done_log_message="=== Mode 5 RESUME DONE ===",
         )
 
-    par = max(1, min(32, int(getattr(settings, "mode5_facts50_parallel", 10))))
+    par = _mode5_facts50_image_parallel()
     sem_img = asyncio.Semaphore(par)
+    logger.info("[Mode5 facts50 resume] Image chunk lanes={}", par)
 
     if (not skip_segment_images_on_resume) and (not all(_mode5_chunk_images_complete(session_root, ch) for ch in chunks)):
 
@@ -4929,6 +5201,7 @@ async def resume_mode5_pipeline(
                     image_backend=plan.get("image_backend"),
                     refresh_all=False,
                     topic_seed_override=str(plan.get("facts_topic") or plan.get("header_title") or ""),
+                    cancel_event=fg_cancel_event,
                 )
                 _save_mode5_plan(
                     session_id, plan, checkpoint=MODE5_CKPT_AFTER_IMAGES, chunk_index=idx
@@ -4941,7 +5214,14 @@ async def resume_mode5_pipeline(
         if not _mode5_chunk_slices_complete(session_root, ch):
             _render_chunk_audio_slices(session_id, ch)
     if _mode5_block_loop_applies(plan):
-        await _ensure_mode5_block_loop_videos(session_id, plan, force=False)
+        block_started = time.monotonic()
+        await _ensure_mode5_block_loop_videos(
+            session_id,
+            plan,
+            force=False,
+            cancel_event=fg_cancel_event,
+        )
+        _record_mode5_operation_seconds(plan, "block_loop_videos", block_started)
     else:
         await _ensure_mode5_looped_intro_video(session_id, plan, force=False)
     _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_SLICES)
@@ -5737,7 +6017,10 @@ def mode5_status_from_plan(session_id: str) -> dict[str, Any]:
     out = _attach_mode5_resume_flags_from_plan(
         session_id, plan, _result_payload(session_id, plan, review_ready=True)
     )
-    out["mode5_runtime_status"] = "running" if (has_dirty or has_pending_rebuilds) else "done"
+    if bool(plan.get("pipeline_paused")) and bool(out.get("mode5_can_resume")):
+        out["mode5_runtime_status"] = "paused"
+    else:
+        out["mode5_runtime_status"] = "running" if (has_dirty or has_pending_rebuilds) else "done"
     return out
 
 
@@ -5769,6 +6052,7 @@ def mode5_review_snapshot(session_id: str) -> dict[str, Any]:
     payload["mode5_can_resume"] = bool(snap.get("can_resume"))
     payload["mode5_checkpoint_stage"] = snap.get("stage")
     payload["mode5_resume_reason"] = snap.get("reason") or None
+    payload["mode5_pipeline_paused"] = bool(plan.get("pipeline_paused"))
     payload["mode5_unfinished_actions"] = [
         {
             "chunk_index": int(ch.get("index") or 0),

@@ -194,6 +194,9 @@ class Settings(BaseSettings):
     mode5_elevenlabs_voice_id: str = Field("ErXwobaYiN019PkySvjV", alias="MODE5_ELEVENLABS_VOICE_ID")
     # Mode 5: максимальное число параллельных генераций картинок на окна (потолок в pipeline = 10).
     mode5_max_parallel_images: int = Field(10, alias="MODE5_MAX_PARALLEL_IMAGES", ge=1, le=10)
+    # Mode 5 facts50: сколько чанков одновременно пускать в image phase.
+    # Отдельно от TTS, потому что VoiceAPI и FastGen имеют разные лимиты.
+    mode5_facts50_image_parallel: int = Field(2, alias="MODE5_FACTS50_IMAGE_PARALLEL", ge=1, le=8)
     # Mode 5: бэкенд генерации картинок.
     # - "api"        -> только HTTP API (fastgen_http)
     # - "playwright" -> только браузерный путь (fastgen_playwright)
@@ -284,6 +287,8 @@ class Settings(BaseSettings):
     mode5_block_loop_seconds: float = Field(1800.0, alias="MODE5_BLOCK_LOOP_SECONDS", ge=60.0, le=14400.0)
     # Fixed pool size of reusable animated block-loops (default 5 => covers 2.5h by 30-min slots).
     mode5_block_loop_pool_size: int = Field(5, alias="MODE5_BLOCK_LOOP_POOL_SIZE", ge=1, le=20)
+    # Сколько независимых animated block-loop клипов генерировать одновременно.
+    mode5_block_loop_parallel: int = Field(2, alias="MODE5_BLOCK_LOOP_PARALLEL", ge=1, le=6)
     mode5_block_loop_include_facts50: bool = Field(True, alias="MODE5_BLOCK_LOOP_INCLUDE_FACTS50")
     # True: FastGen still → FastGen image-to-video → loop; False: только keyframes из JPEG сегментов (старое поведение).
     mode5_block_loop_still_then_animate: bool = Field(True, alias="MODE5_BLOCK_LOOP_STILL_THEN_ANIMATE")
@@ -294,8 +299,13 @@ class Settings(BaseSettings):
     mode5_block_loop_concat_preset: str = Field("slow", alias="MODE5_BLOCK_LOOP_CONCAT_PRESET")
     # Before full long-video pipeline: generate one animated intro preview and wait for user confirmation.
     mode5_intro_confirm_enabled: bool = Field(True, alias="MODE5_INTRO_CONFIRM_ENABLED")
+    # Сколько intro-preview still→video вариантов генерировать одновременно.
+    mode5_intro_pool_parallel: int = Field(2, alias="MODE5_INTRO_POOL_PARALLEL", ge=1, le=6)
     # Mode5 segment encode quality (image/video -> per-segment mp4): lower CRF = sharper output.
     mode5_render_crf: int = Field(17, alias="MODE5_RENDER_CRF", ge=15, le=28)
+    # FFmpeg preset/threads for per-segment preview encodes before MoviePy final encode.
+    mode5_segment_encode_preset: str = Field("medium", alias="MODE5_SEGMENT_ENCODE_PRESET")
+    mode5_segment_ffmpeg_threads: int = Field(1, alias="MODE5_SEGMENT_FFMPEG_THREADS", ge=1, le=16)
 
     # ── Pipeline mode ────────────────────────────────────────────────────────
     # "mode1" = Top-5 facts with AI-generated images
@@ -494,12 +504,21 @@ class Settings(BaseSettings):
     mode5_facts50_static_still: bool = Field(True, alias="MODE5_FACTS50_STATIC_STILL")
     # Сколько фактов одновременно: TTS + LLM/картинки (ограничьте при лимитах API).
     mode5_facts50_parallel: int = Field(10, alias="MODE5_FACTS50_PARALLEL", ge=1, le=32)
+    # Long-form (manual/bible/outline/book_night/unwritten_chapter): сколько чанков одновременно
+    # может находиться в фазе image generation (внутри чанка уже есть своя параллель по сегментам).
+    mode5_longform_chunk_image_parallel: int = Field(2, alias="MODE5_LONGFORM_CHUNK_IMAGE_PARALLEL", ge=1, le=8)
     # После фактов: длительность "sleep tail" (сек) с тематической музыкой.
     mode5_facts50_sleep_tail_sec: int = Field(0, alias="MODE5_FACTS50_SLEEP_TAIL_SEC")
     # Громкость хвоста относительно исходной дорожки (0.0-1.0).
     mode5_facts50_sleep_tail_volume: float = Field(0.34, alias="MODE5_FACTS50_SLEEP_TAIL_VOLUME")
     # Смена тематического кадра в sleep-tail (сек), по умолчанию 5 минут.
     mode5_facts50_sleep_tail_image_interval_sec: int = Field(300, alias="MODE5_FACTS50_SLEEP_TAIL_IMAGE_INTERVAL_SEC")
+    # Сколько тематических кадров sleep-tail генерировать одновременно.
+    mode5_sleep_tail_image_parallel: int = Field(2, alias="MODE5_SLEEP_TAIL_IMAGE_PARALLEL", ge=1, le=6)
+    # Сколько preview MP4 (mode5_preview_*.mp4) собирать одновременно.
+    mode5_preview_mp4_workers: int = Field(4, alias="MODE5_PREVIEW_MP4_WORKERS", ge=1, le=16)
+    mode5_preview_encode_preset: str = Field("veryfast", alias="MODE5_PREVIEW_ENCODE_PRESET")
+    mode5_preview_encode_threads: int = Field(4, alias="MODE5_PREVIEW_ENCODE_THREADS", ge=1, le=16)
 
     @property
     def video_resolution(self) -> tuple[int, int]:

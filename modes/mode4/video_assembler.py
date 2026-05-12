@@ -150,13 +150,20 @@ def _make_subtitle_clip(
     quote_scale = max(
         0.7, min(2.0, float(getattr(settings, "mode4_quote_subtitle_scale", 1.6) or 1.6))
     )
+    subclip_start_applied: float | None = None
     if subclip_range is not None:
         t0, t1 = subclip_range
         t0 = max(0.0, min(t0, vid_dur - 0.12))
         t1 = max(t0 + 0.12, min(t1, vid_dur))
+        subclip_start_applied = t0
         vc = vc.subclipped(t0, t1)
         vid_dur = float(vc.duration)
     wts = list(word_timestamps) if word_timestamps else None
+    # Whisper / оценка дают время от начала исходного файла; после subclipped(t0,·)
+    # кадр в локальном t соответствует файлу (t0+t), иначе караоке «замирает» до t0.
+    if subclip_start_applied is not None and wts:
+        off = float(subclip_start_applied)
+        wts = [(float(a) - off, float(b) - off) for a, b in wts]
     if wts and vid_dur > 0:
         wts = _clamp_word_timestamps_to_duration(wts, vid_dur)
     bounds_cache: list[tuple[int, int, int, int] | None] = [None]
@@ -328,16 +335,20 @@ def _assemble_mode4_impl(
                 logger.info(
                     f"[Mode4 Assembler] Whisper sync: {len(wt)} words (karaoke + voice)"
                 )
-            elif spoken:
+            elif whisper_script and (spoken or plain_timed_subtitles):
+                # Мультиклип plain_whisper: spoken_scripts=None — без этой ветки при сбое Whisper
+                # остаётся static_quote_caption (весь текст сразу), хотя выбран «плоский» стиль.
                 vc_probe = VideoFileClip(str(path))
                 try:
                     est_dur = float(vc_probe.duration)
                 finally:
                     vc_probe.close()
-                wt, tw = _estimate_karaoke_word_timestamps(spoken, est_dur)
+                est_src = (spoken.strip() if (spoken and spoken.strip()) else whisper_script)
+                wt, tw = _estimate_karaoke_word_timestamps(est_src, est_dur)
                 if wt and tw:
                     logger.info(
-                        f"[Mode4 Assembler] Whisper unavailable -> estimated karaoke sync: {len(wt)} words"
+                        f"[Mode4 Assembler] Whisper unavailable -> estimated "
+                        f"{'plain_timed' if plain_timed_subtitles else 'karaoke'} sync: {len(wt)} words"
                     )
             if (
                 trim_clips_to_whisper_speech
@@ -354,7 +365,6 @@ def _assemble_mode4_impl(
                 t1 = min(full_dur, float(wt[-1][1]) + pad_end)
                 if t1 - t0 > 0.18:
                     subclip_range = (t0, t1)
-                    wt = [(max(0.0, a - t0), max(0.0, b - t0)) for a, b in wt]
                     logger.info(
                         f"[Mode4 Assembler] Trim clip to speech [{t0:.2f}s–{t1:.2f}s] "
                         f"(tight join, −{t0:.2f}s lead / −{full_dur - t1:.2f}s tail)"

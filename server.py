@@ -1032,8 +1032,8 @@ def _validate_start_request(req: StartRequest) -> None:
         elif sub5 not in ("facts50", "outline", "book_night", "unwritten_chapter") and len(txt) < 80:
             raise HTTPException(400, "Mode 5: вставьте полноценный текст для озвучки")
         lang5 = (getattr(req, "mode5_language", None) or getattr(req, "language", "auto") or "auto").strip().lower()
-        if lang5 not in ("ru", "en", "auto", ""):
-            raise HTTPException(400, "Mode 5: язык должен быть auto, ru или en")
+        if lang5 not in ("ru", "en", "es", "fr", "de", "auto", ""):
+            raise HTTPException(400, "Mode 5: язык должен быть auto, ru, en, es, fr или de")
     elif req.mode in (6, 7, 8, 9, 10, 11):
         pass
     elif req.mode != 13 and not req.topic and not req.auto_topic:
@@ -1393,8 +1393,19 @@ async def stream_logs(session_id: str):
             persisted = mode5_status_from_plan(session_id)
 
             async def persisted_event_gen():
-                payload = {"type": "done", **persisted}
-                yield f"data: {json.dumps(payload)}\n\n"
+                runtime_status = str(persisted.get("mode5_runtime_status") or "").strip().lower()
+                if runtime_status == "paused":
+                    while True:
+                        payload = {
+                            "type": "heartbeat",
+                            "status": runtime_status,
+                            "mode5_runtime_status": runtime_status,
+                        }
+                        yield f"data: {json.dumps(payload)}\n\n"
+                        await asyncio.sleep(20)
+                else:
+                    payload = {"type": "done", **persisted}
+                    yield f"data: {json.dumps(payload)}\n\n"
 
             return StreamingResponse(
                 persisted_event_gen(),
@@ -1990,7 +2001,11 @@ async def mode5_review_state_ep(session_id: str):
 @app.post("/api/mode5/{session_id}/continue-generation")
 async def mode5_continue_generation_ep(session_id: str):
     """Продолжить mode5 с последнего сохранённого этапа (TTS/картинки/слайсы на диске)."""
-    from modes.mode5.pipeline import load_mode5_plan, mode5_resume_snapshot
+    from modes.mode5.pipeline import (
+        load_mode5_plan,
+        mode5_resume_snapshot,
+        set_mode5_pipeline_paused,
+    )
 
     lock = _mode5_continue_locks.setdefault(session_id, asyncio.Lock())
     async with lock:
@@ -2014,6 +2029,11 @@ async def mode5_continue_generation_ep(session_id: str):
             plan = load_mode5_plan(session_id)
         except FileNotFoundError as e:
             raise HTTPException(404, str(e)) from e
+        try:
+            set_mode5_pipeline_paused(session_id, False)
+            plan["pipeline_paused"] = False
+        except Exception as e:
+            logger.warning(f"[Mode5] failed to clear persisted pause before continue: {e}")
 
         topic = (
             (plan.get("header_title") or plan.get("facts_topic") or "").strip()
@@ -2149,7 +2169,9 @@ async def mode13_assemble_ep(session_id: str, body: AssembleClipsBody):
 async def list_pipeline_sessions():
     """Список сессий для сайдбара: running/paused, проверка клипов, ошибка/отмена (чтобы не «пропадали»)."""
     active = []
+    seen_session_ids: set[str] = set()
     for sid, s in _sessions.items():
+        seen_session_ids.add(sid)
         st = s.get("status")
         result = s.get("result") if isinstance(s.get("result"), dict) else {}
         review_pending = bool(
@@ -2173,6 +2195,32 @@ async def list_pipeline_sessions():
                 "review_pending": review_pending,
             }
         )
+    try:
+        from modes.mode5.pipeline import mode5_status_from_plan
+
+        for plan_path in settings.videos_dir.glob(f"*/mode5_plan.json"):
+            sid = plan_path.parent.name
+            if sid in seen_session_ids:
+                continue
+            try:
+                result = mode5_status_from_plan(sid)
+            except Exception:
+                continue
+            st = str(result.get("mode5_runtime_status") or "").strip().lower()
+            if st != "paused" and not bool(result.get("mode5_pipeline_paused")):
+                continue
+            active.append(
+                {
+                    "session_id": sid,
+                    "status": "paused",
+                    "topic": result.get("topic") or f"#{sid[-8:]}",
+                    "mode": 5,
+                    "started_at": plan_path.stat().st_mtime,
+                    "review_pending": False,
+                }
+            )
+    except Exception as e:
+        logger.debug(f"[API /pipeline/sessions] mode5 persisted scan skipped: {e}")
     logger.debug(f"[API /pipeline/sessions] returning {len(active)} active")
     return {"sessions": sorted(active, key=lambda x: x.get("started_at") or 0, reverse=True)}
 
@@ -2189,6 +2237,16 @@ async def pause_pipeline(session_id: str):
     if pause_event:
         pause_event.clear()
     session["status"] = "paused"
+    if int(session.get("mode") or 0) == 5:
+        try:
+            from modes.mode5.pipeline import set_mode5_pipeline_paused
+
+            set_mode5_pipeline_paused(session_id, True)
+        except FileNotFoundError:
+            # Very early pause: the first Mode 5 checkpoint has not been written yet.
+            pass
+        except Exception as e:
+            logger.warning(f"[Mode5] failed to persist pause for {session_id}: {e}")
     return {"status": "paused", "session_id": session_id}
 
 
@@ -2196,7 +2254,15 @@ async def pause_pipeline(session_id: str):
 async def resume_pipeline(session_id: str):
     session = _sessions.get(session_id)
     if not session:
-        raise HTTPException(404, "Session not found")
+        try:
+            from modes.mode5.pipeline import load_mode5_plan
+
+            plan = load_mode5_plan(session_id)
+            if not bool(plan.get("pipeline_paused")):
+                raise HTTPException(404, "Session not found")
+        except FileNotFoundError:
+            raise HTTPException(404, "Session not found")
+        return await mode5_continue_generation_ep(session_id)
     if session["status"] != "paused":
         raise HTTPException(400, f"Cannot resume: status is {session['status']}")
     control = session.get("control", {})
@@ -2204,6 +2270,15 @@ async def resume_pipeline(session_id: str):
     if pause_event:
         pause_event.set()
     session["status"] = "running"
+    if int(session.get("mode") or 0) == 5:
+        try:
+            from modes.mode5.pipeline import set_mode5_pipeline_paused
+
+            set_mode5_pipeline_paused(session_id, False)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logger.warning(f"[Mode5] failed to clear persisted pause for {session_id}: {e}")
     return {"status": "running", "session_id": session_id}
 
 
@@ -2224,6 +2299,15 @@ async def cancel_pipeline(session_id: str):
         task.cancel()
     session["status"] = "cancelled"
     session["error"] = session.get("error") or "Генерация отменена"
+    if int(session.get("mode") or 0) == 5:
+        try:
+            from modes.mode5.pipeline import set_mode5_pipeline_paused
+
+            set_mode5_pipeline_paused(session_id, False)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logger.warning(f"[Mode5] failed to clear persisted pause on cancel for {session_id}: {e}")
     return {"status": "cancelled", "session_id": session_id}
 
 

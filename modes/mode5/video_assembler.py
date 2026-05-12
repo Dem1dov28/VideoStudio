@@ -234,6 +234,8 @@ def _make_segment_clip_static_still(
 
     duration = _wav_duration_sec(audio_path)
     render_crf = max(15, min(28, int(getattr(settings, "mode5_render_crf", 17) or 17)))
+    encode_preset = str(getattr(settings, "mode5_segment_encode_preset", "medium") or "medium").strip() or "medium"
+    ffmpeg_threads = max(1, min(16, int(getattr(settings, "mode5_segment_ffmpeg_threads", 1) or 1)))
     # FastGen/Veo source clips may include a small bottom-right provider watermark.
     cr = mode5_watermark_bottom_crop_ratio()
     crop_pre = f"crop=iw:ih-ceil(ih*{cr:.4f}):0:0," if cr > 1e-6 else ""
@@ -262,7 +264,9 @@ def _make_segment_clip_static_still(
         "-crf",
         str(render_crf),
         "-preset",
-        "medium",
+        encode_preset,
+        "-threads",
+        str(ffmpeg_threads),
         "-pix_fmt",
         "yuv420p",
         str(temp_out),
@@ -314,6 +318,8 @@ def _make_segment_clip(
         panx0, panx1, pany0, pany1 = (0.5, 0.5, 0.5, 0.5)
     duration = _wav_duration_sec(audio_path)
     render_crf = max(15, min(28, int(getattr(settings, "mode5_render_crf", 17) or 17)))
+    encode_preset = str(getattr(settings, "mode5_segment_encode_preset", "medium") or "medium").strip() or "medium"
+    ffmpeg_threads = max(1, min(16, int(getattr(settings, "mode5_segment_ffmpeg_threads", 1) or 1)))
     cr = mode5_watermark_bottom_crop_ratio()
     crop_pre = f"crop=iw:ih-ceil(ih*{cr:.4f}):0:0," if cr > 1e-6 else ""
     total_frames = max(2, int(round(duration * render_fps)))
@@ -380,7 +386,9 @@ def _make_segment_clip(
         "-crf",
         str(render_crf),
         "-preset",
-        "medium",
+        encode_preset,
+        "-threads",
+        str(ffmpeg_threads),
         "-pix_fmt",
         "yuv420p",
         "-r",
@@ -424,6 +432,8 @@ def _make_looped_video_segment_clip(
 
     duration = _wav_duration_sec(audio_path)
     render_crf = max(15, min(28, int(getattr(settings, "mode5_render_crf", 17) or 17)))
+    encode_preset = str(getattr(settings, "mode5_segment_encode_preset", "medium") or "medium").strip() or "medium"
+    ffmpeg_threads = max(1, min(16, int(getattr(settings, "mode5_segment_ffmpeg_threads", 1) or 1)))
     crop_ratio = mode5_watermark_bottom_crop_ratio()
     vf = (
         f"crop=iw:ih-ceil(ih*{crop_ratio:.4f}):0:0,"
@@ -462,7 +472,9 @@ def _make_looped_video_segment_clip(
         "-crf",
         str(render_crf),
         "-preset",
-        "medium",
+        encode_preset,
+        "-threads",
+        str(ffmpeg_threads),
         "-pix_fmt",
         "yuv420p",
         str(temp_out),
