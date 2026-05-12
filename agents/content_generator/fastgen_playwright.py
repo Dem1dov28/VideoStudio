@@ -410,7 +410,7 @@ async def _restart_fastgen_after_failure(
     context: str,
 ) -> bool:
     """
-    При ошибке генерации закрыть контекст FastGen и открыть заново.
+    При ошибке генерации закрыть окно FastGen и открыть заново.
     Возвращает True, если нужно повторить запрос с теми же параметрами.
     attempt — 0-based номер неудачной попытки.
     """
@@ -422,7 +422,7 @@ async def _restart_fastgen_after_failure(
     )
     if attempt >= max_outer - 1:
         return False
-    await scraper.restart_browser()
+    await scraper._restart_playwright_session()
     return True
 
 
@@ -455,19 +455,10 @@ async def _wait_for_new_video_with_regen(
     timeout_s: int = 600,
     gen_button_el = None,
     gen_button_sel: str = None,
+    cancel_event: threading.Event | None = None,
     clip_index: int | None = None,
 ) -> list[str]:
-    """
-    Wait for video generation with error-count-based retry.
-    
-    Logic:
-    1. Get initial error count at start
-    2. Wait for video to appear
-    3. If error detected: wait for error count to increase, then click Generate
-    
-    IMPORTANT: Only click Generate when error count increases.
-    This prevents queue overflow from multiple rapid clicks.
-    """
+    """Wait for video generation and raise on FastGen errors for browser-level retry."""
     ctag = _video_clip_log(clip_index)
     logger.info(f"[FastGen]{ctag} Waiting for video generation (timeout {timeout_s}s) ...")
     
@@ -485,6 +476,8 @@ async def _wait_for_new_video_with_regen(
     confirmed_err_hits = 0
     
     while time.monotonic() < deadline:
+        if _cancel_requested(cancel_event):
+            raise FastGenCancelled()
         current = await _collect_video_srcs(page)
         new = current - before
         if new:
@@ -523,17 +516,7 @@ async def _wait_for_new_image_with_regen(
     gen_button_el = None,
     gen_button_sel: str = None,
 ) -> list[str]:
-    """
-    Wait for image generation with error-count-based retry.
-    
-    Logic:
-    1. Get initial error count at start
-    2. Wait for image to appear
-    3. If error detected: wait for error count to increase, then click Generate
-    
-    IMPORTANT: Only click Generate when error count increases.
-    This prevents queue overflow from multiple rapid clicks.
-    """
+    """Wait for image generation and raise on FastGen errors for browser-level retry."""
     logger.info(f"[FastGen] Waiting for image generation (timeout {timeout_s}s) ...")
     
     # Get initial error count
@@ -545,6 +528,8 @@ async def _wait_for_new_image_with_regen(
     last_error_check = time.monotonic()
     elapsed = 0
     ERROR_CHECK_INTERVAL = 10
+    confirmed_err: str | None = None
+    confirmed_err_hits = 0
     
     while time.monotonic() < deadline:
         current = await _collect_image_srcs(page)
@@ -624,12 +609,12 @@ async def _wait_for_new_video(
             if err_blocks > initial_error_count:
                 hint = await _check_video_page_errors(page) or "FastGen error UI (destructive panel)"
                 logger.warning(
-                    f"[FastGen]{ctag} Error panel count {initial_error_count} → {err_blocks}: {hint} — retrying"
+                    f"[FastGen]{ctag} Error panel count {initial_error_count} → {err_blocks}: {hint} — retrying in a new browser"
                 )
                 raise VideoGenerationError(hint)
             err = await _check_video_page_errors(page)
             if err:
-                logger.warning(f"[FastGen]{ctag} {err} — retrying earlier")
+                logger.warning(f"[FastGen]{ctag} {err} — retrying in a new browser")
                 raise VideoGenerationError(err)
             last_error_check = time.monotonic()
 
@@ -1038,12 +1023,12 @@ class FastGenScraper:
 
     async def _restart_context_after_video_failure(self, clip_index: int, reason: str) -> None:
         tag = _video_clip_log(clip_index)
-        logger.info(f"[FastGen]{tag} {reason} — полный перезапуск контекста браузера перед следующей попыткой")
+        logger.info(f"[FastGen]{tag} {reason} — закрываю окно браузера перед следующей попыткой")
         try:
-            await self.restart_browser()
-        except Exception as e:
-            logger.warning(f"[FastGen]{tag} restart_browser failed: {e}; full Playwright restart")
             await self._restart_playwright_session()
+        except Exception as e:
+            logger.warning(f"[FastGen]{tag} full Playwright restart failed: {e}; trying soft browser restart")
+            await self.restart_browser()
 
     async def _authenticate(self) -> None:
         page = self._page
@@ -1516,7 +1501,7 @@ class FastGenScraper:
             raise RuntimeError("Generate button not found.")
 
         timeout_s = max(60, settings.fastgen_image_timeout)
-        max_attempts = max(1, settings.fastgen_max_attempts)
+        max_attempts = 1
         new_srcs: list[str] = []
         last_err: BaseException | None = None
 
@@ -1590,9 +1575,7 @@ class FastGenScraper:
             except (TimeoutError, VideoGenerationError) as e:
                 last_err = e
                 await _screenshot(page, f"wait_attempt_{attempt + 1}")
-                if attempt + 1 >= max_attempts:
-                    raise
-                await asyncio.sleep(2)
+                raise
 
         if not new_srcs and last_err:
             raise last_err
@@ -1688,7 +1671,7 @@ class FastGenScraper:
             raise RuntimeError("Generate button not found.")
 
         timeout_s = max(60, settings.fastgen_image_timeout)
-        max_attempts = max(1, settings.fastgen_max_attempts)
+        max_attempts = 1
         new_srcs: list[str] = []
         last_err: BaseException | None = None
 
@@ -1751,9 +1734,7 @@ class FastGenScraper:
             except (TimeoutError, VideoGenerationError) as e:
                 last_err = e
                 await _screenshot(page, f"wait_attempt_{attempt + 1}")
-                if attempt + 1 >= max_attempts:
-                    raise
-                await asyncio.sleep(2)
+                raise
 
         if not new_srcs and last_err:
             raise last_err
@@ -1841,15 +1822,14 @@ class FastGenScraper:
             raise RuntimeError("Generate button not found.")
 
         timeout_s = max(120, settings.fastgen_image_timeout * 2)
-        max_attempts = max(1, settings.fastgen_max_attempts)
+        max_attempts = 1
         new_srcs: list[str] = []
 
         for attempt in range(max_attempts):
             videos_before = await _collect_video_srcs(page)
 
-            # First attempt: click Generate to start
-            # Subsequent attempts (after TimeoutError): click Generate for retry
-            # Error-triggered retries: handled by _wait_for_new_video_with_regen
+            # Page-level retry is disabled: on error the caller restarts the browser
+            # and submits the same request in a fresh FastGen window.
             if attempt == 0:
                 for _ in range(10):
                     disabled = await gen_el.get_attribute("disabled")
@@ -1878,29 +1858,10 @@ class FastGenScraper:
             except (TimeoutError, VideoGenerationError) as e:
                 await _screenshot(page, f"timeout_video{'_retry' + str(attempt) if attempt > 0 else ''}")
                 logger.warning(f"[FastGen] Video attempt {attempt + 1}/{max_attempts} failed: {e}")
-                if attempt + 1 >= max_attempts:
-                    logger.error(f"[FastGen] All {max_attempts} attempts exhausted, giving up")
-                    return None
-                logger.info(f"[FastGen] Clicking Generate for retry {attempt + 2}...")
-                try:
-                    gen_el, gen_sel = await _find_first(page, _GENERATE_SELECTORS, timeout=5000)
-                    if gen_el:
-                        disabled = await gen_el.get_attribute("disabled")
-                        if disabled is None:
-                            await gen_el.click()
-                            logger.info("[FastGen] Generate button clicked for retry")
-                        else:
-                            logger.warning("[FastGen] Generate button is disabled")
-                except Exception as click_err:
-                    logger.warning(f"[FastGen] Could not click Generate: {click_err}")
-                await asyncio.sleep(3)
-                continue
+                raise
 
             if not new_srcs:
-                if attempt + 1 >= max_attempts:
-                    return None
-                await asyncio.sleep(2)
-                continue
+                raise RuntimeError("[FastGen] Новое видео не обнаружено после ожидания")
 
             break
 
@@ -2039,7 +2000,7 @@ class FastGenScraper:
                 await asyncio.sleep(0.5)
                 logger.warning(
                     f"[FastGen]{vtag} Retry {attempt + 1}/{effective_max} for video "
-                    "(previous attempt failed: timeout or content filtered) ..."
+                    "in a fresh browser window (previous attempt failed: timeout or content filtered) ..."
                 )
 
             gen_el, gen_sel = await _find_first(page, _GENERATE_SELECTORS, timeout=5000)
@@ -3169,6 +3130,7 @@ async def generate_video_from_keyframes(
     end_frame_path: Path,
     index: int = 0,
     *,
+    cancel_event: threading.Event | None = None,
     video_aspect_ratio: str | None = None,
 ) -> Path | None:
     """
@@ -3187,7 +3149,7 @@ async def generate_video_from_keyframes(
     """
     return await asyncio.to_thread(
         _run_keyframe_video_sync,
-        prompt, output_dir, start_frame_path, end_frame_path, index, video_aspect_ratio,
+        prompt, output_dir, start_frame_path, end_frame_path, index, cancel_event, video_aspect_ratio,
     )
 
 
@@ -3197,6 +3159,7 @@ def _run_keyframe_video_sync(
     start_frame_path: Path,
     end_frame_path: Path,
     index: int,
+    cancel_event: threading.Event | None = None,
     aspect_ratio: str | None = None,
 ) -> Path | None:
     """Sync wrapper for keyframe video generation."""
@@ -3204,6 +3167,8 @@ def _run_keyframe_video_sync(
     
     async def _inner_attempt(scraper: FastGenScraper) -> Path | None:
         try:
+            if _cancel_requested(cancel_event):
+                raise FastGenCancelled()
             page = scraper._page
             assert page is not None
 
@@ -3212,6 +3177,8 @@ def _run_keyframe_video_sync(
 
             if not scraper._authenticated:
                 await scraper._authenticate()
+            if _cancel_requested(cancel_event):
+                raise FastGenCancelled()
             
             await scraper._activate_video_tab()
             await scraper._select_video_settings(aspect_ratio)
@@ -3276,15 +3243,16 @@ def _run_keyframe_video_sync(
                 raise RuntimeError("Generate button not found.")
             
             timeout_s = max(300, settings.fastgen_image_timeout * 3)  # Longer for keyframes
-            max_attempts = max(1, settings.fastgen_max_attempts)
+            max_attempts = 1
             new_srcs: list[str] = []
             
             for attempt in range(max_attempts):
+                if _cancel_requested(cancel_event):
+                    raise FastGenCancelled()
                 videos_before = await _collect_video_srcs(page)
                 
-                # First attempt: click Generate to start
-                # Subsequent attempts (after TimeoutError): click Generate for retry
-                # Error-triggered retries: handled by _wait_for_new_video_with_regen
+                # Page-level retry is disabled: on error the caller restarts the browser
+                # and submits the same request in a fresh FastGen window.
                 if attempt == 0:
                     # Wait for button to be enabled
                     for _ in range(10):
@@ -3309,34 +3277,19 @@ def _run_keyframe_video_sync(
                         timeout_s=timeout_s,
                         gen_button_el=gen_el,
                         gen_button_sel=gen_sel,
+                        cancel_event=cancel_event,
                         clip_index=index,
                     )
                 except (TimeoutError, VideoGenerationError) as e:
                     await _screenshot(page, f"kf_timeout{'_retry' + str(attempt) if attempt > 0 else ''}")
                     logger.warning(f"[FastGen Keyframes] Attempt {attempt + 1}/{max_attempts} failed: {e}")
-                    if attempt + 1 >= max_attempts:
-                        logger.error(f"[FastGen Keyframes] All {max_attempts} attempts exhausted")
-                        return None
-                    logger.info(f"[FastGen Keyframes] Clicking Generate for retry {attempt + 2}...")
-                    try:
-                        gen_el, gen_sel = await _find_first(page, _GENERATE_SELECTORS, timeout=5000)
-                        if gen_el:
-                            disabled = await gen_el.get_attribute("disabled")
-                            if disabled is None:
-                                await gen_el.click()
-                                logger.info("[FastGen Keyframes] Generate button clicked for retry")
-                            else:
-                                logger.warning("[FastGen Keyframes] Generate button is disabled")
-                    except Exception as click_err:
-                        logger.warning(f"[FastGen Keyframes] Could not click Generate: {click_err}")
-                    await asyncio.sleep(3)
-                    continue
+                    raise
                 
                 if new_srcs:
                     break
             
             if not new_srcs:
-                return None
+                raise RuntimeError("[FastGen Keyframes] Новое видео не обнаружено после ожидания")
             
             logger.success("[FastGen Keyframes] Video generated")
             await _screenshot(page, "kf_07_result")
@@ -3370,6 +3323,8 @@ def _run_keyframe_video_sync(
         await scraper.start()
         try:
             for attempt in range(_outer_attempts()):
+                if _cancel_requested(cancel_event):
+                    raise FastGenCancelled()
                 try:
                     result = await _inner_attempt(scraper)
                     if result and Path(result).exists():
@@ -3379,6 +3334,9 @@ def _run_keyframe_video_sync(
                     ):
                         return None
                 except asyncio.CancelledError:
+                    logger.info("[FastGen Keyframes] Generation cancelled, cleaning up...")
+                    raise
+                except FastGenCancelled:
                     logger.info("[FastGen Keyframes] Generation cancelled, cleaning up...")
                     raise
                 except Exception as e:
