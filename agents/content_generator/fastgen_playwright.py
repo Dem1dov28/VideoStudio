@@ -284,11 +284,18 @@ _VIDEO_ERROR_KEYWORDS = [
     "audio filtered",
     "content policy",
     "content filtered",
+    "video generation timed out",
+    "timed out",
+    "timeout",
+    "time out",
     "blocked",
     "rejected",
     "политика контента",
     "заблокирован",
     "отклонен",
+    "превышено время",
+    "истекло время",
+    "время ожидания",
     "generation failed",
     "video failed",
     "не удалось сгенерировать",
@@ -349,7 +356,9 @@ async def _count_error_blocks(page: Page) -> int:
                 const s = (t || '').toLowerCase();
                 return s.includes('ошиб') || s.includes('цензур') || s.includes('error')
                     || s.includes('failed') || s.includes('blocked') || s.includes('rejected')
-                    || s.includes('filter');
+                    || s.includes('filter') || s.includes('timed out') || s.includes('timeout')
+                    || s.includes('время ожидания') || s.includes('истекло время')
+                    || s.includes('превышено время');
             };
             let n = 0;
             /* Раньше считали все bg-destructive в scroll-area → ложные срабатывания на декоративных панелях */
@@ -421,6 +430,10 @@ async def _restart_fastgen_after_failure(
         "закрываю браузер и открываю FastGen заново с теми же параметрами"
     )
     if attempt >= max_outer - 1:
+        try:
+            await scraper.stop()
+        except Exception as stop_err:
+            logger.debug(f"[FastGen] {context}: browser cleanup after final failure failed: {stop_err}")
         return False
     await scraper._restart_playwright_session()
     return True
@@ -909,12 +922,29 @@ class FastGenScraper:
 
     async def stop(self) -> None:
         """Stop browser and playwright with proper error handling for shutdown scenarios."""
-        # Close browser first
+        # Close page/context before browser. With visible Chromium windows, relying only
+        # on browser.close() can leave a stale FastGen tab around after a timeout.
+        if self._page:
+            try:
+                if not self._page.is_closed():
+                    await asyncio.wait_for(self._page.close(), timeout=5)
+            except Exception as e:
+                logger.debug(f"[FastGen] Page close error (ignored): {e}")
+            finally:
+                self._page = None
+
+        if self._context:
+            try:
+                await asyncio.wait_for(self._context.close(), timeout=8)
+            except Exception as e:
+                logger.debug(f"[FastGen] Context close error (ignored): {e}")
+            finally:
+                self._context = None
+
         if self._browser:
             try:
-                # Check if browser is still connected before closing
                 if hasattr(self._browser, 'is_connected') and self._browser.is_connected():
-                    await self._browser.close()
+                    await asyncio.wait_for(self._browser.close(), timeout=8)
                     logger.debug("[FastGen] Browser closed successfully")
                 else:
                     logger.debug("[FastGen] Browser already disconnected, skipping close")
@@ -923,23 +953,7 @@ class FastGenScraper:
                 logger.debug(f"[FastGen] Browser close error (expected during shutdown): {e}")
             finally:
                 self._browser = None
-        
-        # Close context if exists
-        if self._context:
-            try:
-                await self._context.close()
-            except Exception:
-                pass
-            self._context = None
-        
-        # Close page if exists
-        if self._page:
-            try:
-                await self._page.close()
-            except Exception:
-                pass
-            self._page = None
-        
+
         # Stop playwright last
         if getattr(self, "_playwright", None):
             try:

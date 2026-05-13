@@ -103,6 +103,7 @@ export default function Layout({ children }) {
                 const isError = s.status === 'error';
                 const isCancelled = s.status === 'cancelled';
                 const isReviewPending = !!s.review_pending;
+                const isWaitingConfirmation = !!s.waiting_confirmation;
                 return (
                   <button
                     key={s.session_id}
@@ -117,7 +118,9 @@ export default function Layout({ children }) {
                             : 'bg-white/[0.04] border-white/[0.06] hover:bg-white/[0.06] hover:border-brand-500/25'
                     }`}
                   >
-                    {isReviewPending ? (
+                    {isWaitingConfirmation ? (
+                      <RiPauseLine className="flex-shrink-0 text-sky-400 text-sm" />
+                    ) : isReviewPending ? (
                       <RiCheckboxCircleLine className="flex-shrink-0 text-emerald-400 text-sm" />
                     ) : isPaused ? (
                       <RiPauseLine className="flex-shrink-0 text-amber-400 text-sm" />
@@ -131,7 +134,9 @@ export default function Layout({ children }) {
                     <span className="truncate flex-1 text-[#e8e8f2] font-medium">
                       {s.topic || `#${s.session_id?.slice(-8)}`}
                     </span>
-                    {isReviewPending ? (
+                    {isWaitingConfirmation ? (
+                      <span className="text-[10px] text-sky-400/90 flex-shrink-0">Ожидает</span>
+                    ) : isReviewPending ? (
                       <span className="text-[10px] text-emerald-400/90 flex-shrink-0">Проверка</span>
                     ) : isError ? (
                       <span className="text-[10px] text-red-400/90 flex-shrink-0">Ошибка</span>

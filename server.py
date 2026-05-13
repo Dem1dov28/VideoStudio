@@ -2174,12 +2174,35 @@ async def list_pipeline_sessions():
         seen_session_ids.add(sid)
         st = s.get("status")
         result = s.get("result") if isinstance(s.get("result"), dict) else {}
+        mode = int(s.get("mode") or 1)
+        mode5_waiting_confirmation = False
+        mode5_can_resume = bool(result.get("mode5_can_resume"))
+        if mode == 5:
+            mode5_waiting_confirmation = bool(
+                result.get("mode5_waiting_confirmation")
+                or result.get("mode5_await_intro_confirmation")
+            )
+            # Mode5 writes volatile review/gate state to mode5_plan.json. Refresh it here
+            # so the sidebar keeps background sessions visible after the task returns done.
+            try:
+                from modes.mode5.pipeline import load_mode5_plan, mode5_resume_snapshot_for_plan
+
+                plan = load_mode5_plan(sid)
+                mode5_waiting_confirmation = mode5_waiting_confirmation or bool(
+                    plan.get("await_intro_confirmation")
+                )
+                snap = mode5_resume_snapshot_for_plan(sid, plan)
+                mode5_can_resume = mode5_can_resume or bool(snap.get("can_resume"))
+            except Exception:
+                pass
         review_pending = bool(
             st == "done"
             and (
                 result.get("mode4_multiclip_ready")
                 or result.get("mode13_review_ready")
                 or result.get("mode5_review_ready")
+                or mode5_waiting_confirmation
+                or mode5_can_resume
             )
         )
         terminal_visible = st in ("error", "cancelled")
@@ -2190,9 +2213,11 @@ async def list_pipeline_sessions():
                 "session_id": sid,
                 "status": st,
                 "topic": s.get("topic", "") or f"#{sid[-8:]}",
-                "mode": s.get("mode", 1),
+                "mode": mode,
                 "started_at": s.get("started_at"),
                 "review_pending": review_pending,
+                "waiting_confirmation": mode5_waiting_confirmation,
+                "can_resume": mode5_can_resume,
             }
         )
     try:
@@ -2207,16 +2232,31 @@ async def list_pipeline_sessions():
             except Exception:
                 continue
             st = str(result.get("mode5_runtime_status") or "").strip().lower()
-            if st != "paused" and not bool(result.get("mode5_pipeline_paused")):
+            waiting_confirmation = bool(
+                result.get("mode5_waiting_confirmation")
+                or result.get("mode5_await_intro_confirmation")
+            )
+            review_pending = bool(
+                result.get("mode5_review_ready")
+                or waiting_confirmation
+                or result.get("mode5_can_resume")
+            )
+            if (
+                st not in {"running", "paused"}
+                and not bool(result.get("mode5_pipeline_paused"))
+                and not review_pending
+            ):
                 continue
             active.append(
                 {
                     "session_id": sid,
-                    "status": "paused",
+                    "status": "paused" if bool(result.get("mode5_pipeline_paused")) else (st or "done"),
                     "topic": result.get("topic") or f"#{sid[-8:]}",
                     "mode": 5,
                     "started_at": plan_path.stat().st_mtime,
-                    "review_pending": False,
+                    "review_pending": review_pending,
+                    "waiting_confirmation": waiting_confirmation,
+                    "can_resume": bool(result.get("mode5_can_resume")),
                 }
             )
     except Exception as e:

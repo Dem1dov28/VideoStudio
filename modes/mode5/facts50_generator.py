@@ -22,6 +22,24 @@ FACTS50_TARGET = 77
 _MIN_NARRATION_CHARS = 520
 _FACTS_VERIFY_BATCH = 20
 _NARRATION_BATCH = 26
+_COMBINING_ACUTE = "\u0301"
+_BAD_FACT_PATTERNS = (
+    re.compile(r"\bдополнительн(?:ый|ого|ые)\s+факт", re.IGNORECASE),
+    re.compile(r"\badditional\s+fact\b", re.IGNORECASE),
+    re.compile(r"\bfact\s+number\s+\d+\b", re.IGNORECASE),
+)
+_DISTINCTIVE_FACT_TERMS = (
+    "unesco",
+    "юнеско",
+    "world heritage",
+    "всемирного наследия",
+    "vatican",
+    "ватикан",
+    "uffizi",
+    "уффици",
+    "ватиканские музеи",
+    "vatican museums",
+)
 
 
 def _strip_code_fence(text: str) -> str:
@@ -113,16 +131,141 @@ def _normalize_narrations(obj: dict[str, Any]) -> list[str]:
     return out
 
 
-def _pad_facts_to_target(facts: list[str], *, target: int, language: str, topic: str) -> list[str]:
-    """Ensure exactly `target` fact lines even when LLM under-produces."""
-    out = list(facts[:target])
-    topic_clean = re.sub(r"\s+", " ", (topic or "").strip()) or "the topic"
+def _strip_generation_artifacts(text: str) -> str:
+    """Remove technical TTS artifacts and a few common malformed phrases from visible/generated text."""
+    out = re.sub(r"\s+", " ", (text or "").replace(_COMBINING_ACUTE, "").strip())
+    out = re.sub(r"\bВенецианский\s+карнавальный\b", "Венецианский карнавал", out, flags=re.IGNORECASE)
+    return out
+
+
+def _has_placeholder_fact(text: str) -> bool:
+    t = _strip_generation_artifacts(text)
+    if len(t) < 35:
+        return True
+    return any(p.search(t) for p in _BAD_FACT_PATTERNS)
+
+
+_FACT_STOPWORDS = {
+    "это", "как", "или", "для", "что", "при", "его", "её", "она", "они", "the", "and", "that", "with",
+    "this", "from", "about", "into", "una", "une", "und", "der", "die", "das", "des", "les", "los", "las",
+}
+
+
+def _fact_tokens(text: str) -> set[str]:
+    words = re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]+", _strip_generation_artifacts(text).lower())
+    return {w for w in words if len(w) >= 4 and w not in _FACT_STOPWORDS}
+
+
+def _fact_overlap(a: str, b: str) -> float:
+    ta = _fact_tokens(a)
+    tb = _fact_tokens(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / float(min(len(ta), len(tb)))
+
+
+def _shares_distinctive_term(a: str, b: str) -> bool:
+    la = f" {_strip_generation_artifacts(a).lower()} "
+    lb = f" {_strip_generation_artifacts(b).lower()} "
+    return any(term in la and term in lb for term in _DISTINCTIVE_FACT_TERMS)
+
+
+def _bad_fact_indices(facts: list[str]) -> list[int]:
+    bad: set[int] = {i for i, fact in enumerate(facts) if _has_placeholder_fact(fact)}
+    for i in range(len(facts)):
+        for j in range(i):
+            overlap = _fact_overlap(facts[i], facts[j])
+            if overlap >= 0.62 or (_shares_distinctive_term(facts[i], facts[j]) and overlap >= 0.34):
+                bad.add(i)
+                break
+    return sorted(bad)
+
+
+async def _complete_facts_to_target(
+    facts: list[str],
+    *,
+    target: int,
+    lang_name: str,
+    topic: str,
+) -> list[str]:
+    """Ask the model for real missing facts instead of inserting placeholder lines."""
+    out = [_strip_generation_artifacts(x) for x in facts[:target] if not _has_placeholder_fact(x)]
     while len(out) < target:
-        i = len(out) + 1
-        if language.lower() == "ru":
-            out.append(f"Дополнительный факт {i} по теме «{topic_clean}».")
-        else:
-            out.append(f"Additional fact {i} about {topic_clean}.")
+        need = target - len(out)
+        sys = f"""You complete a list of distinct factual one-liners.
+Output language: {lang_name}.
+Rules:
+- Add exactly {need} NEW, real, broadly verifiable facts about the same topic.
+- Do not repeat any existing fact, entity angle, statistic, museum/site, or wording.
+- No placeholders like "additional fact"; every line must be a finished informative fact.
+- No numbering prefixes, no markdown.
+- Keep each line about 100-220 characters.
+- Output ONLY valid JSON: {{"facts": ["...", "..."]}} with exactly {need} strings."""
+        human = (
+            f"Topic:\n{topic}\n\n"
+            "Existing facts to avoid repeating:\n"
+            + json.dumps(out, ensure_ascii=False)
+        )
+        obj = await _invoke_json(sys, human)
+        additions = [_strip_generation_artifacts(x) for x in _normalize_fact_lines(obj)]
+        for add in additions:
+            if len(out) >= target:
+                break
+            if _has_placeholder_fact(add):
+                continue
+            if all(_fact_overlap(add, prev) < 0.55 and not (_shares_distinctive_term(add, prev) and _fact_overlap(add, prev) >= 0.30) for prev in out):
+                out.append(add)
+        if len(out) < target and not additions:
+            raise ValueError("model returned no usable replacement facts")
+        if len(out) < target and need == target - len(out):
+            raise ValueError("model could not add enough distinct facts")
+    return out[:target]
+
+
+async def _repair_bad_fact_slots(
+    facts: list[str],
+    *,
+    topic: str,
+    lang_name: str,
+    max_rounds: int = 2,
+) -> list[str]:
+    out = [_strip_generation_artifacts(x) for x in facts]
+    for round_idx in range(max(1, max_rounds)):
+        bad = _bad_fact_indices(out)
+        if not bad:
+            return out
+        sys = f"""You are a strict editor for a 77-facts script.
+Output language: {lang_name}.
+Rewrite ONLY the listed bad fact slots.
+Rules:
+- Each replacement must be a finished, concrete, broadly verifiable fact about the topic.
+- Do not repeat any existing fact, statistic, entity angle, museum/site, or wording.
+- Preserve the JSON keys as string indices.
+- No placeholders, no numbering prefixes, no markdown.
+- Output ONLY valid JSON: {{"replacements": {{"12": "new fact", "18": "new fact"}}}}."""
+        human = (
+            f"Topic:\n{topic}\n\n"
+            f"Bad zero-based indices to replace:\n{bad}\n\n"
+            "Current full fact list:\n"
+            + json.dumps(out, ensure_ascii=False)
+        )
+        obj = await _invoke_json(sys, human)
+        repl = obj.get("replacements")
+        if not isinstance(repl, dict):
+            logger.warning("[Mode5 facts50] Fact repair round {} returned no replacements object", round_idx + 1)
+            continue
+        for key, value in repl.items():
+            try:
+                idx = int(key)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= idx < len(out) and isinstance(value, str) and value.strip():
+                candidate = _strip_generation_artifacts(value)
+                if not _has_placeholder_fact(candidate):
+                    out[idx] = candidate
+    remaining = _bad_fact_indices(out)
+    if remaining:
+        raise ValueError(f"Mode 5 (77 фактов): не удалось убрать повторы/заглушки в фактах {remaining[:8]}")
     return out
 
 
@@ -255,14 +398,20 @@ Rules:
         logger.warning(
             f"[Mode5 facts50] Phase 1 still has {len(facts)} facts after repair; trimming to {FACTS50_TARGET}"
         )
-        facts = facts[:FACTS50_TARGET]
+        facts = [_strip_generation_artifacts(x) for x in facts[:FACTS50_TARGET]]
     elif len(facts) < FACTS50_TARGET:
         logger.warning(
-            f"[Mode5 facts50] Phase 1 still has {len(facts)} facts after repair; padding to {FACTS50_TARGET}"
+            f"[Mode5 facts50] Phase 1 still has {len(facts)} facts after repair; asking model to complete to {FACTS50_TARGET}"
         )
-        facts = _pad_facts_to_target(facts, target=FACTS50_TARGET, language=lang, topic=topic_clean)
+        facts = await _complete_facts_to_target(
+            facts,
+            target=FACTS50_TARGET,
+            lang_name=lang_name,
+            topic=topic_clean,
+        )
     if len(facts) != FACTS50_TARGET:
         raise ValueError(f"Mode 5 (77 фактов): модель вернула {len(facts)} фактов вместо {FACTS50_TARGET}. Попробуйте ещё раз.")
+    facts = await _repair_bad_fact_slots(facts, topic=topic_clean, lang_name=lang_name)
 
     if control and control.get("_mode5_test_run"):
         tgt = float(control.get("_mode5_test_target_sec") or 300.0)
@@ -277,7 +426,8 @@ Rules:
 
     await checkpoint(control)
     try:
-        facts = await _verify_facts(topic_clean, lang_name, facts)
+        verified_facts = await _verify_facts(topic_clean, lang_name, facts)
+        facts = await _repair_bad_fact_slots(verified_facts, topic=topic_clean, lang_name=lang_name)
     except Exception as e:
         logger.warning(f"[Mode5 facts50] Fact verification pass failed, using phase-1 facts as fallback: {e}")
 
@@ -299,6 +449,10 @@ Style anchor (keep stable across all batches): calm documentary narrator, precis
 - Ordinals: if useful, use a light in-flow transition; avoid title-style openers like "Fact one of seventy-seven about…".
 - Keep narration strictly aligned with the provided verified fact line. If you are unsure about precise details, keep wording general instead of inventing specifics.
 - 6–10 sentences per fact, concrete and engaging; add context and comparisons, but do not fabricate names, years, quotes, or exact statistics.
+- Every paragraph must have its own closing wording. Do not repeatedly end with the same formula.
+- Avoid overusing generic conclusion openers such as "Таким образом", "Так", "In this way", "Thus", "De este modo", "Ainsi", or "Auf diese Weise"; use them rarely, not as a template.
+- Do not use visible stress marks or pronunciation marks in normal words.
+- Do not turn a thin fact into tourist-brochure filler. Add one concrete context angle, then stop.
 - Plain text only. Aim for roughly 800–1500 characters of real narration per fact when the material allows; if shorter, the pipeline adds invisible padding for the audio API—do not pad with empty prose.
 - Output ONLY valid JSON: {{"narrations": ["paragraph1", "paragraph2", ...]}} with exactly {len(batch_facts)} strings in the same order as input facts."""
 
@@ -319,7 +473,7 @@ Style anchor (keep stable across all batches): calm documentary narrator, precis
             narr = _normalize_narrations(obj)
         if len(narr) != len(batch_facts):
             narr = _pad_narrations_to_facts(batch_facts, narr, language=lang)
-        return [_ensure_min_narration_length(x, language=lang) for x in narr]
+        return [_ensure_min_narration_length(_strip_generation_artifacts(x), language=lang) for x in narr]
 
     # Батчим озвучки параллельно по фактической длине ``facts`` (полный релиз или укороченный test_run).
     n_facts = len(facts)
@@ -332,7 +486,8 @@ Style anchor (keep stable across all batches): calm documentary narrator, precis
     narrations = [x for batch in narr_chunks for x in batch]
     if len(narrations) != n_facts:
         narrations = _pad_narrations_to_facts(facts, narrations, language=lang)
-        narrations = [_ensure_min_narration_length(x, language=lang) for x in narrations[:n_facts]]
+        narrations = [_ensure_min_narration_length(_strip_generation_artifacts(x), language=lang) for x in narrations[:n_facts]]
+    narrations = [_ensure_min_narration_length(_strip_generation_artifacts(x), language=lang) for x in narrations[:n_facts]]
 
     logger.success(f"[Mode5 facts50] Generated {n_facts} facts + narrations for: {topic_clean[:80]}")
     return facts, narrations

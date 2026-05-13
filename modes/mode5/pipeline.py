@@ -27,6 +27,7 @@ from loguru import logger
 
 from agents.video_editor.music_gen import generate_background_music
 from agents.video_editor.tts import (
+    NONSPOKEN_LEN_FILLER_CHAR,
     plain_text_for_voiceapi_tts,
     synthesize,
     voiceapi_mode5_recommended_tts_parallel,
@@ -1225,6 +1226,11 @@ def detect_mode5_language(text: str, preferred: str | None = None) -> str:
     ru_hits = sum(low.count(token) for token in common_ru)
     en_hits = sum(low.count(token) for token in common_en)
     return "en" if en_hits > ru_hits else "ru"
+
+
+def _mode5_visible_text(text: str) -> str:
+    """Text shown in plan/review/image prompts: no VoiceAPI padding or stress marks."""
+    return re.sub(r"\s+", " ", (text or "").replace(NONSPOKEN_LEN_FILLER_CHAR, "").replace("\u0301", "").strip())
 
 
 def load_mode5_plan(session_id: str) -> dict[str, Any]:
@@ -4139,7 +4145,8 @@ async def _revoice_chunk(
         clean_text,
         language=language,
     )
-    chunk["text"] = tts_plain
+    visible_text = _mode5_visible_text(tts_plain)
+    chunk["text"] = visible_text
     chunk["chunk_audio"] = _rel_session(session_root, mp3_path)
     chunk["chunk_audio_wav"] = _rel_session(session_root, wav_path)
     chunk["duration_sec"] = dur
@@ -4152,12 +4159,12 @@ async def _revoice_chunk(
             overlay_title = _fact_overlay_title(fact_idx)
         chunk["segments"] = _segments_for_facts50_chunk(
             str(chunk.get("fact_hint") or ""),
-            tts_plain,
+            visible_text,
             dur,
             overlay_title=overlay_title,
         )
     else:
-        chunk["segments"] = _segments_for_chunk(tts_plain, dur, segment_seconds, wts, words)
+        chunk["segments"] = _segments_for_chunk(visible_text, dur, segment_seconds, wts, words)
     _rebuild_chunk_segment_paths(session_id, chunk)
     locked_style = _ensure_mode5_style_lock(plan)
     await _generate_chunk_images(
@@ -4663,15 +4670,16 @@ async def run_mode5_pipeline(
 
         for ci in range(len(chunk_texts)):
             mp3_path, wav_path, dur, wts, words, tts_plain = tts_by_ci[ci]
+            visible_text = _mode5_visible_text(tts_plain)
             is_intro = ci == 0
             is_outro = _facts50_eval_is_outro(ci, len(chunk_texts), facts50_orig_n)
-            fact_hint = tts_plain if (is_intro or is_outro) else ""
+            fact_hint = visible_text if (is_intro or is_outro) else ""
             if (not is_intro) and (not is_outro) and isinstance(facts_outline, list) and (ci - 1) < len(facts_outline):
                 fact_hint = str(facts_outline[ci - 1] or "").strip()
             overlay_title = "" if (is_intro or is_outro) else _fact_overlay_title(ci - 1)
             segs = _segments_for_facts50_chunk(
                 fact_hint,
-                tts_plain,
+                visible_text,
                 dur,
                 overlay_title=overlay_title,
             )
@@ -4679,7 +4687,7 @@ async def run_mode5_pipeline(
             chunks_plan.append(
                 {
                     "index": ci,
-                    "text": tts_plain,
+                    "text": visible_text,
                     "fact_hint": fact_hint or None,
                     "is_intro": is_intro,
                     "is_outro": is_outro,
@@ -4772,11 +4780,12 @@ async def run_mode5_pipeline(
                 )
                 _record_mode5_operation_seconds(plan, "tts_longform", tts_started, count=1)
 
-            segs = _segments_for_chunk(tts_plain, dur, seg_sec, wts, words)
+            visible_text = _mode5_visible_text(tts_plain)
+            segs = _segments_for_chunk(visible_text, dur, seg_sec, wts, words)
             preview_path = session_root / f"mode5_preview_{ci:03d}.mp4"
             ch_entry: dict[str, Any] = {
                 "index": ci,
-                "text": tts_plain,
+                "text": visible_text,
                 "fact_hint": None,
                 "chunk_audio": _rel_session(session_root, mp3_path),
                 "chunk_audio_wav": _rel_session(session_root, wav_path),
@@ -4885,7 +4894,7 @@ async def run_mode5_pipeline(
                         str(ch_entry.get("text") or ""),
                         language=language,
                     )
-                ch_entry["text"] = tts_plain
+                ch_entry["text"] = _mode5_visible_text(tts_plain)
                 ch_entry["chunk_audio"] = _rel_session(session_root, mp3_path)
                 ch_entry["chunk_audio_wav"] = _rel_session(session_root, wav_path)
                 ch_entry["duration_sec"] = dur
@@ -5009,24 +5018,25 @@ async def resume_mode5_pipeline(
                     text,
                     language=language,
                 )
-            ch["text"] = tts_plain
+            visible_text = _mode5_visible_text(tts_plain)
+            ch["text"] = visible_text
             ch["chunk_audio"] = _rel_session(session_root, mp3_path)
             ch["chunk_audio_wav"] = _rel_session(session_root, wav_path)
             ch["duration_sec"] = dur
             if sm == "facts50":
                 is_intro = bool(ch.get("is_intro"))
                 is_outro = bool(ch.get("is_outro"))
-                fact_hint = str(ch.get("fact_hint") or "").strip() or (tts_plain if (is_intro or is_outro) else "")
+                fact_hint = str(ch.get("fact_hint") or "").strip() or (visible_text if (is_intro or is_outro) else "")
                 overlay_title = "" if (is_intro or is_outro) else _fact_overlay_title(ci - 1)
                 ch["segments"] = _segments_for_facts50_chunk(
                     fact_hint,
-                    tts_plain,
+                    visible_text,
                     dur,
                     overlay_title=overlay_title,
                 )
             else:
                 ch["segments"] = _segments_for_chunk(
-                    tts_plain,
+                    visible_text,
                     dur,
                     int(plan.get("segment_seconds") or SEG_SEC_DEFAULT),
                     wts,
@@ -5146,7 +5156,8 @@ async def resume_mode5_pipeline(
                         str(ch.get("text") or ""),
                         language=language,
                     )
-                    ch["text"] = tts_plain
+                    visible_text = _mode5_visible_text(tts_plain)
+                    ch["text"] = visible_text
                     ch["chunk_audio"] = _rel_session(session_root, mp3_path_new)
                     ch["chunk_audio_wav"] = _rel_session(session_root, wav_path_new)
                     ch["duration_sec"] = dur

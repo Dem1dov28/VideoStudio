@@ -33,6 +33,8 @@ from config import settings
 def _estimate_karaoke_word_timestamps(
     script: str | None,
     duration: float,
+    *,
+    speech_range: tuple[float, float] | None = None,
 ) -> tuple[list[tuple[float, float]] | None, list[str] | None]:
     """
     Fallback для mode4, когда faster-whisper не установлен или не дал таймкоды:
@@ -44,8 +46,15 @@ def _estimate_karaoke_word_timestamps(
     words = text.split()
     if not words:
         return (None, None)
-    lead_in = min(0.16, duration * 0.12)
-    usable = max(0.12, duration - lead_in)
+    if speech_range is not None:
+        start0, end0 = speech_range
+        start0 = max(0.0, min(float(start0), max(0.0, duration - 0.05)))
+        end0 = max(start0 + 0.12, min(float(end0), duration))
+        lead_in = start0
+        usable = max(0.12, end0 - start0)
+    else:
+        lead_in = min(0.16, duration * 0.12)
+        usable = max(0.12, duration - lead_in)
     weights = [max(1.0, min(12.0, len(w.strip(".,!?;:()[]{}\"'«»")))) for w in words]
     total = sum(weights) or float(len(words))
     cur = lead_in
@@ -58,8 +67,70 @@ def _estimate_karaoke_word_timestamps(
         cur = end
     if ts:
         last_start, _last_end = ts[-1]
-        ts[-1] = (last_start, duration)
+        ts[-1] = (last_start, min(duration, lead_in + usable))
     return (ts, words)
+
+
+def _expected_spoken_word_count(script: str | None) -> int:
+    """Грубая оценка числа произносимых слов в скрипте для проверки качества Whisper."""
+    text = (script or "").strip()
+    if not text:
+        return 0
+    return len([w for w in text.split() if w.strip()])
+
+
+def _whisper_result_too_sparse_for_script(
+    script: str | None,
+    tts_words: list[str] | None,
+) -> bool:
+    """
+    FastGen иногда генерирует/Whisper иногда распознаёт только хвост фразы.
+    Если принять такой частичный ASR за правду, полный текст субтитров будет натянут
+    на 5-10 распознанных слов и «поедет» именно на поздних фрагментах.
+    """
+    expected = _expected_spoken_word_count(script)
+    got = len(tts_words or [])
+    if expected < 8:
+        return False
+    # Для нормального клипа Whisper обычно близок к длине скрипта; запас оставляем
+    # на склейки, пропуски артиклей и пунктуацию. 8 слов из 21 — явный частичный ASR.
+    return got < max(5, int(round(expected * 0.55)))
+
+
+def _clip_duration(path: Path) -> float:
+    vc_probe = VideoFileClip(str(path))
+    try:
+        return float(vc_probe.duration)
+    finally:
+        vc_probe.close()
+
+
+def _script_timing_from_whisper_speech_window(
+    script: str | None,
+    duration: float,
+    word_timestamps: list[tuple[float, float]] | None,
+    *,
+    sparse_whisper: bool,
+) -> tuple[list[tuple[float, float]] | None, list[str] | None]:
+    """
+    Stable mode for plain_whisper.
+
+    Whisper's word text is unstable on generated clips: it may omit the beginning, merge
+    phrases, or recognize only a tail. For plain subtitles we only need a smooth readable
+    progression, not exact karaoke. Use Whisper only to locate the speech window when it
+    looks complete enough; distribute the expected script words inside that window.
+    """
+    speech_range: tuple[float, float] | None = None
+    if not sparse_whisper and word_timestamps and len(word_timestamps) >= 2:
+        s = max(0.0, float(word_timestamps[0][0]))
+        e = min(duration, float(word_timestamps[-1][1]))
+        if e - s >= 0.5:
+            speech_range = (s, e)
+    return _estimate_karaoke_word_timestamps(
+        script,
+        duration,
+        speech_range=speech_range,
+    )
 
 
 def _compute_letterbox_bounds(arr: np.ndarray, black_threshold: int = 25) -> tuple[int, int, int, int] | None:
@@ -335,14 +406,36 @@ def _assemble_mode4_impl(
                 logger.info(
                     f"[Mode4 Assembler] Whisper sync: {len(wt)} words (karaoke + voice)"
                 )
+                sparse_whisper = _whisper_result_too_sparse_for_script(whisper_script, tw)
+                if plain_timed_subtitles:
+                    est_dur = _clip_duration(path)
+                    est_wt, est_tw = _script_timing_from_whisper_speech_window(
+                        whisper_script,
+                        est_dur,
+                        wt,
+                        sparse_whisper=sparse_whisper,
+                    )
+                    if est_wt and est_tw:
+                        mode = "full-clip" if sparse_whisper else "speech-window"
+                        logger.info(
+                            "[Mode4 Assembler] Plain subtitle stable timing: "
+                            f"{mode}, whisper={len(tw)}/{_expected_spoken_word_count(whisper_script)} words"
+                        )
+                        wt, tw = est_wt, est_tw
+                elif sparse_whisper:
+                    est_dur = _clip_duration(path)
+                    est_wt, est_tw = _estimate_karaoke_word_timestamps(whisper_script, est_dur)
+                    if est_wt and est_tw:
+                        logger.warning(
+                            "[Mode4 Assembler] Whisper transcript too sparse "
+                            f"({len(tw)}/{_expected_spoken_word_count(whisper_script)} words) "
+                            "-> estimated full-script sync"
+                        )
+                        wt, tw = est_wt, est_tw
             elif whisper_script and (spoken or plain_timed_subtitles):
                 # Мультиклип plain_whisper: spoken_scripts=None — без этой ветки при сбое Whisper
                 # остаётся static_quote_caption (весь текст сразу), хотя выбран «плоский» стиль.
-                vc_probe = VideoFileClip(str(path))
-                try:
-                    est_dur = float(vc_probe.duration)
-                finally:
-                    vc_probe.close()
+                est_dur = _clip_duration(path)
                 est_src = (spoken.strip() if (spoken and spoken.strip()) else whisper_script)
                 wt, tw = _estimate_karaoke_word_timestamps(est_src, est_dur)
                 if wt and tw:
@@ -356,9 +449,7 @@ def _assemble_mode4_impl(
                 and len(wt) > 0
                 and tw
             ):
-                vc_probe = VideoFileClip(str(path))
-                full_dur = float(vc_probe.duration)
-                vc_probe.close()
+                full_dur = _clip_duration(path)
                 pad_start = 0.04
                 pad_end = 0.07
                 t0 = max(0.0, float(wt[0][0]) - pad_start)
