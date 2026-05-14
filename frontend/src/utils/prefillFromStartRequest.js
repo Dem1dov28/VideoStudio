@@ -113,7 +113,7 @@ export function applyStartRequestToForm(req, f, options = {}) {
     const ss = Number(req.mode5_segment_seconds);
     if (Number.isFinite(ss) && ss >= 10) f.setMode5SegmentSeconds?.(Math.min(90, ss));
     const mpi = Number(req.mode5_max_parallel_images);
-    if (Number.isFinite(mpi) && mpi >= 1) f.setMode5MaxParallelImages?.(Math.min(10, mpi));
+    if (Number.isFinite(mpi) && mpi >= 1) f.setMode5MaxParallelImages?.(Math.min(64, mpi));
     const ib = String(req.mode5_image_backend || '').trim().toLowerCase();
     if (ib === 'api' || ib === 'playwright') f.setMode5ImageBackend?.(ib);
     else if (ib === 'auto') f.setMode5ImageBackend?.('api');
@@ -133,6 +133,8 @@ export function applyStartRequestToForm(req, f, options = {}) {
     else f.setMode5SubMode?.('manual');
     if (req.mode5_test_run === true) f.setMode5TestRun?.(true);
     else if (req.mode5_test_run === false) f.setMode5TestRun?.(false);
+    if (req.mode5_skip_chunk_previews === true) f.setMode5SkipChunkPreviews?.(true);
+    else if (req.mode5_skip_chunk_previews === false) f.setMode5SkipChunkPreviews?.(false);
   }
 
   if (m === 6) {

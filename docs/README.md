@@ -5,6 +5,7 @@ This folder contains project documentation and operational notes.
 ## Core Guides
 
 - `MODE_CREATION_GUIDE.md` — how to add and wire new generation modes.
+- `MODE5_PARALLELISM_AND_PROVIDER_LIMITS.md` — Mode 5 parallel knobs vs VoiceAPI/FastGen limits (read before tuning `.env`).
 - `STYLE_PLAN.md` — styling and UI/UX guidance.
 
 ## Root Notes Archive

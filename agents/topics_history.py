@@ -205,14 +205,57 @@ def upsert_start_request_for_session(session_id: str, topic: str, payload: dict)
     return True
 
 
+def _publishing_dict_usable(pub: object) -> bool:
+    """True if publishing payload has at least title/description/tags (RU/EN or flat)."""
+    if not isinstance(pub, dict) or not pub:
+        return False
+    for key in ("ru", "en"):
+        block = pub.get(key)
+        if isinstance(block, dict) and (
+            (block.get("title") or "").strip()
+            or (block.get("description") or "").strip()
+            or block.get("tags")
+        ):
+            return True
+    return bool(
+        (str(pub.get("title") or "").strip())
+        or (str(pub.get("description") or "").strip())
+        or pub.get("tags")
+    )
+
+
 def get_publishing_by_session() -> dict[str, dict]:
     """Return a dict mapping session_id to publishing metadata."""
     topics = get_used_topics()
-    result = {}
+    result: dict[str, dict] = {}
     for t in topics:
         sid = t.get("session_id")
-        if sid and t.get("publishing"):
-            result[sid] = t["publishing"]
+        pub = t.get("publishing")
+        if sid and _publishing_dict_usable(pub):
+            result[str(sid)] = pub
+
+    # Mode 5 и др.: publishing.json в папке сессии часто есть, а в topics_history — нет.
+    videos_dir = settings.videos_dir
+    if not videos_dir.is_dir():
+        return result
+    try:
+        for d in videos_dir.iterdir():
+            if not d.is_dir() or d.name.startswith("_"):
+                continue
+            sid = d.name
+            if _publishing_dict_usable(result.get(sid)):
+                continue
+            pf = d / "publishing.json"
+            if not pf.is_file():
+                continue
+            try:
+                disk = json.loads(pf.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if isinstance(disk, dict) and _publishing_dict_usable(disk):
+                result[sid] = disk
+    except Exception as ex:
+        logger.debug(f"[TopicsHistory] publishing.json scan: {ex}")
     return result
 
 

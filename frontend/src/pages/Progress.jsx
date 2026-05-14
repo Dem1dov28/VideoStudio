@@ -3,6 +3,8 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   RiArrowLeftLine,
+  RiArrowUpLine,
+  RiArrowDownLine,
   RiDownloadLine,
   RiVideoLine,
   RiCheckboxCircleLine,
@@ -142,6 +144,9 @@ export default function Progress() {
   const [mode5WaitUi, setMode5WaitUi] = useState(null);
   const [mode5ContinueBusy, setMode5ContinueBusy] = useState(false);
   const [mode5IntroRegenIdx, setMode5IntroRegenIdx] = useState(null);
+  /** Порядок стартовых превью на гейте подтверждения (слот 0 = самый ранний временной блок). */
+  const [mode5IntroOrder, setMode5IntroOrder] = useState([]);
+  const [mode5IntroReorderBusy, setMode5IntroReorderBusy] = useState(false);
   const [mode5LiveActionKey, setMode5LiveActionKey] = useState('');
   const [mode5PolicyNote, setMode5PolicyNote] = useState('');
   const [mode5ThumbRegenBusy, setMode5ThumbRegenBusy] = useState(false);
@@ -220,7 +225,7 @@ export default function Progress() {
         const r = await api.getPipelineStatus(sid);
         if (cancelled) return;
         const initialStatus =
-          r?.status === 'done' && r?.result?.mode5_waiting_confirmation
+          (r?.status === 'done' || r?.status === 'paused') && r?.result?.mode5_waiting_confirmation
             ? 'waiting_confirmation'
             : (r.status || 'running');
         setStatus(initialStatus);
@@ -228,6 +233,23 @@ export default function Progress() {
         setSessionMode(typeof r.mode === 'number' ? r.mode : 1);
         if (r.status === 'done' && r.result) {
           setDone({ ...r.result, session_id: r.result.session_id || sid });
+        } else if (
+          r.status === 'paused' &&
+          r.result &&
+          typeof r.result === 'object'
+        ) {
+          // После перезапуска бэкенда сессии нет в RAM, но Mode 5 отдаёт снимок из plan (пауза на диске).
+          const normalized = { ...r.result, session_id: r.result.session_id || sid };
+          setDone((prev) => mergeMode5Payload(prev, normalized));
+        } else if (
+          r.status === 'running' &&
+          r.mode === 5 &&
+          r.result &&
+          typeof r.result === 'object'
+        ) {
+          // Восстановленное с диска «идёт генерация» без живой задачи (грязные чанки / pending rebuilds).
+          const normalized = { ...r.result, session_id: r.result.session_id || sid };
+          setDone((prev) => mergeMode5Payload(prev, normalized));
         } else if (r.status === 'error' && r.error) {
           setError(r.error);
           if (r.result && typeof r.result === 'object') {
@@ -323,11 +345,19 @@ export default function Progress() {
           planPending: !!snap?.mode5_plan_pending,
           checkpoint: snap?.mode5_checkpoint_stage ?? null,
           hint,
+          uiPhase: snap?.mode5_ui_phase ?? null,
+          subMode: snap?.mode5_sub_mode ?? null,
+          preflightOnly: !!snap?.mode5_preflight_only,
+          awaitIntroFromPlan: !!snap?.mode5_await_intro_confirmation,
           segmentsImaged: snap?.mode5_segments_imaged,
           segmentsTotal: snap?.mode5_segments_total,
           previewsOnDisk: snap?.mode5_previews_on_disk,
           totalChunks: snap?.mode5_total_chunks,
           readyChunks: snap?.mode5_ready_chunks,
+          introOnDisk: snap?.mode5_intro_previews_on_disk,
+          introExpected: snap?.mode5_intro_previews_expected,
+          voiceReady: snap?.mode5_chunks_voice_ready,
+          voiceTotal: snap?.mode5_chunks_voice_total,
         });
         if (hint) {
           setMode5WaitUi({
@@ -414,19 +444,43 @@ export default function Progress() {
   const mode5BlockLoopEnabled = Boolean(mode5ReviewData?.mode5_block_loop_enabled);
   const mode5IntroPreviewRel =
     done?.mode5_intro_preview_video || mode5Live?.mode5_intro_preview_video || null;
-  const mode5IntroPreviewRels = Array.isArray(done?.mode5_intro_preview_videos)
-    ? done.mode5_intro_preview_videos
-    : Array.isArray(mode5Live?.mode5_intro_preview_videos)
-      ? mode5Live.mode5_intro_preview_videos
-      : mode5IntroPreviewRel
-        ? [mode5IntroPreviewRel]
-        : [];
+  const mode5IntroPreviewRels = useMemo(() => {
+    if (Array.isArray(done?.mode5_intro_preview_videos) && done.mode5_intro_preview_videos.length > 0) {
+      return done.mode5_intro_preview_videos;
+    }
+    if (Array.isArray(mode5Live?.mode5_intro_preview_videos) && mode5Live.mode5_intro_preview_videos.length > 0) {
+      return mode5Live.mode5_intro_preview_videos;
+    }
+    return mode5IntroPreviewRel ? [mode5IntroPreviewRel] : [];
+  }, [
+    done?.mode5_intro_preview_videos,
+    mode5Live?.mode5_intro_preview_videos,
+    mode5IntroPreviewRel,
+  ]);
   const mode5WaitingConfirmation =
     Boolean(done?.mode5_waiting_confirmation) ||
     Boolean(done?.mode5_await_intro_confirmation) ||
     Boolean(mode5Live?.mode5_waiting_confirmation) ||
     Boolean(mode5Live?.mode5_await_intro_confirmation);
   const isMode5IntroGate = sessionMode === 5 && mode5WaitingConfirmation;
+
+  useEffect(() => {
+    if (!isMode5IntroGate) {
+      setMode5IntroOrder([]);
+      return;
+    }
+    const src = mode5IntroPreviewRels;
+    if (!Array.isArray(src) || src.length === 0) return;
+    const multisetSig = (arr) => [...arr].map(String).sort().join('\u0001');
+    setMode5IntroOrder((prev) => {
+      if (prev.length !== src.length) return [...src];
+      if (multisetSig(prev) !== multisetSig(src)) return [...src];
+      return prev;
+    });
+  }, [isMode5IntroGate, sid, mode5IntroPreviewRels]);
+
+  const mode5IntroPreviewList =
+    mode5IntroOrder.length > 0 ? mode5IntroOrder : mode5IntroPreviewRels;
   const isMode5Session =
     sessionMode === 5 || typeof done?.mode5_sub_mode === 'string';
   const mode5HasFinalVideo = !!(
@@ -688,6 +742,9 @@ export default function Progress() {
 
       {/* Step indicator */}
       <div className="card p-5 mb-4">
+        <p className="text-[10px] font-semibold text-[#71717a] uppercase tracking-wider mb-4">
+          Ход выполнения
+        </p>
         <StepIndicator
           logs={logs}
           done={stepIndicatorDone}
@@ -696,6 +753,8 @@ export default function Progress() {
           mode5ReviewProgress={
             isMode5Session && !stepIndicatorDone ? mode5ReviewProgress : null
           }
+          mode5AwaitIntro={isMode5IntroGate}
+          pipelineStatus={status}
         />
       </div>
 
@@ -720,39 +779,143 @@ export default function Progress() {
           <p className="text-sm text-[#d4d4d8] mb-3 leading-relaxed">
             Сначала проверьте стартовые анимированные блоки. После подтверждения начнётся генерация текста, озвучки и остальной сборки.
           </p>
-          <div className="flex flex-wrap gap-3 mb-3">
-            {mode5IntroPreviewRels.map((rel, i) => (
-              <div key={`${rel}-${i}`} className="flex flex-col gap-2">
-                <video
-                  controls
-                  className="max-h-[32vh] rounded-lg shadow-xl border border-[#2a2a34]"
-                  style={{ maxWidth: '260px' }}
-                >
-                  <source
-                    src={`${import.meta.env.VITE_API_URL || ''}/api/video/${sid}/${publicVideoPath(rel)}?v=${clipVersion}`}
-                    type="video/mp4"
-                  />
-                </video>
-                <button
-                  type="button"
-                  disabled={mode5ContinueBusy || busy || mode5IntroRegenIdx === i}
-                  className="btn-secondary text-xs px-2.5 py-1.5 disabled:opacity-50"
-                  onClick={async () => {
-                    setMode5IntroRegenIdx(i);
-                    try {
-                      await api.mode5LiveRegenerateIntroPreview(sid, i);
-                      setClipVersion((v) => v + 1);
-                      setStreamNonce((n) => n + 1);
-                      setError('');
-                    } catch (e) {
-                      setError(e.message || String(e));
-                    } finally {
-                      setMode5IntroRegenIdx(null);
+          <p className="text-xs text-[#a1a1aa] mb-3 leading-relaxed">
+            Порядок сверху вниз задаёт, какой ролик пойдёт на какой участок длинного видео по времени: слот 1 — самый ранний блок, далее по таймлайну. Стрелки меняют местами соседние клипы; порядок сохраняется на сервере сразу после нажатия.
+          </p>
+          <div className="flex flex-col gap-4 mb-3">
+            {mode5IntroPreviewList.map((rel, i) => (
+              <div
+                key={`slot-${i}-${rel}`}
+                className="flex flex-wrap items-start gap-3 rounded-lg border border-[#2a2a34] bg-[#18181b]/40 p-3"
+              >
+                <div className="flex flex-col gap-1 shrink-0">
+                  <span className="text-[11px] font-medium text-[#d4d4d8]">Слот {i + 1}</span>
+                  <div className="flex gap-1">
+                    <button
+                      type="button"
+                      title="Выше в последовательности (раньше по таймлайну)"
+                      disabled={
+                        mode5ContinueBusy ||
+                        busy ||
+                        mode5IntroRegenIdx !== null ||
+                        mode5IntroReorderBusy ||
+                        i === 0
+                      }
+                      className="btn-secondary p-2 rounded-lg disabled:opacity-40"
+                      onClick={async () => {
+                        if (i <= 0 || mode5IntroReorderBusy) return;
+                        const before = [...mode5IntroPreviewList];
+                        const base = [...before];
+                        [base[i], base[i - 1]] = [base[i - 1], base[i]];
+                        setMode5IntroOrder(base);
+                        setMode5IntroReorderBusy(true);
+                        try {
+                          const r = await api.mode5SetIntroPreviewOrder(sid, base);
+                          const vids = r.mode5_intro_preview_videos ?? r.intro_preview_videos;
+                          const first = r.mode5_intro_preview_video ?? r.intro_preview_video;
+                          if (Array.isArray(vids)) {
+                            setMode5IntroOrder(vids);
+                            setDone((p) =>
+                              p ? { ...p, mode5_intro_preview_videos: vids, mode5_intro_preview_video: first } : p,
+                            );
+                            setMode5Live((p) =>
+                              p ? { ...p, mode5_intro_preview_videos: vids, mode5_intro_preview_video: first } : p,
+                            );
+                          }
+                          setError('');
+                        } catch (e) {
+                          setMode5IntroOrder(before);
+                          setError(e.message || String(e));
+                        } finally {
+                          setMode5IntroReorderBusy(false);
+                        }
+                      }}
+                    >
+                      <RiArrowUpLine className="text-lg" />
+                    </button>
+                    <button
+                      type="button"
+                      title="Ниже в последовательности (позже по таймлайну)"
+                      disabled={
+                        mode5ContinueBusy ||
+                        busy ||
+                        mode5IntroRegenIdx !== null ||
+                        mode5IntroReorderBusy ||
+                        i >= mode5IntroPreviewList.length - 1
+                      }
+                      className="btn-secondary p-2 rounded-lg disabled:opacity-40"
+                      onClick={async () => {
+                        const n = mode5IntroPreviewList.length;
+                        if (i >= n - 1 || mode5IntroReorderBusy) return;
+                        const before = [...mode5IntroPreviewList];
+                        const base = [...before];
+                        [base[i], base[i + 1]] = [base[i + 1], base[i]];
+                        setMode5IntroOrder(base);
+                        setMode5IntroReorderBusy(true);
+                        try {
+                          const r = await api.mode5SetIntroPreviewOrder(sid, base);
+                          const vids = r.mode5_intro_preview_videos ?? r.intro_preview_videos;
+                          const first = r.mode5_intro_preview_video ?? r.intro_preview_video;
+                          if (Array.isArray(vids)) {
+                            setMode5IntroOrder(vids);
+                            setDone((p) =>
+                              p ? { ...p, mode5_intro_preview_videos: vids, mode5_intro_preview_video: first } : p,
+                            );
+                            setMode5Live((p) =>
+                              p ? { ...p, mode5_intro_preview_videos: vids, mode5_intro_preview_video: first } : p,
+                            );
+                          }
+                          setError('');
+                        } catch (e) {
+                          setMode5IntroOrder(before);
+                          setError(e.message || String(e));
+                        } finally {
+                          setMode5IntroReorderBusy(false);
+                        }
+                      }}
+                    >
+                      <RiArrowDownLine className="text-lg" />
+                    </button>
+                  </div>
+                </div>
+                <div className="flex flex-col gap-2 min-w-0 flex-1">
+                  <video
+                    controls
+                    className="max-h-[32vh] rounded-lg shadow-xl border border-[#2a2a34]"
+                    style={{ maxWidth: '260px' }}
+                  >
+                    <source
+                      src={`${import.meta.env.VITE_API_URL || ''}/api/video/${sid}/${publicVideoPath(rel)}?v=${clipVersion}`}
+                      type="video/mp4"
+                    />
+                  </video>
+                  <button
+                    type="button"
+                    disabled={
+                      mode5ContinueBusy ||
+                      busy ||
+                      mode5IntroRegenIdx !== null ||
+                      mode5IntroReorderBusy
                     }
-                  }}
-                >
-                  <RiRestartLine /> {mode5IntroRegenIdx === i ? 'Регенерация...' : `Регенерировать #${i + 1}`}
-                </button>
+                    className="btn-secondary text-xs px-2.5 py-1.5 disabled:opacity-50 self-start"
+                    onClick={async () => {
+                      setMode5IntroRegenIdx(i);
+                      try {
+                        await api.mode5LiveRegenerateIntroPreview(sid, i);
+                        setClipVersion((v) => v + 1);
+                        setStreamNonce((n) => n + 1);
+                        setError('');
+                      } catch (e) {
+                        setError(e.message || String(e));
+                      } finally {
+                        setMode5IntroRegenIdx(null);
+                      }
+                    }}
+                  >
+                    <RiRestartLine />{' '}
+                    {mode5IntroRegenIdx === i ? 'Регенерация...' : `Регенерировать слот ${i + 1}`}
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -761,6 +924,21 @@ export default function Progress() {
             onClick={async () => {
               setMode5ContinueBusy(true);
               try {
+                const order = mode5IntroPreviewList;
+                if (order.length > 0) {
+                  const r = await api.mode5SetIntroPreviewOrder(sid, order);
+                  const vids = r.mode5_intro_preview_videos ?? r.intro_preview_videos;
+                  const first = r.mode5_intro_preview_video ?? r.intro_preview_video;
+                  if (Array.isArray(vids)) {
+                    setMode5IntroOrder(vids);
+                    setDone((p) =>
+                      p ? { ...p, mode5_intro_preview_videos: vids, mode5_intro_preview_video: first } : p,
+                    );
+                    setMode5Live((p) =>
+                      p ? { ...p, mode5_intro_preview_videos: vids, mode5_intro_preview_video: first } : p,
+                    );
+                  }
+                }
                 await api.mode5ContinueGeneration(sid);
                 setError('');
                 setDone((prev) => (prev ? { ...prev, mode5_waiting_confirmation: false } : prev));
@@ -773,7 +951,7 @@ export default function Progress() {
                 setMode5ContinueBusy(false);
               }
             }}
-            disabled={mode5ContinueBusy || busy}
+            disabled={mode5ContinueBusy || busy || mode5IntroReorderBusy}
             className="flex items-center gap-2 text-sm px-4 py-2.5 rounded-xl font-medium transition-colors bg-emerald-700 hover:bg-emerald-600 text-white border border-emerald-500/40 disabled:opacity-50"
           >
             <RiPlayLine /> Подтвердить и продолжить генерацию

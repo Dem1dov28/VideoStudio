@@ -27,6 +27,7 @@ import httpx
 from loguru import logger
 
 from agents.content_generator.fastgen_exceptions import FastGenCancelled, VideoGenerationError
+from agents.content_generator.fastgen_global_media import async_fastgen_global_media_slot
 from agents.content_generator.fastgen_prompts import (
     _fastgen_aspect_ratio_normalized,
     _resolve_video_tab_aspect_ratio,
@@ -510,26 +511,31 @@ async def _generate_one_image(
 ) -> Path | None:
     if _cancel_requested(cancel_event):
         return None
-    full_prompt = prepare_fastgen_prompt_for_image(prompt)
-    refs = [p for p in (reference_paths or []) if p.exists()]
-    if len(refs) > 3:
-        logger.warning(f"[FastGen HTTP] remix supports max 3 refs, using first 3 of {len(refs)}")
-        refs = refs[:3]
-    if refs:
-        ref_inputs = [await _image_input_for_path(client, p) for p in refs]
 
-        def _body(cur: str) -> dict[str, Any]:
-            return _v2_image_body_remix(cur, ref_inputs, aspect_ratio)
+    async def _body() -> Path | None:
+        full_prompt = prepare_fastgen_prompt_for_image(prompt)
+        refs = [p for p in (reference_paths or []) if p.exists()]
+        if len(refs) > 3:
+            logger.warning(f"[FastGen HTTP] remix supports max 3 refs, using first 3 of {len(refs)}")
+            refs = refs[:3]
+        if refs:
+            ref_inputs = [await _image_input_for_path(client, p) for p in refs]
 
-    else:
+            def _body_fn(cur: str) -> dict[str, Any]:
+                return _v2_image_body_remix(cur, ref_inputs, aspect_ratio)
 
-        def _body(cur: str) -> dict[str, Any]:
-            return _v2_image_body_generate(cur, aspect_ratio)
+        else:
 
-    out = await _post_v2_images_resilient(client, full_prompt, _body)
-    dest = _unique_frame_dest(output_dir, str(index) if index is not None else "0")
-    dest.write_bytes(_decode_data_uri(out["result"]))
-    return dest if dest.exists() else None
+            def _body_fn(cur: str) -> dict[str, Any]:
+                return _v2_image_body_generate(cur, aspect_ratio)
+
+        out = await _post_v2_images_resilient(client, full_prompt, _body_fn)
+        dest = _unique_frame_dest(output_dir, str(index) if index is not None else "0")
+        dest.write_bytes(_decode_data_uri(out["result"]))
+        return dest if dest.exists() else None
+
+    async with async_fastgen_global_media_slot():
+        return await _body()
 
 
 async def _generate_one_video_v2(
@@ -595,128 +601,132 @@ async def _generate_one_video(
     end_frame: Path | None = None,
     video_aspect_ratio: str | None = None,
 ) -> Path | None:
-    full_prompt = prepare_fastgen_prompt_for_video(prompt)
-    aspect = _video_aspect_enum(video_aspect_ratio)
-    aspect_short = _video_aspect_v4_short(video_aspect_ratio)
-    out = output_dir / f"clip_{index:03d}.mp4"
-    out.parent.mkdir(parents=True, exist_ok=True)
+    async def _video_body() -> Path | None:
+        full_prompt = prepare_fastgen_prompt_for_video(prompt)
+        aspect = _video_aspect_enum(video_aspect_ratio)
+        aspect_short = _video_aspect_v4_short(video_aspect_ratio)
+        out = output_dir / f"clip_{index:03d}.mp4"
+        out.parent.mkdir(parents=True, exist_ok=True)
 
-    if not _v4_enabled():
-        return await _generate_one_video_v2(
-            client,
-            full_prompt,
-            output_dir,
-            index,
-            reference_paths,
-            cancel_event,
-            keyframes=keyframes,
-            start_frame=start_frame,
-            end_frame=end_frame,
-            video_aspect_ratio=video_aspect_ratio,
-        )
+        if not _v4_enabled():
+            return await _generate_one_video_v2(
+                client,
+                full_prompt,
+                output_dir,
+                index,
+                reference_paths,
+                cancel_event,
+                keyframes=keyframes,
+                start_frame=start_frame,
+                end_frame=end_frame,
+                video_aspect_ratio=video_aspect_ratio,
+            )
 
-    # ── v4: keyframes (Flow) ───────────────────────────────────────────────
-    if keyframes and start_frame and start_frame.exists():
-        kf_path = (getattr(settings, "fastgen_http_v4_flow_keyframes_path", None) or "").strip()
-        if not kf_path.startswith("/"):
-            kf_path = "/" + kf_path
-        body: dict[str, Any] = {
-            "prompt": full_prompt,
-            "start_image": await _image_input_for_path(client, Path(start_frame)),
-            "aspect_ratio": aspect,
-        }
-        if end_frame and Path(end_frame).exists():
-            body["end_image"] = await _image_input_for_path(client, Path(end_frame))
-        op_id = await _post_v4_start(client, kf_path, body)
-        data_uri = await _poll_v4_operation(client, op_id, cancel_event)
-        out.write_bytes(_decode_data_uri(data_uri))
-        return out if out.exists() else None
+        # ── v4: keyframes (Flow) ───────────────────────────────────────────────
+        if keyframes and start_frame and start_frame.exists():
+            kf_path = (getattr(settings, "fastgen_http_v4_flow_keyframes_path", None) or "").strip()
+            if not kf_path.startswith("/"):
+                kf_path = "/" + kf_path
+            body: dict[str, Any] = {
+                "prompt": full_prompt,
+                "start_image": await _image_input_for_path(client, Path(start_frame)),
+                "aspect_ratio": aspect,
+            }
+            if end_frame and Path(end_frame).exists():
+                body["end_image"] = await _image_input_for_path(client, Path(end_frame))
+            op_id = await _post_v4_start(client, kf_path, body)
+            data_uri = await _poll_v4_operation(client, op_id, cancel_event)
+            out.write_bytes(_decode_data_uri(data_uri))
+            return out if out.exists() else None
 
-    refs = [p for p in (reference_paths or []) if p.exists()]
-    if len(refs) > 3:
-        logger.warning(f"[FastGen HTTP] ingredients max 3 refs, truncating from {len(refs)}")
-        refs = refs[:3]
+        refs = [p for p in (reference_paths or []) if p.exists()]
+        if len(refs) > 3:
+            logger.warning(f"[FastGen HTTP] ingredients max 3 refs, truncating from {len(refs)}")
+            refs = refs[:3]
 
-    flow_path = (getattr(settings, "fastgen_http_v4_flow_ingredients_path", None) or "").strip()
-    if not flow_path.startswith("/"):
-        flow_path = "/" + flow_path
-    flower_img_path = (getattr(settings, "fastgen_http_v4_flower_from_image_path", None) or "").strip()
-    if not flower_img_path.startswith("/"):
-        flower_img_path = "/" + flower_img_path
-    flow_txt_path = (getattr(settings, "fastgen_http_v4_flow_from_text_path", None) or "").strip()
-    if not flow_txt_path.startswith("/"):
-        flow_txt_path = "/" + flow_txt_path
+        flow_path = (getattr(settings, "fastgen_http_v4_flow_ingredients_path", None) or "").strip()
+        if not flow_path.startswith("/"):
+            flow_path = "/" + flow_path
+        flower_img_path = (getattr(settings, "fastgen_http_v4_flower_from_image_path", None) or "").strip()
+        if not flower_img_path.startswith("/"):
+            flower_img_path = "/" + flower_img_path
+        flow_txt_path = (getattr(settings, "fastgen_http_v4_flow_from_text_path", None) or "").strip()
+        if not flow_txt_path.startswith("/"):
+            flow_txt_path = "/" + flow_txt_path
 
-    # ── v4: 2–3 референса → Flow ingredients ───────────────────────────────
-    if len(refs) >= 2:
-        imgs = [await _image_input_for_path(client, p) for p in refs]
-        body = {"prompt": full_prompt, "reference_images": imgs, "aspect_ratio": aspect}
-        op_id = await _post_v4_start(client, flow_path, body)
-        data_uri = await _poll_v4_operation(client, op_id, cancel_event)
-        out.write_bytes(_decode_data_uri(data_uri))
-        return out if out.exists() else None
+        # ── v4: 2–3 референса → Flow ingredients ───────────────────────────────
+        if len(refs) >= 2:
+            imgs = [await _image_input_for_path(client, p) for p in refs]
+            body = {"prompt": full_prompt, "reference_images": imgs, "aspect_ratio": aspect}
+            op_id = await _post_v4_start(client, flow_path, body)
+            data_uri = await _poll_v4_operation(client, op_id, cancel_event)
+            out.write_bytes(_decode_data_uri(data_uri))
+            return out if out.exists() else None
 
-    # ── v4: один референс — Mode 4: Flow (Veo) N раз → Flower; остальные режимы: только Flow, как вкладка Video в UI
-    if len(refs) == 1:
-        img = await _image_input_for_path(client, refs[0])
-        flow_n = max(1, int(getattr(settings, "mode4_veo_flow_attempts_before_flower", 3) or 3))
-        max_a = max(1, int(settings.fastgen_max_attempts or 8))
-        if mode4_veo_flow_flower:
-            total = flow_n + max_a
-            for attempt in range(total):
+        # ── v4: один референс — Mode 4: Flow (Veo) N раз → Flower; остальные режимы: только Flow, как вкладка Video в UI
+        if len(refs) == 1:
+            img = await _image_input_for_path(client, refs[0])
+            flow_n = max(1, int(getattr(settings, "mode4_veo_flow_attempts_before_flower", 3) or 3))
+            max_a = max(1, int(settings.fastgen_max_attempts or 8))
+            if mode4_veo_flow_flower:
+                total = flow_n + max_a
+                for attempt in range(total):
+                    if _cancel_requested(cancel_event):
+                        return None
+                    try:
+                        if attempt < flow_n:
+                            body = {"prompt": full_prompt, "reference_images": [img], "aspect_ratio": aspect}
+                            logger.info(
+                                f"[FastGen HTTP] clip {index}: v4 Flow (как {getattr(settings, 'mode4_veo_video_model_flow', 'Flow')}) "
+                                f"{attempt + 1}/{flow_n}"
+                            )
+                            op_id = await _post_v4_start(client, flow_path, body)
+                        else:
+                            body = {"prompt": full_prompt, "image": img, "aspect_ratio": aspect_short}
+                            fn = attempt - flow_n + 1
+                            logger.info(
+                                f"[FastGen HTTP] clip {index}: v4 Flower (как {getattr(settings, 'mode4_veo_video_model_flower', 'Flower')}) "
+                                f"{fn}/{max_a}"
+                            )
+                            op_id = await _post_v4_start(client, flower_img_path, body)
+                        data_uri = await _poll_v4_operation(client, op_id, cancel_event)
+                        out.write_bytes(_decode_data_uri(data_uri))
+                        return out if out.exists() else None
+                    except (FastGenCancelled, asyncio.CancelledError):
+                        raise
+                    except Exception as e:
+                        logger.warning(f"[FastGen HTTP] clip {index} video attempt {attempt + 1}/{total}: {e}")
+                        await asyncio.sleep(2.0)
+                return None
+            for attempt in range(max_a):
                 if _cancel_requested(cancel_event):
                     return None
                 try:
-                    if attempt < flow_n:
-                        body = {"prompt": full_prompt, "reference_images": [img], "aspect_ratio": aspect}
-                        logger.info(
-                            f"[FastGen HTTP] clip {index}: v4 Flow (как {getattr(settings, 'mode4_veo_video_model_flow', 'Flow')}) "
-                            f"{attempt + 1}/{flow_n}"
-                        )
-                        op_id = await _post_v4_start(client, flow_path, body)
-                    else:
-                        body = {"prompt": full_prompt, "image": img, "aspect_ratio": aspect_short}
-                        fn = attempt - flow_n + 1
-                        logger.info(
-                            f"[FastGen HTTP] clip {index}: v4 Flower (как {getattr(settings, 'mode4_veo_video_model_flower', 'Flower')}) "
-                            f"{fn}/{max_a}"
-                        )
-                        op_id = await _post_v4_start(client, flower_img_path, body)
+                    body = {"prompt": full_prompt, "reference_images": [img], "aspect_ratio": aspect}
+                    logger.info(
+                        f"[FastGen HTTP] clip {index}: v4 Flow ingredients (как видео по умолчанию в UI, без Flower) "
+                        f"{attempt + 1}/{max_a}"
+                    )
+                    op_id = await _post_v4_start(client, flow_path, body)
                     data_uri = await _poll_v4_operation(client, op_id, cancel_event)
                     out.write_bytes(_decode_data_uri(data_uri))
                     return out if out.exists() else None
                 except (FastGenCancelled, asyncio.CancelledError):
                     raise
                 except Exception as e:
-                    logger.warning(f"[FastGen HTTP] clip {index} video attempt {attempt + 1}/{total}: {e}")
+                    logger.warning(f"[FastGen HTTP] clip {index} video attempt {attempt + 1}/{max_a}: {e}")
                     await asyncio.sleep(2.0)
             return None
-        for attempt in range(max_a):
-            if _cancel_requested(cancel_event):
-                return None
-            try:
-                body = {"prompt": full_prompt, "reference_images": [img], "aspect_ratio": aspect}
-                logger.info(
-                    f"[FastGen HTTP] clip {index}: v4 Flow ingredients (как видео по умолчанию в UI, без Flower) "
-                    f"{attempt + 1}/{max_a}"
-                )
-                op_id = await _post_v4_start(client, flow_path, body)
-                data_uri = await _poll_v4_operation(client, op_id, cancel_event)
-                out.write_bytes(_decode_data_uri(data_uri))
-                return out if out.exists() else None
-            except (FastGenCancelled, asyncio.CancelledError):
-                raise
-            except Exception as e:
-                logger.warning(f"[FastGen HTTP] clip {index} video attempt {attempt + 1}/{max_a}: {e}")
-                await asyncio.sleep(2.0)
-        return None
 
-    # ── v4: только текст → Flow from-text (как Veo Flow по умолчанию в UI, не Flower) ──
-    body = {"prompt": full_prompt, "aspect_ratio": aspect}
-    op_id = await _post_v4_start(client, flow_txt_path, body)
-    data_uri = await _poll_v4_operation(client, op_id, cancel_event)
-    out.write_bytes(_decode_data_uri(data_uri))
-    return out if out.exists() else None
+        # ── v4: только текст → Flow from-text (как Veo Flow по умолчанию в UI, не Flower) ──
+        body = {"prompt": full_prompt, "aspect_ratio": aspect}
+        op_id = await _post_v4_start(client, flow_txt_path, body)
+        data_uri = await _poll_v4_operation(client, op_id, cancel_event)
+        out.write_bytes(_decode_data_uri(data_uri))
+        return out if out.exists() else None
+
+    async with async_fastgen_global_media_slot():
+        return await _video_body()
 
 
 # --- public API ---
@@ -887,24 +897,25 @@ async def generate_images_chain_fastgen(
                 if _cancel_requested(cancel_event):
                     raise FastGenCancelled()
                 try:
-                    if ref_idx is None:
+                    async with async_fastgen_global_media_slot():
+                        if ref_idx is None:
 
-                        def _b(cur: str) -> dict[str, Any]:
-                            return _v2_image_body_generate(cur)
+                            def _b(cur: str) -> dict[str, Any]:
+                                return _v2_image_body_generate(cur)
 
-                        rjson = await _post_v2_images_resilient(client, full_prompt, _b)
-                    else:
-                        if ref_idx < 0 or ref_idx >= len(result):
-                            raise ValueError(f"bad ref_idx {ref_idx} len={len(result)}")
-                        inp = await _image_input_for_path(client, result[ref_idx])
+                            rjson = await _post_v2_images_resilient(client, full_prompt, _b)
+                        else:
+                            if ref_idx < 0 or ref_idx >= len(result):
+                                raise ValueError(f"bad ref_idx {ref_idx} len={len(result)}")
+                            inp = await _image_input_for_path(client, result[ref_idx])
 
-                        def _b(cur: str) -> dict[str, Any]:
-                            return _v2_image_body_transform(cur, inp)
+                            def _b(cur: str) -> dict[str, Any]:
+                                return _v2_image_body_transform(cur, inp)
 
-                        rjson = await _post_v2_images_resilient(client, full_prompt, _b)
-                    dest = _unique_frame_dest(output_dir, str(i))
-                    dest.write_bytes(_decode_data_uri(rjson["result"]))
-                    result.append(dest)
+                            rjson = await _post_v2_images_resilient(client, full_prompt, _b)
+                        dest = _unique_frame_dest(output_dir, str(i))
+                        dest.write_bytes(_decode_data_uri(rjson["result"]))
+                        result.append(dest)
                     ok = True
                     break
                 except FastGenCancelled:
@@ -944,16 +955,17 @@ async def generate_images_chain_from_seed_fastgen(
                 if _cancel_requested(cancel_event):
                     raise FastGenCancelled()
                 try:
-                    inp = await _image_input_for_path(client, ref_path)
+                    async with async_fastgen_global_media_slot():
+                        inp = await _image_input_for_path(client, ref_path)
 
-                    def _b(cur: str) -> dict[str, Any]:
-                        return _v2_image_body_transform(cur, inp)
+                        def _b(cur: str) -> dict[str, Any]:
+                            return _v2_image_body_transform(cur, inp)
 
-                    rjson = await _post_v2_images_resilient(client, full_prompt, _b)
-                    dest = _unique_frame_dest(output_dir, str(200 + i))
-                    dest.write_bytes(_decode_data_uri(rjson["result"]))
-                    chain.append(dest)
-                    generated.append(dest)
+                        rjson = await _post_v2_images_resilient(client, full_prompt, _b)
+                        dest = _unique_frame_dest(output_dir, str(200 + i))
+                        dest.write_bytes(_decode_data_uri(rjson["result"]))
+                        chain.append(dest)
+                        generated.append(dest)
                     ok = True
                     break
                 except FastGenCancelled:

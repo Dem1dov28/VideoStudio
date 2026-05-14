@@ -35,10 +35,12 @@ class Settings(BaseSettings):
     # Email и пароль для fast-gen.ai (для Playwright авторизации)
     fastgen_email: str = Field("", alias="FASTGEN_EMAIL")
     fastgen_password: str = Field("", alias="FASTGEN_PASSWORD")
-    # Сколько видео генерировать параллельно (каждое в своём окне браузера). 12 = все сразу.
-    fastgen_video_parallel_workers: int = Field(15, alias="FASTGEN_VIDEO_PARALLEL_WORKERS")
-    # Сколько изображений генерировать параллельно (Mode 1 и др.).
+    # Сколько видео генерировать параллельно (HTTP или своё окно браузера). Ориентир FastGen — до ~10 параллельно.
+    fastgen_video_parallel_workers: int = Field(10, alias="FASTGEN_VIDEO_PARALLEL_WORKERS")
+    # Сколько изображений генерировать параллельно (Mode 1, HTTP-батчи и др.). Ориентир FastGen — до ~10 параллельно.
     fastgen_image_parallel_workers: int = Field(10, alias="FASTGEN_IMAGE_PARALLEL_WORKERS")
+    # Общий потолок одновременных задач «картинка или видео» FastGen в процессе (HTTP + Playwright вместе).
+    fastgen_global_media_concurrency: int = Field(10, alias="FASTGEN_GLOBAL_MEDIA_CONCURRENCY", ge=1, le=64)
     # Img2img: доля шума 0.0–1.0 (как в SD denoising strength). Ниже = больше похоже на референс.
     # Рекомендации из гайдов: ~0.15–0.35 для сохранения композиции; None = не трогать UI FastGen.
     # Если на сайте слайдер 0–100, в .env можно указать 25 (= 0.25).
@@ -192,11 +194,11 @@ class Settings(BaseSettings):
     mode5_tts_pitch: str = Field("-8Hz", alias="MODE5_TTS_PITCH")
     mode5_vkcloud_voice_model: str = Field("aidar", alias="MODE5_VKCLOUD_VOICE_MODEL")
     mode5_elevenlabs_voice_id: str = Field("ErXwobaYiN019PkySvjV", alias="MODE5_ELEVENLABS_VOICE_ID")
-    # Mode 5: максимальное число параллельных генераций картинок на окна (потолок в pipeline = 10).
-    mode5_max_parallel_images: int = Field(10, alias="MODE5_MAX_PARALLEL_IMAGES", ge=1, le=10)
+    # Mode 5: параллельные картинки по сегментам (под FastGen по умолчанию держим 10 — см. FASTGEN_*_PARALLEL_WORKERS).
+    mode5_max_parallel_images: int = Field(10, alias="MODE5_MAX_PARALLEL_IMAGES", ge=1, le=64)
     # Mode 5 facts50: сколько чанков одновременно пускать в image phase.
     # Отдельно от TTS, потому что VoiceAPI и FastGen имеют разные лимиты.
-    mode5_facts50_image_parallel: int = Field(2, alias="MODE5_FACTS50_IMAGE_PARALLEL", ge=1, le=8)
+    mode5_facts50_image_parallel: int = Field(10, alias="MODE5_FACTS50_IMAGE_PARALLEL", ge=1, le=32)
     # Mode 5: бэкенд генерации картинок.
     # - "api"        -> только HTTP API (fastgen_http)
     # - "playwright" -> только браузерный путь (fastgen_playwright)
@@ -251,16 +253,17 @@ class Settings(BaseSettings):
     # Новая задача при истечении poll deadline (очередь/нагрузка на стороне VoiceAPI).
     voiceapi_poll_timeout_retries: int = Field(3, alias="VOICEAPI_POLL_TIMEOUT_RETRIES", ge=0, le=8)
     # После локального deadline сначала дожимать тот же task_id (без POST /tasks). Иначе на провайдере
-    # копятся активные задачи и срабатывает лимит «5 active tasks» (429 при создании новой).
+    # копятся активные задачи и срабатывает лимит аккаунта (часто в теле 429: «N active tasks»).
     # Множитель к budget из _voiceapi_poll_deadline_timeout_sec; 0 = отключить (старое поведение).
     voiceapi_same_task_grace_multiplier: float = Field(1.0, alias="VOICEAPI_SAME_TASK_GRACE_MULTIPLIER", ge=0.0, le=5.0)
     # Rate-limit safety: cap concurrent /tasks (одна задача = создание → poll → result).
-    # У csv666 лимит «не более N активных задач» на аккаунт — оставляем запас (headroom).
-    voiceapi_provider_active_task_limit: int = Field(5, alias="VOICEAPI_PROVIDER_ACTIVE_TASK_LIMIT", ge=2, le=32)
-    # При лимите провайдера «5 активных задач» headroom=4 → не более 1 одновременного синтеза в процессе,
-    # чтобы не копить висок вместе с повторами/другими клиентами.
-    voiceapi_active_task_headroom: int = Field(4, alias="VOICEAPI_ACTIVE_TASK_HEADROOM", ge=0, le=16)
-    voiceapi_max_concurrency: int = Field(2, alias="VOICEAPI_MAX_CONCURRENCY")
+    # Официально в API: до 5 одновременных TTS-задач — https://voiceapi.csv666.ru/docs
+    # VOICEAPI_PROVIDER_ACTIVE_TASK_LIMIT — подстройте, если тариф/аккаунт отличается (иначе 429).
+    voiceapi_provider_active_task_limit: int = Field(5, alias="VOICEAPI_PROVIDER_ACTIVE_TASK_LIMIT", ge=2, le=128)
+    # Запас под чужие активные задачи на том же API-ключе; effective = min(voiceapi_max_concurrency, limit - headroom).
+    # Док: 5 одновременных TTS — при headroom=0 процесс может занять все 5 слотов.
+    voiceapi_active_task_headroom: int = Field(0, alias="VOICEAPI_ACTIVE_TASK_HEADROOM", ge=0, le=32)
+    voiceapi_max_concurrency: int = Field(5, alias="VOICEAPI_MAX_CONCURRENCY", ge=1, le=64)
     # Жёсткий предел числа POST /tasks при 429 (страховка). Основной лимит — voiceapi_create_429_total_budget_sec.
     voiceapi_create_max_attempts: int = Field(500, alias="VOICEAPI_CREATE_MAX_ATTEMPTS", ge=1, le=10000)
     # Суммарное время удержания 429 на POST /tasks: ждём освобождения слотов у провайдера (другие клиенты / висяки).
@@ -288,7 +291,7 @@ class Settings(BaseSettings):
     # Fixed pool size of reusable animated block-loops (default 5 => covers 2.5h by 30-min slots).
     mode5_block_loop_pool_size: int = Field(5, alias="MODE5_BLOCK_LOOP_POOL_SIZE", ge=1, le=20)
     # Сколько независимых animated block-loop клипов генерировать одновременно.
-    mode5_block_loop_parallel: int = Field(2, alias="MODE5_BLOCK_LOOP_PARALLEL", ge=1, le=6)
+    mode5_block_loop_parallel: int = Field(10, alias="MODE5_BLOCK_LOOP_PARALLEL", ge=1, le=20)
     mode5_block_loop_include_facts50: bool = Field(True, alias="MODE5_BLOCK_LOOP_INCLUDE_FACTS50")
     # True: FastGen still → FastGen image-to-video → loop; False: только keyframes из JPEG сегментов (старое поведение).
     mode5_block_loop_still_then_animate: bool = Field(True, alias="MODE5_BLOCK_LOOP_STILL_THEN_ANIMATE")
@@ -300,12 +303,12 @@ class Settings(BaseSettings):
     # Before full long-video pipeline: generate one animated intro preview and wait for user confirmation.
     mode5_intro_confirm_enabled: bool = Field(True, alias="MODE5_INTRO_CONFIRM_ENABLED")
     # Сколько intro-preview still→video вариантов генерировать одновременно.
-    mode5_intro_pool_parallel: int = Field(2, alias="MODE5_INTRO_POOL_PARALLEL", ge=1, le=6)
+    mode5_intro_pool_parallel: int = Field(8, alias="MODE5_INTRO_POOL_PARALLEL", ge=1, le=20)
     # Mode5 segment encode quality (image/video -> per-segment mp4): lower CRF = sharper output.
     mode5_render_crf: int = Field(17, alias="MODE5_RENDER_CRF", ge=15, le=28)
     # FFmpeg preset/threads for per-segment preview encodes before MoviePy final encode.
     mode5_segment_encode_preset: str = Field("medium", alias="MODE5_SEGMENT_ENCODE_PRESET")
-    mode5_segment_ffmpeg_threads: int = Field(1, alias="MODE5_SEGMENT_FFMPEG_THREADS", ge=1, le=16)
+    mode5_segment_ffmpeg_threads: int = Field(4, alias="MODE5_SEGMENT_FFMPEG_THREADS", ge=1, le=32)
 
     # ── Pipeline mode ────────────────────────────────────────────────────────
     # "mode1" = Top-5 facts with AI-generated images
@@ -502,11 +505,12 @@ class Settings(BaseSettings):
     mode5_enable_zoom: bool = Field(True, alias="MODE5_ENABLE_ZOOM")
     # Mode 5 «50 фактов»: один замороженный кадр на весь факт (без zoompan), быстрее кодирование.
     mode5_facts50_static_still: bool = Field(True, alias="MODE5_FACTS50_STATIC_STILL")
-    # Сколько фактов одновременно: TTS + LLM/картинки (ограничьте при лимитах API).
-    mode5_facts50_parallel: int = Field(10, alias="MODE5_FACTS50_PARALLEL", ge=1, le=32)
+    # Сколько фактов/чанков одновременно на этапах facts50 (TTS + LLM + картинки).
+    # Реальный параллелизм озвучки VoiceAPI = min(это значение, voiceapi_mode5_recommended_tts_parallel()) — см. agents/video_editor/tts.py.
+    mode5_facts50_parallel: int = Field(32, alias="MODE5_FACTS50_PARALLEL", ge=1, le=64)
     # Long-form (manual/bible/outline/book_night/unwritten_chapter): сколько чанков одновременно
     # может находиться в фазе image generation (внутри чанка уже есть своя параллель по сегментам).
-    mode5_longform_chunk_image_parallel: int = Field(2, alias="MODE5_LONGFORM_CHUNK_IMAGE_PARALLEL", ge=1, le=8)
+    mode5_longform_chunk_image_parallel: int = Field(10, alias="MODE5_LONGFORM_CHUNK_IMAGE_PARALLEL", ge=1, le=32)
     # После фактов: длительность "sleep tail" (сек) с тематической музыкой.
     mode5_facts50_sleep_tail_sec: int = Field(0, alias="MODE5_FACTS50_SLEEP_TAIL_SEC")
     # Громкость хвоста относительно исходной дорожки (0.0-1.0).
@@ -514,11 +518,11 @@ class Settings(BaseSettings):
     # Смена тематического кадра в sleep-tail (сек), по умолчанию 5 минут.
     mode5_facts50_sleep_tail_image_interval_sec: int = Field(300, alias="MODE5_FACTS50_SLEEP_TAIL_IMAGE_INTERVAL_SEC")
     # Сколько тематических кадров sleep-tail генерировать одновременно.
-    mode5_sleep_tail_image_parallel: int = Field(2, alias="MODE5_SLEEP_TAIL_IMAGE_PARALLEL", ge=1, le=6)
+    mode5_sleep_tail_image_parallel: int = Field(10, alias="MODE5_SLEEP_TAIL_IMAGE_PARALLEL", ge=1, le=32)
     # Сколько preview MP4 (mode5_preview_*.mp4) собирать одновременно.
-    mode5_preview_mp4_workers: int = Field(4, alias="MODE5_PREVIEW_MP4_WORKERS", ge=1, le=16)
+    mode5_preview_mp4_workers: int = Field(16, alias="MODE5_PREVIEW_MP4_WORKERS", ge=1, le=32)
     mode5_preview_encode_preset: str = Field("veryfast", alias="MODE5_PREVIEW_ENCODE_PRESET")
-    mode5_preview_encode_threads: int = Field(4, alias="MODE5_PREVIEW_ENCODE_THREADS", ge=1, le=16)
+    mode5_preview_encode_threads: int = Field(8, alias="MODE5_PREVIEW_ENCODE_THREADS", ge=1, le=32)
 
     @property
     def video_resolution(self) -> tuple[int, int]:

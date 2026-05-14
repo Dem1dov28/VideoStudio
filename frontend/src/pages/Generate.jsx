@@ -274,6 +274,8 @@ export default function Generate() {
   const [mode5IdeaLaunchKey, setMode5IdeaLaunchKey] = useState('');
   /** Общий флаг «тест ~5 мин» для режима 5 (не привязан к отдельной карточке подрежима). */
   const [mode5TestRun, setMode5TestRun] = useState(false);
+  /** Без коротких mp4 по частям — сразу один финальный монтаж после картинок и озвучки. */
+  const [mode5SkipChunkPreviews, setMode5SkipChunkPreviews] = useState(false);
   useEffect(() => {
     if (mode !== 5) return;
     if (
@@ -406,6 +408,7 @@ export default function Generate() {
       setMode5HeaderTitle,
       setMode5SubMode,
       setMode5TestRun,
+      setMode5SkipChunkPreviews,
       setMode6NumCharacters,
       setMode7AnimalType,
       setMode7Keyboards,
@@ -663,6 +666,7 @@ export default function Generate() {
         mode5_segment_seconds: mode5SegmentSeconds,
         mode5_image_backend: mode5ImageBackend,
         mode5_skip_final_assembly: true,
+        mode5_skip_chunk_previews: mode5SkipChunkPreviews,
         mode5_video_header_title: headerTrim,
         mode5_bible_mode: effectiveSubMode === 'bible',
         mode5_sub_mode: effectiveSubMode,
@@ -1325,6 +1329,16 @@ export default function Generate() {
                       </p>
                     </div>
                     <Toggle value={mode5TestRun} onChange={setMode5TestRun} />
+                  </div>
+                  <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <div className="text-sm font-semibold text-[#ececf4]">Сразу один финальный ролик</div>
+                      <p className="text-xs text-[#71717a] mt-0.5 max-w-md leading-relaxed">
+                        Не собирать превью по частям для проверки — после иллюстраций сразу длинное{' '}
+                        <code className="text-[#71717a]">video_mode5.mp4</code> одним проходом (дольше по времени, зато без промежуточного монтажа).
+                      </p>
+                    </div>
+                    <Toggle value={mode5SkipChunkPreviews} onChange={setMode5SkipChunkPreviews} />
                   </div>
                 </div>
 

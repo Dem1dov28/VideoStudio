@@ -265,6 +265,11 @@ export const api = {
       body: JSON.stringify({ chunk_index: previewIndex, action_id: actionId }),
       timeoutMs: 180000,
     }),
+  mode5SetIntroPreviewOrder: (sid, introPreviewVideos) =>
+    request(`/api/mode5/${sid}/intro-preview-order`, {
+      method: 'POST',
+      body: JSON.stringify({ intro_preview_videos: introPreviewVideos }),
+    }),
   mode5LiveRebuildFinal: (sid, actionId = makeActionId()) =>
     request(`/api/mode5/${sid}/live/rebuild-final`, {
       method: 'POST',

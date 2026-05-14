@@ -26,6 +26,7 @@ from playwright.async_api import (
 from config import settings
 
 from agents.content_generator.fastgen_exceptions import FastGenCancelled, VideoGenerationError
+from agents.content_generator.fastgen_global_media import async_fastgen_global_media_slot
 from agents.content_generator.fastgen_prompts import (
     _fastgen_aspect_ratio_normalized,
     _fastgen_aspect_select_kw_list,
@@ -2153,13 +2154,14 @@ def _run_single_image_sync(
                 if _cancel_requested(cancel_event):
                     return None
                 try:
-                    paths = await scraper.generate(
-                        prompt,
-                        output_dir,
-                        index=index,
-                        cancel_event=cancel_event,
-                        aspect_ratio=aspect_ratio,
-                    )
+                    async with async_fastgen_global_media_slot():
+                        paths = await scraper.generate(
+                            prompt,
+                            output_dir,
+                            index=index,
+                            cancel_event=cancel_event,
+                            aspect_ratio=aspect_ratio,
+                        )
                     if paths and paths[0] and Path(paths[0]).exists():
                         return paths[0]
                     if _cancel_requested(cancel_event):
@@ -2205,12 +2207,13 @@ def _run_single_image_with_refs_sync(
         try:
             for attempt in range(_outer_attempts()):
                 try:
-                    paths = await scraper.generate_with_multiple_references(
-                        prompt=prompt,
-                        output_dir=output_dir,
-                        index=index,
-                        reference_image_paths=reference_image_paths,
-                    )
+                    async with async_fastgen_global_media_slot():
+                        paths = await scraper.generate_with_multiple_references(
+                            prompt=prompt,
+                            output_dir=output_dir,
+                            index=index,
+                            reference_image_paths=reference_image_paths,
+                        )
                     if paths and paths[0] and Path(paths[0]).exists():
                         return paths[0]
                     if not await _restart_fastgen_after_failure(
@@ -2264,12 +2267,13 @@ def _run_fastgen_sync(
                     if _cancel_requested(cancel_event):
                         raise FastGenCancelled()
                     try:
-                        paths = await scraper.generate(
-                            prompt,
-                            output_dir,
-                            cancel_event=cancel_event,
-                            aspect_ratio=aspect_ratio,
-                        )
+                        async with async_fastgen_global_media_slot():
+                            paths = await scraper.generate(
+                                prompt,
+                                output_dir,
+                                cancel_event=cancel_event,
+                                aspect_ratio=aspect_ratio,
+                            )
                         if paths and any(Path(p).is_file() for p in paths):
                             all_paths.extend(paths)
                             await _asyncio.sleep(1)
@@ -2328,13 +2332,14 @@ def _run_img2img_chain_sync(
                 if _cancel_requested(cancel_event):
                     raise FastGenCancelled()
                 ref_path = Path(result[ref_idx]) if ref_idx is not None else None
-                paths = await scraper.generate(
-                    prompt,
-                    output_dir,
-                    index=i,
-                    reference_image_path=ref_path,
-                    cancel_event=cancel_event,
-                )
+                async with async_fastgen_global_media_slot():
+                    paths = await scraper.generate(
+                        prompt,
+                        output_dir,
+                        index=i,
+                        reference_image_path=ref_path,
+                        cancel_event=cancel_event,
+                    )
                 if paths:
                     result.append(Path(paths[0]))
                 else:
@@ -2377,13 +2382,14 @@ def _run_img2img_chain_from_seed_sync(
                 if ref_idx < 0 or ref_idx >= len(chain):
                     raise ValueError(f"[FastGen] Invalid ref_idx {ref_idx} for chain len {len(chain)}")
                 ref_path = chain[ref_idx]
-                paths = await scraper.generate(
-                    prompt,
-                    output_dir,
-                    index=200 + i,
-                    reference_image_path=ref_path,
-                    cancel_event=cancel_event,
-                )
+                async with async_fastgen_global_media_slot():
+                    paths = await scraper.generate(
+                        prompt,
+                        output_dir,
+                        index=200 + i,
+                        reference_image_path=ref_path,
+                        cancel_event=cancel_event,
+                    )
                 if not paths:
                     raise RuntimeError(f"[FastGen] From-seed step {i + 1} failed: no image")
                 new_p = Path(paths[0])
@@ -2413,7 +2419,7 @@ def _run_fastgen_images_parallel_sync(
     output_dir.mkdir(parents=True, exist_ok=True)
     workers = min(
         len(prompts),
-        max(1, getattr(settings, "fastgen_image_parallel_workers", 5)),
+        max(1, getattr(settings, "fastgen_image_parallel_workers", 10)),
     )
     logger.info(f"[FastGen] Generating {len(prompts)} images in parallel ({workers} workers) ...")
 
@@ -2461,7 +2467,7 @@ def _run_fastgen_images_with_refs_parallel_sync(
     else:
         workers = min(
             len(prompts_with_refs),
-            max(1, getattr(settings, "fastgen_image_parallel_workers", 5)),
+            max(1, getattr(settings, "fastgen_image_parallel_workers", 10)),
         )
     logger.info(f"[FastGen] Generating {len(prompts_with_refs)} images with references in parallel ({workers} workers) ...")
 
@@ -2518,17 +2524,18 @@ def _run_single_video_sync(
                 if _cancel_requested(cancel_event):
                     return None
                 try:
-                    path = await scraper.generate_video(
-                        prompt,
-                        output_dir,
-                        index=index,
-                        reference_image_path=reference_image_path,
-                        reference_image_paths=reference_image_paths,
-                        upload_reference=upload_ref,
-                        cancel_event=cancel_event,
-                        mode4_veo_flow_flower=mode4_veo_flow_flower,
-                        aspect_ratio=aspect_ratio,
-                    )
+                    async with async_fastgen_global_media_slot():
+                        path = await scraper.generate_video(
+                            prompt,
+                            output_dir,
+                            index=index,
+                            reference_image_path=reference_image_path,
+                            reference_image_paths=reference_image_paths,
+                            upload_reference=upload_ref,
+                            cancel_event=cancel_event,
+                            mode4_veo_flow_flower=mode4_veo_flow_flower,
+                            aspect_ratio=aspect_ratio,
+                        )
                     if path and Path(path).exists():
                         return path
                     if _cancel_requested(cancel_event):
@@ -2683,10 +2690,11 @@ def _run_single_video_multi_ref_sync(
         try:
             for attempt in range(_outer_attempts()):
                 try:
-                    path = await scraper.generate_video_with_references(
-                        prompt, output_dir, index=index,
-                        reference_image_paths=reference_image_paths,
-                    )
+                    async with async_fastgen_global_media_slot():
+                        path = await scraper.generate_video_with_references(
+                            prompt, output_dir, index=index,
+                            reference_image_paths=reference_image_paths,
+                        )
                     if path and Path(path).exists():
                         return path
                     if not await _restart_fastgen_after_failure(
@@ -3340,7 +3348,8 @@ def _run_keyframe_video_sync(
                 if _cancel_requested(cancel_event):
                     raise FastGenCancelled()
                 try:
-                    result = await _inner_attempt(scraper)
+                    async with async_fastgen_global_media_slot():
+                        result = await _inner_attempt(scraper)
                     if result and Path(result).exists():
                         return result
                     if not await _restart_fastgen_after_failure(
@@ -3468,12 +3477,13 @@ def _run_fastgen_with_refs_sync(
                 ok = False
                 for attempt in range(_outer_attempts()):
                     try:
-                        paths = await scraper.generate_with_multiple_references(
-                            prompt=prompt,
-                            output_dir=output_dir,
-                            index=i,
-                            reference_image_paths=ref_paths,
-                        )
+                        async with async_fastgen_global_media_slot():
+                            paths = await scraper.generate_with_multiple_references(
+                                prompt=prompt,
+                                output_dir=output_dir,
+                                index=i,
+                                reference_image_paths=ref_paths,
+                            )
                         if paths:
                             all_paths.extend(paths)
                             await _asyncio.sleep(1)

@@ -465,7 +465,7 @@ async def _expand_unwritten_narrations_to_target(
     control: dict | None,
 ) -> list[str]:
     _ = control
-    sem = asyncio.Semaphore(max(2, min(8, int(getattr(settings, "mode5_facts50_parallel", 8) or 8))))
+    sem = asyncio.Semaphore(max(2, int(getattr(settings, "mode5_facts50_parallel", 32) or 32)))
 
     async def _one(i: int, t: str) -> str:
         async with sem:

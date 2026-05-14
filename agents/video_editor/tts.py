@@ -428,13 +428,13 @@ def _voiceapi_effective_concurrency() -> int:
     """
     Сколько задач VoiceAPI этот процесс может держать одновременно (POST→…→result).
 
-    Провайдер (csv666) возвращает 429, если активных задач >= лимита аккаунта
+    Провайдер (см. https://voiceapi.csv666.ru/docs — до 5 одновременных TTS) возвращает 429, если активных задач >= лимита
     («Please complete existing tasks…»). Один процесс не знает про задачи других
     клиентов — закладываем headroom.
     """
     provider_limit = max(2, int(getattr(settings, "voiceapi_provider_active_task_limit", 5) or 5))
-    headroom = max(0, int(getattr(settings, "voiceapi_active_task_headroom", 3) or 3))
-    configured = max(1, int(getattr(settings, "voiceapi_max_concurrency", 2) or 2))
+    headroom = max(0, int(getattr(settings, "voiceapi_active_task_headroom", 0) or 0))
+    configured = max(1, int(getattr(settings, "voiceapi_max_concurrency", 5) or 5))
     safe_cap = max(1, provider_limit - headroom)
     return min(configured, safe_cap)
 

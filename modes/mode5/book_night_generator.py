@@ -121,6 +121,36 @@ def _book_night_narration_targets(
     return lo, hi, sent_lo, sent_hi
 
 
+def _outline_toc_titles_only(outline: dict[str, Any], *, max_lines: int = 200) -> str:
+    """Только заголовки — без coverage, чтобы батчи озвучки не пересказывали весь план целиком."""
+    lines: list[str] = []
+    for ch in outline.get("chapters") or []:
+        ct = str(ch.get("title") or "").strip()
+        if ct:
+            lines.append(f"- {ct}")
+        for sub in ch.get("subchapters") or []:
+            st = str(sub.get("title") or "").strip()
+            if st:
+                lines.append(f"  · {st}")
+            if len(lines) >= max_lines:
+                break
+        if len(lines) >= max_lines:
+            break
+    if len(lines) >= max_lines:
+        lines.append("  …")
+    return "\n".join(lines) if lines else "(no outline)"
+
+
+_BOOK_NIGHT_STOCK_CLOSER_BAN = (
+    "Banned stock closers / filler templates in ANY language (and close paraphrases): "
+    "Ultimately; In essence; In closing; To conclude; To wrap up; At the end of the day; "
+    "This shift in perspective; profound insights encapsulated; interconnected web; tapestry of; "
+    "transformative journey; embracing this principle as a stock closer; the principle reminds us that; "
+    "В конечном счёте; Таким образом (as a repeated paragraph closer); В заключение. "
+    "End with at most one short concrete sentence, not a rhetorical flourish."
+)
+
+
 def _book_night_narration_batch_size(n_sub: int, narr_hi: int) -> int:
     """Меньше подглав в батче, если каждая должна быть очень длинной (лимит ответа модели)."""
     if narr_hi >= 5500:
@@ -174,7 +204,8 @@ async def _expand_one_book_night_narration(
             "You may add: one clarifying angle, one concrete everyday implication, gentle transitions, and a softer closing. "
             "Do not loop the same thesis with synonyms. "
             "Avoid decorative metaphor chains and avoid cliche poetic images. "
-            "One continuous paragraph, no bullet points, no title line, no markdown fences."
+            "One continuous paragraph, no bullet points, no title line, no markdown fences.\n"
+            + _BOOK_NIGHT_STOCK_CLOSER_BAN
         )
     )
     hum = HumanMessage(
@@ -216,7 +247,7 @@ async def _expand_book_night_narrations_to_target(
 ) -> list[str]:
     """Параллельно дотягиваем блоки, где модель сильно укоротила текст (\\u200b длину озвучки не даёт)."""
     _ = control
-    sem = asyncio.Semaphore(max(2, min(8, int(getattr(settings, "mode5_facts50_parallel", 8) or 8))))
+    sem = asyncio.Semaphore(max(2, int(getattr(settings, "mode5_facts50_parallel", 32) or 32)))
 
     async def _one(i: int, t: str) -> str:
         async with sem:
@@ -270,6 +301,7 @@ async def _dedupe_book_night_neighboring_blocks(
                 f"You are a careful editor for calm book-night narration. Output language: {lang_name} only.\n"
                 "Rewrite ONLY the current subsection to reduce repeated wording and repeated thesis from the previous subsection. "
                 "Advance the argument by one concrete step tied to the current subsection title. Preserve meaning, tone, and approximate length. "
+                "Do not fix overlap by inserting a second global overview of every part or numbered unit of the book. "
                 "Do not invent new book details, dates, studies, quotes, page numbers, dialogue, or anecdotes. "
                 "One continuous paragraph, no markdown."
             )
@@ -329,7 +361,8 @@ async def _tighten_book_night_narrations(
                 "- At most one short metaphor; no cliche metaphor chains.\n"
                 "- Keep sentence rhythm varied: mix shorter and longer sentences naturally.\n"
                 "- Keep one paragraph only, no markdown.\n"
-                "- Do not add new facts, names, dates, statistics, quotes, or anecdotes."
+                "- Do not add new facts, names, dates, statistics, quotes, or anecdotes.\n"
+                + _BOOK_NIGHT_STOCK_CLOSER_BAN
             )
         )
         hum = HumanMessage(
@@ -596,7 +629,7 @@ async def generate_book_night_script(
     )
 
     sys1 = f"""You are a nonfiction book expert and editor for **sleep-time audiobook-style summaries**.
-The user names a **book** (title, optionally author). You must design a chapter plan that **follows the real published structure** of that work as closely as possible: use authentic part/chapter/habit names when the book is well-known (e.g. Covey's habits, standard TOC translations). If the exact TOC is uncertain, approximate the widely accepted structure and keep order faithful to the original book — do NOT invent a random self-help outline unrelated to that title.
+The user names a **book** (title, optionally author). You must design a chapter plan that **follows the real published structure** of that work as closely as possible: use authentic chapter/part titles when the book is well-known (standard TOC / common translations). If the exact TOC is uncertain, approximate the widely accepted structure and keep order faithful to the original book — do NOT invent a random outline unrelated to that title.
 
 Truthfulness / anti-hallucination (mandatory):
 - The user message may include EXTERNAL_SOURCES: third-party encyclopedia/search snippets only, not the book. When present, align author, topic, and broad themes with them; do **not** contradict a clear statement in those sources.
@@ -621,9 +654,12 @@ Hard constraints:
 - All strings in {lang_name}.
 - Between {_MIN_BOOK_CHAPTERS} and {_MAX_BOOK_CHAPTERS} top-level chapters inclusive (book parts / main chapters).
 - Each chapter has between {_MIN_SUBS_PER_CHAPTER} and {_MAX_SUBS_PER_CHAPTER} subchapters inclusive.
-- Total subchapters across ALL chapters must be between {_MIN_BOOK_SUBS_TOTAL} and {_MAX_BOOK_SUBS_TOTAL} inclusive. Choose the count that **best matches how this book is really subdivided** (real TOC / parts / habits / sections). Do **not** pad with fake subsections or split one natural section into many slices just to hit a round number. If the book naturally has very few top-level units, use finer **authentic** subsection names (as in real editions) until you reach at least {_MIN_BOOK_SUBS_TOTAL}. If the outline would exceed {_MAX_BOOK_SUBS_TOTAL}, merge smaller adjacent units **without breaking reading order**.
+- Total subchapters across ALL chapters must be between {_MIN_BOOK_SUBS_TOTAL} and {_MAX_BOOK_SUBS_TOTAL} inclusive. Choose the count that **best matches how this book is really subdivided** (real TOC / parts / sections / numbered steps if the book uses them). Do **not** pad with fake subsections or split one natural section into many slices just to hit a round number. If the book naturally has very few top-level units, use finer **authentic** subsection names (as in real editions) until you reach at least {_MIN_BOOK_SUBS_TOTAL}. If the outline would exceed {_MAX_BOOK_SUBS_TOTAL}, merge smaller adjacent units **without breaking reading order**.
 - The JSON \"chapters\" array length must **never** be fewer than {_MIN_BOOK_CHAPTERS} or greater than {_MAX_BOOK_CHAPTERS}. If a printed TOC has only 2–3 top-level parts, **re-partition** the same book into at least {_MIN_BOOK_CHAPTERS} coherent major blocks (e.g. framing / early arc / middle / integration) using believable thematic or structural names — **do not output 2 or 3 objects** in \"chapters\". If you would exceed {_MAX_BOOK_CHAPTERS}, merge adjacent major parts so each remains a believable book section.
 - Subchapters must map to consecutive reading order through the book (no random reordering).
+- **Ordered multi-part structures** (any book with a fixed sequence of named or numbered units — laws, rules, steps, pillars, stages in a method, numbered arguments, etc.): each unit appears **exactly once** in the order the real book uses (1→2→…→N or the book's own sequence). Do not place a later unit's substance under an earlier title, and do not reorder units unless the printed TOC genuinely does — default is strict fidelity to the original reading order.
+- **No duplicate global overviews**: at most **one** thin introductory subsection may frame the whole framework. After detailed blocks begin, do **not** add another subsection whose "coverage" is again a full walkthrough of all N units. If you need a closing synthesis, use **one** clearly titled subsection (e.g. «Conclusion / Integration») that references themes without repeating full per-unit lessons already covered.
+- **No double blocks for the same unit**: the same named theme or numbered step must not appear twice at full depth in different subsections unless the printed book truly has two distinct sections — if unsure, **merge** into one subsection.
 - Depth vs **number of top-level chapters**: **Fewer** chapters (closer to {_MIN_BOOK_CHAPTERS}) → the same book is split into fewer big buckets, so each subchapter must carry **more** planned substance in "coverage" (still brief notes, but **denser** beats to unpack later). **More** chapters (closer to {_MAX_BOOK_CHAPTERS}) → **tighter** "coverage" per subchapter so blocks stay distinct for night listening.
 - "coverage" is planning only; do NOT write the final narration here.
 - Do not present invented quotes, page numbers, or precise statistics as facts; planning text only."""
@@ -758,7 +794,7 @@ Hard constraints:
             f"получилось {n_total}."
         )
 
-    outline_json = json.dumps(outline, ensure_ascii=False, indent=2)
+    toc_only = _outline_toc_titles_only(outline, max_lines=250)
 
     n_chapters_final = len(outline.get("chapters") or [])
     narr_lo, narr_hi, sent_lo, sent_hi = _book_night_narration_targets(n_chapters_final, n_total)
@@ -802,9 +838,14 @@ Style anchor (keep stable across batches): warm reflective narrator, gentle cade
 - Summarize **ideas and mental models** faithfully at the level of justified content above; do NOT invent long direct quotes or dialogue. Paraphrase principles calmly.
 - This subsection must not repeat the previous subsection's thesis; advance the book's argument by one concrete step tied to this subsection title.
 - Structure: **{sent_lo}–{sent_hi}** sentences. Mini-arc: introduce the idea → explain in plain language → why it matters → soft closing.
-- When helpful, mention this block's place in the journey (subsections {start_i + 1}–{end_i} of {n_total}).
+- **Structural integrity (any book)**: One output paragraph = exactly one input subsection title + its Plan line. Do not narrate the next chapter part or numbered unit under the current heading; do not jump ahead then back; titles and Plans define order — the paragraph must match the subsection you were given, not an adjacent one.
+- **No second global overview**: Do NOT restate the complete numbered list of all main units (or a full chapter-by-chapter catalogue) in later subsections after the opening already framed the book, unless the **current subsection title** clearly signals recap / synthesis / conclusion. Do not use vague "in our journey…" framing to re-list everything.
+- **No duplicate deep dives**: If a theme or numbered unit already had a full subsection earlier, do not teach it again at the same depth under another title.
+- At most one short neutral bridge per paragraph if needed (e.g. "here we look at…"); never use it to summarize prior subsections or to re-walk the whole framework.
 - Plain text only. Aim for roughly **{narr_lo}–{narr_hi} characters** of narration per subsection when the material allows — **this episode is sized like a full «{FACTS50_TARGET} facts» sleep video overall**, so each block must carry enough substance; if shorter, invisible padding is added server-side — do not pad with empty prose.
-- Output ONLY valid JSON: {{"narrations": ["...", ...]}} with exactly {len(batch)} strings in the same order as the input list."""
+"""
+            + _BOOK_NIGHT_STOCK_CLOSER_BAN
+            + f"\n- Output ONLY valid JSON: {{\"narrations\": [\"...\", ...]}} with exactly {len(batch)} strings in the same order as the input list."""
         )
 
         lines = []
@@ -815,10 +856,20 @@ Style anchor (keep stable across batches): warm reflective narrator, gentle cade
                 f"   Subsection: {row['subchapter_title']}\n"
                 f"   Plan: {row['coverage'] or '(summarize from chapter title and book context)'}"
             )
+        cont = ""
+        if start_i > 0:
+            cont = (
+                f"This batch continues at subsection {start_i + 1} of {n_total}. "
+                "Earlier subsections were already narrated — do not summarize them again, "
+                "do not restate the full numbered or catalogued structure of the whole book, and do not repeat opening overview framing.\n\n"
+            )
         human2 = (
-            f"Book (user request):\n{q}\n\n"
-            f"Full outline (do not read aloud):\n{outline_json}\n\n"
-            f"Write narration ONLY for these {len(batch)} subsections (in order):\n"
+            cont
+            + f"Book (user request):\n{q}\n\n"
+            "Table of contents (titles only — for your orientation; do NOT read aloud as a catalogue in every block; "
+            "do NOT repeat the complete list of all main units or chapter titles unless this batch's subsection title explicitly asks for recap/synthesis/conclusion):\n"
+            f"{toc_only}\n\n"
+            f"Write narration ONLY for these {len(batch)} subsections (in order). Each block below includes its Plan — stay strictly inside that subsection:\n"
             + "\n".join(lines)
         )
         mt = _book_night_narration_max_tokens(len(batch), narr_hi)

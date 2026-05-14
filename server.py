@@ -24,7 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from config import settings
 from casino_routes import register_casino_routes
@@ -134,6 +134,18 @@ def _session_topic_from_request(req: "StartRequest") -> str:
     )
 
 
+def _persist_start_request_snapshot(session_id: str, topic: str, payload: dict | None) -> None:
+    """Save StartRequest to topics_history immediately so pause/restart can recover parameters."""
+    if not session_id or not isinstance(payload, dict) or not payload:
+        return
+    try:
+        from agents.topics_history import upsert_start_request_for_session
+
+        upsert_start_request_for_session(session_id, (topic or "").strip(), dict(payload))
+    except Exception as ex:
+        logger.warning(f"[TopicsHistory] persist start_request at launch failed: {ex}")
+
+
 async def _run_pipeline_task(
     session_id: str,
     req: "StartRequest",
@@ -185,6 +197,7 @@ async def _run_pipeline_task(
             mode5_chunk_seconds=int(getattr(req, "mode5_chunk_seconds", 300) or 300),
             mode5_segment_seconds=int(getattr(req, "mode5_segment_seconds", 15) or 15),
             mode5_skip_final_assembly=bool(getattr(req, "mode5_skip_final_assembly", True)),
+            mode5_skip_chunk_previews=bool(getattr(req, "mode5_skip_chunk_previews", False)),
             mode5_max_parallel_images=int(getattr(req, "mode5_max_parallel_images", 10) or 10),
             mode5_image_backend=getattr(req, "mode5_image_backend", None),
             mode5_video_header_title=getattr(req, "mode5_video_header_title", None),
@@ -472,6 +485,7 @@ async def lifespan(app: FastAPI):
                     queue_kick.set()
 
             _sessions[session_id]["task"] = asyncio.create_task(_wrapped())
+            _persist_start_request_snapshot(session_id, _session_topic_from_request(req), req.model_dump())
             limiter.increment_usage()
             logger.info(f"[QueueWorker] Started from queue: session={session_id} mode={req.mode}")
             return True
@@ -707,7 +721,8 @@ class StartRequest(BaseModel):
     mode5_chunk_seconds: int = 300
     mode5_segment_seconds: int = 15
     mode5_skip_final_assembly: bool = True
-    mode5_max_parallel_images: int = 10
+    mode5_skip_chunk_previews: bool = False
+    mode5_max_parallel_images: int = Field(10, ge=1, le=64)
     mode5_image_backend: str | None = None  # api | playwright | auto
     mode5_video_header_title: str | None = None
     mode5_bible_mode: bool = False
@@ -866,6 +881,10 @@ class Mode5RegenerateChunkBody(BaseModel):
 class Mode5ChunkIndexBody(BaseModel):
     chunk_index: int
     action_id: str | None = None
+
+
+class Mode5IntroPreviewOrderBody(BaseModel):
+    intro_preview_videos: list[str]
 
 
 class Mode5TopicIdeasBody(BaseModel):
@@ -1323,10 +1342,11 @@ async def start_pipeline(req: StartRequest):
 
     task = asyncio.create_task(_run_pipeline_task(session_id, req, queue, control))
     _sessions[session_id]["task"] = task
-    
-    # Increment rate limit counter after successful start
+
+    _persist_start_request_snapshot(session_id, _session_topic_from_request(req), req.model_dump())
+
     limiter.increment_usage()
-    
+
     return {"session_id": session_id}
 
 
@@ -1863,6 +1883,21 @@ async def mode5_live_regenerate_intro_preview_ep(session_id: str, body: Mode5Chu
         raise HTTPException(400, str(e)) from e
 
 
+@app.post("/api/mode5/{session_id}/intro-preview-order")
+async def mode5_intro_preview_order_ep(session_id: str, body: Mode5IntroPreviewOrderBody):
+    """Переупорядочить стартовые превью до подтверждения (тот же набор файлов)."""
+    from modes.mode5.pipeline import apply_mode5_intro_preview_order, load_mode5_plan
+
+    try:
+        load_mode5_plan(session_id)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    try:
+        return apply_mode5_intro_preview_order(session_id, body.intro_preview_videos)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
 @app.post("/api/mode5/{session_id}/live/rebuild-final")
 async def mode5_live_rebuild_final_ep(session_id: str, body: Mode5LiveFinalBody):
     from modes.mode5.pipeline import rebuild_mode5_final_sync, load_mode5_plan
@@ -2283,8 +2318,20 @@ async def pause_pipeline(session_id: str):
 
             set_mode5_pipeline_paused(session_id, True)
         except FileNotFoundError:
-            # Very early pause: the first Mode 5 checkpoint has not been written yet.
-            pass
+            try:
+                from modes.mode5.pipeline import write_mode5_early_pause_placeholder
+
+                req_snap = session.get("request")
+                if isinstance(req_snap, dict):
+                    write_mode5_early_pause_placeholder(
+                        session_id,
+                        req_snap,
+                        topic_hint=str(session.get("topic") or ""),
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"[Mode5] early pause: could not write placeholder plan for {session_id}: {e}"
+                )
         except Exception as e:
             logger.warning(f"[Mode5] failed to persist pause for {session_id}: {e}")
     return {"status": "paused", "session_id": session_id}
@@ -2355,14 +2402,43 @@ async def cancel_pipeline(session_id: str):
 async def restart_pipeline(session_id: str):
     """Перезапуск генерации с теми же параметрами. Создаёт новую сессию и сбрасывает результат предыдущей."""
     session = _sessions.get(session_id)
-    if not session:
-        raise HTTPException(404, "Session not found")
-    req_data = session.get("request")
+    req_data = session.get("request") if session else None
+    if not isinstance(req_data, dict) or not req_data:
+        from agents.topics_history import get_start_request_for_session
+
+        snap = get_start_request_for_session(session_id)
+        if isinstance(snap, dict) and snap:
+            req_data = snap
     if not req_data:
-        raise HTTPException(400, "Перезапуск недоступен: параметры этой сессии не сохранены (старая версия)")
-    task = session.get("task")
+        raise HTTPException(404, "Session not found")
+    task = session.get("task") if session else None
     if task is not None and not task.done():
-        raise HTTPException(409, "Нельзя перезапустить активную сессию: сначала остановите или дождитесь завершения")
+        st = str(session.get("status") or "")
+        # На паузе таска часто всё ещё «жива» (ждёт pause_event) — иначе restart всегда 409.
+        if st == "paused":
+            control = session.get("control") or {}
+            control["cancelled"] = True
+            fce = control.get("fastgen_cancel_event")
+            if isinstance(fce, threading.Event):
+                fce.set()
+            try:
+                task.cancel()
+            except Exception:
+                pass
+            if int(session.get("mode") or 0) == 5:
+                try:
+                    from modes.mode5.pipeline import set_mode5_pipeline_paused
+
+                    set_mode5_pipeline_paused(session_id, False)
+                except FileNotFoundError:
+                    pass
+                except Exception as e:
+                    logger.warning(f"[Mode5] restart after pause: clear persisted pause {session_id}: {e}")
+        else:
+            raise HTTPException(
+                409,
+                "Нельзя перезапустить активную сессию: сначала остановите или дождитесь завершения",
+            )
 
     import shutil
 
@@ -2406,6 +2482,11 @@ async def restart_pipeline(session_id: str):
 
     task = asyncio.create_task(_run_pipeline_task(new_sid, req, queue, control))
     _sessions[new_sid]["task"] = task
+
+    _persist_start_request_snapshot(new_sid, _session_topic_from_request(req), req_data)
+
+    if session_id != new_sid:
+        _sessions.pop(session_id, None)
 
     logger.info(f"[Restart] Restarted session {session_id} → {new_sid}")
     return {"session_id": new_sid, "previous_session_id": session_id}
@@ -3218,6 +3299,8 @@ async def regenerate_video_from_library(
     task = asyncio.create_task(_run_pipeline_task(new_sid, req, queue, control))
     _sessions[new_sid]["task"] = task
 
+    _persist_start_request_snapshot(new_sid, _session_topic_from_request(req), request_stored)
+
     logger.info(f"[Regenerate] Library {session_id} → new session {new_sid} (mode {req.mode})")
     return {"session_id": new_sid, "previous_session_id": session_id}
 
@@ -3334,6 +3417,17 @@ def _jpeg_first_frame_moviepy(video_path: Path) -> bytes | None:
         return None
 
 
+def _session_poster_image_file(session_dir: Path) -> Path | None:
+    """Готовое изображение превью в папке сессии (Mode 5 и др.), без MoviePy."""
+    if not session_dir.is_dir():
+        return None
+    for rel in ("clips/mode5/youtube_thumbnail.jpg", "youtube_thumbnail.jpg"):
+        p = session_dir / rel
+        if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
+            return p
+    return None
+
+
 @app.get("/api/video/{session_id}/thumbnail")
 async def serve_video_thumbnail(
     session_id: str,
@@ -3344,6 +3438,11 @@ async def serve_video_thumbnail(
     # Пробуем flat формат: video_{session_id}.mp4 или video_{session_id}_*.mp4
     flat_path = videos_dir / f"video_{session_id}.mp4"
     legacy = videos_dir / session_id
+    poster = _session_poster_image_file(legacy)
+    if poster is not None:
+        suf = poster.suffix.lower()
+        mt = "image/png" if suf == ".png" else ("image/webp" if suf == ".webp" else "image/jpeg")
+        return FileResponse(str(poster), media_type=mt)
     path: Path | None = None
 
     # 1) Если передан video_file и есть legacy папка — корень или clips/
@@ -3584,6 +3683,9 @@ async def regenerate_topic(session_id: str):
     }
     task = asyncio.create_task(_run_pipeline_task(new_sid, req, queue, control))
     _sessions[new_sid]["task"] = task
+
+    _persist_start_request_snapshot(new_sid, _session_topic_from_request(req), req_dict)
+
     return {"session_id": new_sid, "topic": topic}
 
 

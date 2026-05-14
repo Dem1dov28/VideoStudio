@@ -26,11 +26,11 @@ class Mode5ParallelImagesCapTests(unittest.TestCase):
         with patch.object(mode5_pipeline.settings, "mode5_max_parallel_images", 3):
             self.assertEqual(_mode5_parallel_images_cap(), 3)
 
-    def test_clamp_large_request_to_hard_max(self):
+    def test_clamp_large_request_respects_config_cap(self):
         from modes.mode5 import pipeline as mode5_pipeline
 
         with patch.object(mode5_pipeline.settings, "mode5_max_parallel_images", 10):
-            self.assertEqual(_clamp_mode5_parallel_images(999), MODE5_PARALLEL_IMAGES_HARD_MAX)
+            self.assertEqual(_clamp_mode5_parallel_images(999), 10)
 
     def test_clamp_none_uses_cap(self):
         from modes.mode5 import pipeline as mode5_pipeline
@@ -53,7 +53,7 @@ class Mode5ChunkImagesConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         peak = 0
         lock = asyncio.Lock()
 
-        async def fake_generate_one_image(prompt, img_path, aspect_ratio=None):
+        async def fake_generate_one_image(prompt, img_path, aspect_ratio=None, **kwargs):
             nonlocal in_flight, peak
             async with lock:
                 in_flight += 1

@@ -3198,21 +3198,72 @@
       "stub": 4655.802,
       "after_tts": 0.056,
       "after_slices": 60607.52,
-      "after_previews": 0.004
+      "after_previews": 0.004,
+      "completed": 172635.768
     },
     "last_stage": "completed",
-    "last_stage_ts": 1778498155.787515,
+    "last_stage_ts": 1778670791.555089,
     "stage_entries": {
       "stub": 3,
       "after_tts": 1,
       "after_slices": 13,
       "after_previews": 1,
-      "completed": 1
+      "completed": 2
     }
   },
   "pipeline_checkpoint": {
     "stage": "completed",
-    "updated_at": "2026-05-11T11:15:55.787520+00:00",
+    "updated_at": "2026-05-13T11:13:11.555097+00:00",
     "schema": 1
-  }
+  },
+  "publishing": {
+    "ru": {
+      "title": "Обзор книги «Семь навыков высокоэффективных людей» Стивена Кови",
+      "description": "В этом видео мы глубоко погрузимся в основные идеи и концепции книги «Семь навыков высокоэффективных людей» Стивена Кови. Вы узнаете о каждом из семи навыков, которые помогут вам развить личную эффективность и улучшить ваши взаимоотношения. Понимание этих принципов станет вашим путеводителем на пути к самосовершенствованию и достижению профессиональных целей.\n\nНаслаждайтесь спокойным и структурированным пересказом, который идеально подходит для вечернего прослушивания. С длительностью 100 минут, этот обзор предоставит вам все ключевые моменты книги в одном удобном формате.\n\n#СемьНавыков #СтивенКови #Книги #ОбзорКниги",
+      "tags": [
+        "книга",
+        "обзор книги",
+        "недавно прочитанное",
+        "нонфикшн",
+        "аудиокнига",
+        "смысл жизни",
+        "личностный рост",
+        "эффективность",
+        "саморазвитие",
+        "семь навыков",
+        "Стивен Кови"
+      ],
+      "hashtags": [
+        "#СемьНавыков",
+        "#СтивенКови",
+        "#Книги",
+        "#ОбзорКниги"
+      ],
+      "first_comment": "Какую книгу или автора вы бы хотели услышать в следующем обзоре?"
+    },
+    "en": {
+      "title": "The Seven Habits of Highly Effective People: A Calm Summary",
+      "description": "Explore the essential principles of personal and interpersonal effectiveness in this structured recap of Stephen Covey's influential book. Learn about the transformative habits that guide you toward meaningful change, from proactive decision-making to prioritizing what truly matters in your life.\n\nThis calm, audiobook-style digest spans approximately 100 minutes, offering a relaxed pace perfect for evening listening. Immerse yourself in the profound insights and mental models that can elevate your journey toward effectiveness and self-discovery.\n\n#TheSevenHabits #BookSummary #Education",
+      "tags": [
+        "book summary",
+        "nonfiction",
+        "audiobook-style",
+        "calm narration",
+        "personal development",
+        "Stephen Covey",
+        "self-help",
+        "effective habits",
+        "life lessons",
+        "growth mindset"
+      ],
+      "hashtags": [
+        "#TheSevenHabits",
+        "#BookSummary",
+        "#Education"
+      ],
+      "first_comment": "What book or author would you like to hear summarized next?"
+    }
+  },
+  "publish_thumbnail_rel": "clips/mode5/youtube_thumbnail.jpg",
+  "pipeline_paused": false
 }
