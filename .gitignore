@@ -43,6 +43,7 @@ frontend/dist/
 .pnpm-debug.log*
 
 # ─── Generated output ──────────────────────────────────────────────────────────
+MyVideo/
 output/
 uploads/
 frontend/dist/
