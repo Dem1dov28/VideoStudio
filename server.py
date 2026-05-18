@@ -2033,6 +2033,52 @@ async def mode5_review_state_ep(session_id: str):
         raise HTTPException(400, str(e)) from e
 
 
+@app.post("/api/mode5/{session_id}/dismiss-review")
+async def mode5_dismiss_review_ep(session_id: str):
+    """Снять сессию с сайдбара «Проверка» (превью и план на диске сохраняются)."""
+    from modes.mode5.pipeline import dismiss_mode5_review
+
+    try:
+        plan = dismiss_mode5_review(session_id)
+        return {"session_id": session_id, "dismissed": True, "review_dismissed": bool(plan.get("review_dismissed"))}
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.post("/api/mode5/dismiss-all-pending-reviews")
+async def mode5_dismiss_all_pending_reviews_ep():
+    """Завершить все Mode 5 сессии в статусе «Проверка» без финального монтажа."""
+    from config import settings
+    from modes.mode5.pipeline import dismiss_mode5_review, load_mode5_plan, mode5_sidebar_flags_from_plan
+
+    dismissed: list[str] = []
+    skipped: list[str] = []
+    for plan_path in sorted(settings.videos_dir.glob("*/mode5_plan.json")):
+        sid = plan_path.parent.name
+        try:
+            plan = load_mode5_plan(sid)
+            if bool(plan.get("review_dismissed")):
+                skipped.append(sid)
+                continue
+            flags = mode5_sidebar_flags_from_plan(sid, plan)
+            review_pending = bool(
+                flags.get("mode5_review_ready")
+                or flags.get("mode5_waiting_confirmation")
+                or flags.get("mode5_can_resume")
+            )
+            if not review_pending:
+                skipped.append(sid)
+                continue
+            dismiss_mode5_review(sid)
+            dismissed.append(sid)
+        except Exception:
+            skipped.append(sid)
+    logger.info(f"[API] dismiss-all-pending-reviews dismissed={len(dismissed)} skipped={len(skipped)}")
+    return {"dismissed": dismissed, "skipped": skipped, "count": len(dismissed)}
+
+
 @app.post("/api/mode5/{session_id}/continue-generation")
 async def mode5_continue_generation_ep(session_id: str):
     """Продолжить mode5 с последнего сохранённого этапа (TTS/картинки/слайсы на диске)."""
@@ -2200,9 +2246,8 @@ async def mode13_assemble_ep(session_id: str, body: AssembleClipsBody):
     return result
 
 
-@app.get("/api/pipeline/sessions")
-async def list_pipeline_sessions():
-    """Список сессий для сайдбара: running/paused, проверка клипов, ошибка/отмена (чтобы не «пропадали»)."""
+def _list_pipeline_sessions_sync() -> list[dict]:
+    """Синхронная сборка списка активных сессий (не блокировать event loop в async handler)."""
     active = []
     seen_session_ids: set[str] = set()
     for sid, s in _sessions.items():
@@ -2256,14 +2301,17 @@ async def list_pipeline_sessions():
             }
         )
     try:
-        from modes.mode5.pipeline import mode5_status_from_plan
+        from modes.mode5.pipeline import load_mode5_plan, mode5_sidebar_flags_from_plan
 
         for plan_path in settings.videos_dir.glob(f"*/mode5_plan.json"):
             sid = plan_path.parent.name
             if sid in seen_session_ids:
                 continue
             try:
-                result = mode5_status_from_plan(sid)
+                plan = load_mode5_plan(sid)
+                if bool(plan.get("review_dismissed")):
+                    continue
+                result = mode5_sidebar_flags_from_plan(sid, plan)
             except Exception:
                 continue
             st = str(result.get("mode5_runtime_status") or "").strip().lower()
@@ -2296,8 +2344,16 @@ async def list_pipeline_sessions():
             )
     except Exception as e:
         logger.debug(f"[API /pipeline/sessions] mode5 persisted scan skipped: {e}")
+    return sorted(active, key=lambda x: x.get("started_at") or 0, reverse=True)
+
+
+@app.get("/api/pipeline/sessions")
+async def list_pipeline_sessions():
+    """Список сессий для сайдбара: running/paused, проверка клипов, ошибка/отмена (чтобы не «пропадали»)."""
+    loop = asyncio.get_event_loop()
+    active = await loop.run_in_executor(None, _list_pipeline_sessions_sync)
     logger.debug(f"[API /pipeline/sessions] returning {len(active)} active")
-    return {"sessions": sorted(active, key=lambda x: x.get("started_at") or 0, reverse=True)}
+    return {"sessions": active}
 
 
 @app.post("/api/pipeline/{session_id}/pause")
@@ -2492,6 +2548,28 @@ async def restart_pipeline(session_id: str):
     return {"session_id": new_sid, "previous_session_id": session_id}
 
 
+def _mode5_publish_thumbnail_meta(session_dir: Path, sid: str) -> dict[str, Any]:
+    """Поля для карточки/модалки: YouTube-превью Mode 5, если файл есть на диске."""
+    plan_path = session_dir / "mode5_plan.json"
+    if not plan_path.is_file():
+        return {}
+    try:
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        rel = str(plan.get("publish_thumbnail_rel") or "").strip()
+        if not rel:
+            rel = "clips/mode5/youtube_thumbnail.jpg"
+        candidate = session_dir / rel
+        if candidate.is_file():
+            return {
+                "mode5_publish_thumbnail": rel,
+                "publish_thumbnail_url": f"/api/mode5/{sid}/publish-thumbnail",
+                "thumbnail_url": f"/api/mode5/{sid}/publish-thumbnail",
+            }
+    except Exception:
+        pass
+    return {}
+
+
 def _get_video_metadata() -> list[dict]:
     """Список видео: плоская папка video_*.mp4 и legacy session/*.mp4."""
     videos_dir = settings.videos_dir
@@ -2569,7 +2647,7 @@ def _get_video_metadata() -> list[dict]:
                     seen.add(key)
                     stat = mp4.stat()
                     thumb_q = quote(mp4.name, safe="")
-                    videos.append({
+                    entry = {
                         "session_id": sid,
                         "filename": mp4.name,
                         "title": topics_by_session.get(sid) or f"Видео #{sid[-8:]}",
@@ -2583,7 +2661,9 @@ def _get_video_metadata() -> list[dict]:
                         "video_lang": None,
                         "publishing": publishing_by_session.get(sid),
                         "mode5_has_final": True,
-                    })
+                    }
+                    entry.update(_mode5_publish_thumbnail_meta(session_dir, sid))
+                    videos.append(entry)
             elif preview_m5:
                 bkey = (sid, "__mode5_bundle__")
                 if bkey not in seen:
@@ -2593,10 +2673,28 @@ def _get_video_metadata() -> list[dict]:
                     total_sz = sum(p.stat().st_size for p in preview_m5)
                     thumb_q = quote(first.name, safe="")
                     n = len(preview_m5)
+                    ready_n = n
+                    total_n = n
+                    can_assemble = False
+                    try:
+                        from modes.mode5.pipeline import load_mode5_plan, mode5_preview_readiness
+
+                        plan = load_mode5_plan(sid)
+                        readiness = mode5_preview_readiness(sid, plan, strict=False)
+                        ready_n = int(readiness.get("ready_count") or 0)
+                        total_n = int(readiness.get("total_count") or n)
+                        can_assemble = bool(readiness.get("can_assemble"))
+                    except Exception:
+                        logger.debug(f"[API /videos] mode5 readiness unavailable for {sid}")
+                    suffix = (
+                        f"{ready_n}/{total_n} ч. (склеить в финал)"
+                        if can_assemble
+                        else f"{ready_n}/{total_n} ч. готово"
+                    )
                     videos.append({
                         "session_id": sid,
                         "filename": first.name,
-                        "title": f"{topics_by_session.get(sid) or f'Видео #{sid[-8:]}'} · {n} ч. (склеить в финал)",
+                        "title": f"{topics_by_session.get(sid) or f'Видео #{sid[-8:]}'} · {suffix}",
                         "size_mb": round(total_sz / 1024 / 1024, 1),
                         "created_at": created,
                         "url": f"/api/video/{sid}/{first.name}",
@@ -2606,8 +2704,10 @@ def _get_video_metadata() -> list[dict]:
                         "quote_caption_en": cap_en,
                         "video_lang": None,
                         "publishing": publishing_by_session.get(sid),
-                        "mode5_can_assemble": True,
-                        "mode5_preview_count": n,
+                        "mode5_has_previews": True,
+                        "mode5_can_assemble": can_assemble,
+                        "mode5_preview_count": ready_n,
+                        "mode5_preview_total": total_n,
                     })
 
             for mp4 in all_mp4:
@@ -2655,7 +2755,8 @@ def _get_video_metadata() -> list[dict]:
 
 @app.get("/api/videos")
 async def list_videos():
-    data = _get_video_metadata()
+    loop = asyncio.get_event_loop()
+    data = await loop.run_in_executor(None, _get_video_metadata)
     logger.info(f"[API /videos] returning {len(data)} videos")
     return {"videos": data}
 
@@ -2988,6 +3089,38 @@ def _youtube_upload_limit_exceeded(exc: BaseException) -> bool:
     return "uploadlimitexceeded" in s.replace(" ", "") or "exceeded the number of videos" in s
 
 
+def _resolve_session_publish_thumbnail_path(session_id: str | None) -> Path | None:
+    """Return generated publish thumbnail for a library session, if one exists."""
+    sid = (session_id or "").strip()
+    if not sid:
+        return None
+    session_root = settings.videos_dir / sid
+    if not session_root.is_dir():
+        return None
+
+    plan_path = session_root / "mode5_plan.json"
+    if plan_path.is_file():
+        try:
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            rel = str(plan.get("publish_thumbnail_rel") or "").strip()
+        except Exception:
+            rel = ""
+        if rel:
+            candidate = (session_root / rel).resolve()
+            try:
+                candidate.relative_to(session_root.resolve())
+            except ValueError:
+                candidate = None
+            if (
+                candidate is not None
+                and candidate.is_file()
+                and candidate.suffix.lower() in (".jpg", ".jpeg", ".png")
+            ):
+                return candidate
+
+    return _session_poster_image_file(session_root)
+
+
 @app.post("/api/youtube/upload")
 async def youtube_upload_short(body: YouTubeUploadBody):
     from agents.publisher import youtube_direct
@@ -3125,11 +3258,31 @@ async def youtube_upload_short(body: YouTubeUploadBody):
         raise HTTPException(500, str(e)) from e
 
     vid = result.get("id") or ""
+    thumb_path = _resolve_session_publish_thumbnail_path(body.session_id)
+    thumbnail_uploaded = False
+    thumbnail_error = None
+    if vid and thumb_path is not None:
+        try:
+            await asyncio.to_thread(
+                youtube_direct.upload_video_thumbnail,
+                creds,
+                vid,
+                thumb_path,
+            )
+            thumbnail_uploaded = True
+        except HttpError as e:
+            thumbnail_error = youtube_direct.format_http_error(e)
+            logger.warning(f"[YouTube] thumbnail upload HttpError: {thumbnail_error}")
+        except Exception as e:
+            thumbnail_error = str(e)
+            logger.warning(f"[YouTube] thumbnail upload failed: {e}")
     return {
         "ok": True,
         "video_id": vid,
         "url": f"https://www.youtube.com/shorts/{vid}" if vid else None,
         "title": title,
+        "thumbnail_uploaded": thumbnail_uploaded,
+        "thumbnail_error": thumbnail_error,
     }
 
 

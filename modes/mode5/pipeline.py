@@ -11,6 +11,7 @@ import base64
 import functools
 import hashlib
 import json
+import os
 import random
 import threading
 from datetime import datetime, timezone
@@ -590,7 +591,7 @@ _MODE5_BLOCK_LOOP_STILL_STYLE_OVERRIDE = (
     "Keep the frame loop-friendly (clear focal plane, avoid chaotic motion-blur smear)."
 )
 # Bump when block-loop still/motion prompt contract changes so narr_fp cache invalidates.
-_MODE5_BLOCK_LOOP_CACHE_SALT = "painterly_loop_v17_motion_prompt_trim"
+_MODE5_BLOCK_LOOP_CACHE_SALT = "painterly_loop_v18_keyframe_start_end_still"
 _MODE5_SUPPORTED_LANGS = {"ru", "en", "es", "fr", "de"}
 def _mode5_output_format() -> str:
     fmt = str(getattr(settings, "mode5_video_format", "horizontal") or "horizontal").strip().lower()
@@ -1540,7 +1541,10 @@ def _mode5_segment_image_counts(
         for seg in segs:
             seg_total += 1
             img = str(seg.get("image") or "").strip()
+            vid = str(seg.get("video") or "").strip()
             if img and (session_root / img).is_file():
+                seg_done += 1
+            elif vid and (session_root / vid).is_file():
                 seg_done += 1
             else:
                 ok = False
@@ -1549,13 +1553,64 @@ def _mode5_segment_image_counts(
     return seg_done, seg_total, chunks_fully_imaged, chunks_with_segs
 
 
-def _mode5_previews_on_disk_count(session_root: Path, chunks: list[dict[str, Any]]) -> int:
+_MODE5_PREVIEW_MIN_BYTES = 4096
+
+
+def _mode5_previews_on_disk_count(
+    session_root: Path, chunks: list[dict[str, Any]], *, strict: bool = False
+) -> int:
     n = 0
     for ch in chunks:
         rel = str(ch.get("preview_relpath") or "").strip()
-        if rel and (session_root / rel).is_file():
+        if rel and _mode5_preview_file_ready(session_root / rel, strict=strict):
             n += 1
     return n
+
+
+def _mode5_preview_file_ready(path: Path, *, strict: bool = True) -> bool:
+    """strict=False: быстрая проверка для списков; strict=True: ffprobe перед финальной склейкой."""
+    if not path.is_file():
+        return False
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return False
+    if size < _MODE5_PREVIEW_MIN_BYTES:
+        return False
+    if not strict:
+        return True
+    try:
+        return _mode5_probe_video_duration_sec(path) > 0.1
+    except Exception:
+        return False
+
+
+def mode5_preview_readiness(
+    session_id: str, plan: dict[str, Any] | None = None, *, strict: bool = True
+) -> dict[str, Any]:
+    plan = plan or load_mode5_plan(session_id)
+    session_root = _session_dir(session_id)
+    chunks = list(plan.get("chunks") or [])
+    ready_relpaths: list[str] = []
+    pending_relpaths: list[str] = []
+    for ch in chunks:
+        rel = str(ch.get("preview_relpath") or "").strip()
+        if not rel:
+            pending_relpaths.append("")
+            continue
+        if _mode5_preview_file_ready(session_root / rel, strict=strict):
+            ready_relpaths.append(rel)
+        else:
+            pending_relpaths.append(rel)
+    total = len(chunks)
+    ready = len(ready_relpaths)
+    return {
+        "ready_count": ready,
+        "total_count": total,
+        "can_assemble": total > 0 and ready == total,
+        "ready_relpaths": ready_relpaths,
+        "pending_relpaths": pending_relpaths,
+    }
 
 
 def _mode5_intro_videos_disk_counts(session_root: Path, plan: dict[str, Any]) -> tuple[int, int]:
@@ -1659,8 +1714,33 @@ def _mode5_progress_hint_payload(session_id: str, plan: dict[str, Any]) -> dict[
     n_ch = len(chunks)
     seg_done, seg_total, ch_img, ch_w_seg = _mode5_segment_image_counts(session_root, plan)
     prev_done = _mode5_previews_on_disk_count(session_root, chunks)
+    readiness = mode5_preview_readiness(session_id, plan)
     ck = plan.get("pipeline_checkpoint")
     stage = (ck.get("stage") or "").strip() if isinstance(ck, dict) else ""
+
+    if readiness["can_assemble"]:
+        phase = _mode5_ui_phase_from_metrics(
+            has_final_mp4=False,
+            stage=stage or MODE5_CKPT_AFTER_PREVIEWS,
+            seg_done=seg_done,
+            seg_total=seg_total,
+            n_ch=n_ch,
+            prev_done=n_ch,
+            plan=plan,
+        )
+        return {
+            "mode5_progress_hint": "Все части готовы — можно запускать финальный монтаж.",
+            "mode5_segments_imaged": seg_done,
+            "mode5_segments_total": seg_total,
+            "mode5_chunks_imaged": ch_img,
+            "mode5_chunks_with_segments": ch_w_seg,
+            "mode5_previews_on_disk": readiness["ready_count"],
+            "mode5_ui_phase": phase,
+            "mode5_intro_previews_on_disk": intro_on,
+            "mode5_intro_previews_expected": intro_total,
+            "mode5_chunks_voice_ready": wav_ready,
+            "mode5_chunks_voice_total": wav_total,
+        }
 
     hint: str | None = None
     if seg_total == 0:
@@ -1719,9 +1799,24 @@ def _mode5_progress_hint_payload(session_id: str, plan: dict[str, Any]) -> dict[
     }
 
 
+def dismiss_mode5_review(session_id: str) -> dict[str, Any]:
+    """Убрать сессию из сайдбара «Проверка» без финального монтажа (превью остаются на диске)."""
+
+    def _mutate(plan: dict[str, Any]) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        plan["review_dismissed"] = True
+        plan["review_dismissed_at"] = now
+        plan["pipeline_paused"] = False
+        plan["await_intro_confirmation"] = False
+
+    return _update_mode5_plan_atomic(session_id, _mutate)
+
+
 def mode5_resume_snapshot_for_plan(session_id: str, plan: dict[str, Any]) -> dict[str, Any]:
     """Whether POST continue-generation can proceed using saved mode5 artifacts on disk."""
     stage = _checkpoint_stage(plan)
+    if bool(plan.get("review_dismissed")):
+        return {"can_resume": False, "stage": stage, "reason": "review_dismissed"}
     root = _session_dir(session_id)
     final_mp4 = root / "video_mode5.mp4"
     if final_mp4.is_file():
@@ -1772,6 +1867,10 @@ def _attach_mode5_resume_flags_from_plan(
     out["mode5_can_resume"] = bool(snap.get("can_resume"))
     out["mode5_checkpoint_stage"] = snap.get("stage")
     out["mode5_resume_reason"] = snap.get("reason") or None
+    readiness = mode5_preview_readiness(session_id, plan, strict=False)
+    out["mode5_total_chunks"] = readiness["total_count"]
+    out["mode5_ready_chunks"] = readiness["ready_count"]
+    out["mode5_can_assemble"] = readiness["can_assemble"]
     return out
 
 
@@ -2106,10 +2205,29 @@ def _facts50_fact_index_for_chunk(chunks: list[dict[str, Any]], chunk_index: int
     return fact_pos
 
 
+def _chunk_duration_sec(ch: dict[str, Any]) -> float:
+    raw = ch.get("duration_sec")
+    if raw is not None:
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            pass
+    total = 0.0
+    for seg in ch.get("segments") or []:
+        try:
+            t0 = float(seg.get("t0") or 0.0)
+            t1 = float(seg.get("t1") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if t1 > t0:
+            total += t1 - t0
+    return total
+
+
 def _chunk_meta_public(ch: dict[str, Any]) -> dict[str, Any]:
     meta: dict[str, Any] = {
         "index": ch["index"],
-        "duration_sec": ch["duration_sec"],
+        "duration_sec": _chunk_duration_sec(ch),
         "num_segments": len(ch.get("segments") or []),
         "text": ch.get("text", ""),
         "segments": [
@@ -2582,6 +2700,7 @@ async def _ensure_mode5_looped_intro_video(
             start_frame_path=img_path,
             end_frame_path=img_path,
             index=0,
+            flow_max_attempts=settings.fastgen_veo_flow_max_attempts,
             video_aspect_ratio=_mode5_image_aspect_ratio(),
         )
         resolved = Path(video_path) if video_path else None
@@ -2689,6 +2808,118 @@ def _mode5_submode_animation_directive(sub_mode: str | None) -> str:
     )
 
 
+async def _mode5_animate_still_to_motion_clip(
+    *,
+    motion_prompt: str,
+    output_dir: Path,
+    still_path: Path,
+    clip_index: int,
+    backend: str,
+    cancel_event: threading.Event | None = None,
+) -> Path | None:
+    """
+    Still → короткий motion-клип для loop: FastGen «Ключ. кадры» (start=end=still).
+    Fallback — «Обычный» режим с одним референсом, если keyframes не удались.
+    """
+    from agents.content_generator import fastgen_http, fastgen_playwright
+
+    aspect = _mode5_image_aspect_ratio()
+    flow_n = settings.fastgen_veo_flow_max_attempts
+    still = Path(still_path)
+    if not still.is_file():
+        return None
+
+    async def _from_keyframes() -> Path | None:
+        if backend == "api":
+            raw = await fastgen_http.generate_video_from_keyframes(
+                motion_prompt,
+                output_dir,
+                still,
+                still,
+                index=clip_index,
+                cancel_event=cancel_event,
+                flow_max_attempts=flow_n,
+                video_aspect_ratio=aspect,
+            )
+        else:
+            raw = await fastgen_playwright.generate_video_from_keyframes(
+                motion_prompt,
+                output_dir,
+                still,
+                still,
+                index=clip_index,
+                cancel_event=cancel_event,
+                flow_max_attempts=flow_n,
+                video_aspect_ratio=aspect,
+            )
+        p = Path(raw) if raw else None
+        return p if p and p.is_file() else None
+
+    async def _from_single_ref() -> Path | None:
+        if backend == "api":
+            raw = await fastgen_http.generate_single_video_fastgen(
+                motion_prompt,
+                output_dir,
+                clip_index,
+                reference_image_path=still,
+                cancel_event=cancel_event,
+                mode4_veo_flow_flower=False,
+                flow_max_attempts=flow_n,
+                video_aspect_ratio=aspect,
+            )
+        else:
+            raw = await fastgen_playwright.generate_single_video_fastgen(
+                motion_prompt,
+                output_dir,
+                clip_index,
+                reference_image_path=still,
+                cancel_event=cancel_event,
+                mode4_veo_flow_flower=False,
+                flow_max_attempts=flow_n,
+                video_aspect_ratio=aspect,
+            )
+        p = Path(raw) if raw else None
+        return p if p and p.is_file() else None
+
+    clip = await _from_keyframes()
+    if clip:
+        logger.info(
+            "[Mode5] still→motion clip {} via keyframes (start=end={})",
+            clip_index,
+            still.name,
+        )
+        return clip
+    logger.warning(
+        "[Mode5] still→motion clip {}: keyframes failed after {} attempts; trying normal+reference",
+        clip_index,
+        flow_n,
+    )
+    clip = await _from_single_ref()
+    if clip:
+        logger.info("[Mode5] still→motion clip {} via Flow+reference (fallback)", clip_index)
+    return clip
+
+
+async def _mode5_animate_still_preview_clip(
+    *,
+    motion_prompt: str,
+    output_dir: Path,
+    still_path: Path,
+    clip_index: int,
+    backend: str,
+    cancel_event: threading.Event | None = None,
+) -> Path | None:
+    """Короткая анимация still → mp4 для intro preview (keyframes start=end=still)."""
+    return await _mode5_animate_still_to_motion_clip(
+        motion_prompt=motion_prompt,
+        output_dir=output_dir,
+        still_path=still_path,
+        clip_index=clip_index,
+        backend=backend,
+        cancel_event=cancel_event,
+    )
+
+
 async def _generate_mode5_intro_confirmation_pool(
     *,
     session_id: str,
@@ -2709,7 +2940,6 @@ async def _generate_mode5_intro_confirmation_pool(
     http_base = str(getattr(settings, "fastgen_http_base_url", "") or "").strip()
     if backend == "api" and not http_base:
         raise RuntimeError("FASTGEN_HTTP_BASE_URL is required for MODE5_IMAGE_BACKEND=api")
-    from agents.content_generator import fastgen_http, fastgen_playwright
 
     m5dir = _mode5_dir(session_id)
     session_root = _session_dir(session_id)
@@ -2748,7 +2978,7 @@ async def _generate_mode5_intro_confirmation_pool(
                 cancel_event=cancel_event,
             )
         if not still_path.is_file():
-            return
+            raise RuntimeError(f"Mode5 intro still image was not generated (variant {i + 1}/{pool_size}).")
 
         motion_prompt = _build_mode5_intro_single_motion_prompt(
             sub_mode=sub_mode,
@@ -2759,29 +2989,19 @@ async def _generate_mode5_intro_confirmation_pool(
             variants_total=pool_size,
         )
         async with sem:
-            if backend == "api":
-                raw_clip = await fastgen_http.generate_video_from_keyframes(
-                    motion_prompt,
-                    m5dir,
-                    still_path,
-                    still_path,
-                    index=99001 + i,
-                    cancel_event=cancel_event,
-                    video_aspect_ratio=_mode5_image_aspect_ratio(),
-                )
-            else:
-                raw_clip = await fastgen_playwright.generate_video_from_keyframes(
-                    motion_prompt,
-                    m5dir,
-                    still_path,
-                    still_path,
-                    index=99001 + i,
-                    cancel_event=cancel_event,
-                    video_aspect_ratio=_mode5_image_aspect_ratio(),
-                )
-        clip = Path(raw_clip) if raw_clip else None
+            clip = await _mode5_animate_still_preview_clip(
+                motion_prompt=motion_prompt,
+                output_dir=m5dir,
+                still_path=still_path,
+                clip_index=99001 + i,
+                backend=backend,
+                cancel_event=cancel_event,
+            )
         if not clip or not clip.is_file():
-            raise RuntimeError("Mode5 intro preview single-clip animation was not generated.")
+            raise RuntimeError(
+                f"Mode5 intro preview variant {i + 1}/{pool_size} was not generated "
+                f"(backend={backend}, still={still_path.name})."
+            )
         try:
             _mode5_reencode_intro_preview_for_web(clip, out_path)
         except Exception as enc_err:
@@ -2815,7 +3035,6 @@ async def _regenerate_mode5_intro_confirmation_item(
     http_base = str(getattr(settings, "fastgen_http_base_url", "") or "").strip()
     if backend == "api" and not http_base:
         raise RuntimeError("FASTGEN_HTTP_BASE_URL is required for MODE5_IMAGE_BACKEND=api")
-    from agents.content_generator import fastgen_http, fastgen_playwright
 
     if target_index < 0:
         raise ValueError("target_index must be >= 0")
@@ -2864,27 +3083,17 @@ async def _regenerate_mode5_intro_confirmation_item(
         variant_index=idx,
         variants_total=total,
     )
-    if backend == "api":
-        raw_clip = await fastgen_http.generate_video_from_keyframes(
-            motion_prompt,
-            m5dir,
-            still_path,
-            still_path,
-            index=99001 + idx,
-            video_aspect_ratio=_mode5_image_aspect_ratio(),
-        )
-    else:
-        raw_clip = await fastgen_playwright.generate_video_from_keyframes(
-            motion_prompt,
-            m5dir,
-            still_path,
-            still_path,
-            index=99001 + idx,
-            video_aspect_ratio=_mode5_image_aspect_ratio(),
-        )
-    clip = Path(raw_clip) if raw_clip else None
+    clip = await _mode5_animate_still_preview_clip(
+        motion_prompt=motion_prompt,
+        output_dir=m5dir,
+        still_path=still_path,
+        clip_index=99001 + idx,
+        backend=backend,
+    )
     if not clip or not clip.is_file():
-        raise RuntimeError("Mode5 intro preview single-clip animation was not generated.")
+        raise RuntimeError(
+            f"Mode5 intro preview variant {idx + 1}/{total} was not generated (backend={backend})."
+        )
     try:
         _mode5_reencode_intro_preview_for_web(clip, out_path)
     except Exception as enc_err:
@@ -3105,10 +3314,16 @@ def _build_mode5_block_loop_bridge_still_prompt(
 
 def _mode5_probe_video_duration_sec(path: Path) -> float:
     ff = resolve_ffmpeg_executable()
-    if not ff:
-        raise RuntimeError("ffmpeg not found")
+    probe = None
+    if ff:
+        candidate = Path(ff).with_name("ffprobe.exe" if os.name == "nt" else "ffprobe")
+        if candidate.is_file():
+            probe = str(candidate)
+    probe = probe or shutil.which("ffprobe")
+    if not probe:
+        raise RuntimeError("ffprobe not found")
     cmd = [
-        ff,
+        probe,
         "-v",
         "error",
         "-show_entries",
@@ -3293,22 +3508,28 @@ def _mode5_concat_two_block_loop_parts(a: Path, b: Path, out: Path) -> None:
         str(crf),
         "-pix_fmt",
         "yuv420p",
+        "-movflags",
+        "+faststart",
         str(out),
     ]
     subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=3600)
 
 
 def _mode5_reencode_intro_preview_for_web(src: Path, out: Path) -> None:
-    """Normalize intro preview to browser-safe MP4 and enforce seamless fixed duration."""
+    """
+    Intro preview for UI: one trimmed loop cycle, then N identical copies concatenated
+    (default N=2) so the join between repeats is visible (~8s + ~8s).
+    """
     ff = resolve_ffmpeg_executable()
     if not ff:
         raise RuntimeError("ffmpeg not found")
     tw, th = settings.mode5_video_resolution
-    target_sec = float(getattr(settings, "mode5_intro_preview_seconds", 8.0) or 8.0)
-    target_sec = max(4.0, min(30.0, target_sec))
+    cycles = int(getattr(settings, "mode5_intro_preview_loop_cycles", 2) or 2)
+    cycles = max(1, min(4, cycles))
     crop_ratio = mode5_watermark_bottom_crop_ratio()
     src_keep_sec = _mode5_effective_loop_duration_sec(src)
     out.parent.mkdir(parents=True, exist_ok=True)
+    core_src = out.with_suffix(".loopcore.mp4")
     cmd = [
         ff,
         "-y",
@@ -3331,43 +3552,89 @@ def _mode5_reencode_intro_preview_for_web(src: Path, out: Path) -> None:
         "yuv420p",
         "-movflags",
         "+faststart",
-        str(out.with_suffix(".loopcore.mp4")),
-    ]
-    subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=1800)
-    core_src = out.with_suffix(".loopcore.mp4")
-    cmd = [
-        ff,
-        "-y",
-        "-stream_loop",
-        "-1",
-        "-i",
         str(core_src),
-        "-t",
-        f"{target_sec:.3f}",
-        "-fflags",
-        "+genpts",
-        "-map",
-        "0:v:0",
-        "-vf",
-        f"crop=iw:ih-ceil(ih*{crop_ratio:.4f}):0:0,scale={tw}:{th}:force_original_aspect_ratio=decrease:flags=lanczos,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "medium",
-        "-crf",
-        "18",
-        "-pix_fmt",
-        "yuv420p",
-        "-movflags",
-        "+faststart",
-        "-an",
-        str(out),
     ]
     subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=1800)
     try:
-        core_src.unlink(missing_ok=True)
-    except OSError:
-        pass
+        if cycles == 1:
+            cmd = [
+                ff,
+                "-y",
+                "-i",
+                str(core_src),
+                "-map",
+                "0:v:0",
+                "-vf",
+                f"crop=iw:ih-ceil(ih*{crop_ratio:.4f}):0:0,"
+                f"scale={tw}:{th}:force_original_aspect_ratio=decrease:flags=lanczos,"
+                f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                "18",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                "-an",
+                str(out),
+            ]
+            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=1800)
+        elif cycles == 2:
+            _mode5_concat_two_block_loop_parts(core_src, core_src, out)
+        else:
+            lst = out.with_suffix(".concat_list.txt")
+            lines = ["ffconcat version 1.0\n"]
+            for _ in range(cycles):
+                lines.append(f"file '{core_src.resolve().as_posix()}'\n")
+            lst.write_text("".join(lines), encoding="utf-8")
+            vf = (
+                f"crop=iw:ih-ceil(ih*{crop_ratio:.4f}):0:0,"
+                f"scale={tw}:{th}:force_original_aspect_ratio=decrease:flags=lanczos,"
+                f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p"
+            )
+            cmd = [
+                ff,
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(lst),
+                "-vf",
+                vf,
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                "18",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                "-an",
+                str(out),
+            ]
+            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=3600)
+            try:
+                lst.unlink(missing_ok=True)
+            except OSError:
+                pass
+        logger.info(
+            "[Mode5] Intro preview {}: {:.2f}s/cycle × {} cycles (seam check at joins)",
+            out.name,
+            src_keep_sec,
+            cycles,
+        )
+    finally:
+        try:
+            core_src.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _mode5_block_loop_can_reuse_smart_cache(
@@ -3437,8 +3704,8 @@ async def _ensure_mode5_block_loop_videos(
     (см. assemble_mode5_video: seg_audio + concatenate_audioclips).
 
     При ``mode5_block_loop_still_then_animate`` (по умолчанию True): для каждого блока сначала FastGen‑still,
-    затем motion: при ``mode5_block_loop_two_part_loop`` — два клипа (A от still, B keyframes от последнего кадра A
-    к тому же still), FFmpeg склеивает в один MP4 с более высоким качеством; иначе один image→video клип.
+    затем motion через FastGen «Ключ. кадры» (start=end=тот же still) для замкнутого loop; при сбое — «Обычный»
+    режим с одним референсом. При ``mode5_block_loop_two_part_loop`` — два клипа (A+B, см. конфиг); иначе один keyframe‑клип.
     Затем тот же MP4 зацикливается на ``mode5_block_loop_seconds``.
 
     Кэш: smart — по ``narr_fp`` + mtime still/mp4; legacy — mtime сегментных JPEG vs mp4.
@@ -3775,29 +4042,17 @@ async def _ensure_mode5_block_loop_videos(
                         book_anchor=book_anchor,
                     )
                     clip_idx = 8000 + int(bid)
-                    if backend == "api":
-                        raw_clip = await fastgen_http.generate_single_video_fastgen(
-                            motion_prompt,
-                            m5dir,
-                            clip_idx,
-                            reference_image_path=still_path,
-                            cancel_event=cancel_event,
-                            mode4_veo_flow_flower=False,
-                            video_aspect_ratio=_mode5_image_aspect_ratio(),
-                        )
-                    else:
-                        raw_clip = await fastgen_playwright.generate_single_video_fastgen(
-                            motion_prompt,
-                            m5dir,
-                            clip_idx,
-                            reference_image_path=still_path,
-                            cancel_event=cancel_event,
-                            mode4_veo_flow_flower=False,
-                            video_aspect_ratio=_mode5_image_aspect_ratio(),
-                        )
+                    raw_clip = await _mode5_animate_still_to_motion_clip(
+                        motion_prompt=motion_prompt,
+                        output_dir=m5dir,
+                        still_path=still_path,
+                        clip_index=clip_idx,
+                        backend=backend,
+                        cancel_event=cancel_event,
+                    )
                     resolved_mv = Path(raw_clip) if raw_clip else None
                     if not resolved_mv or not resolved_mv.is_file():
-                        raise RuntimeError("block loop single motion clip empty")
+                        raise RuntimeError("block loop keyframe motion clip empty")
                     if resolved_mv.resolve() != out_path.resolve():
                         shutil.copy2(resolved_mv, out_path)
                     _mode5_trim_loop_tail_inplace(out_path)
@@ -3807,7 +4062,7 @@ async def _ensure_mode5_block_loop_videos(
                     except OSError:
                         pass
                     logger.info(
-                        "[Mode5] Block loop {:04d}: single still->motion clip ready: {} ({} segs)",
+                        "[Mode5] Block loop {:04d}: still→keyframes motion ready: {} ({} segs)",
                         bid,
                         out_path.name,
                         len(rows),
@@ -3819,7 +4074,11 @@ async def _ensure_mode5_block_loop_videos(
                         seg["asset_type"] = "video"
                     motion_ok = True
             except Exception as smart_err:
-                logger.warning("[Mode5] Block loop {}: still→motion не удалось — fallback keyframes: {}", bid, smart_err)
+                logger.warning(
+                    "[Mode5] Block loop {}: still→keyframes motion не удалось — fallback segment JPEGs: {}",
+                    bid,
+                    smart_err,
+                )
 
         if motion_ok:
             return
@@ -3849,6 +4108,7 @@ async def _ensure_mode5_block_loop_videos(
                     end_frame_path=img_b if img_b.resolve() != img_a.resolve() else img_a,
                     index=1000 + bid,
                     cancel_event=cancel_event,
+                    flow_max_attempts=settings.fastgen_veo_flow_max_attempts,
                     video_aspect_ratio=_mode5_image_aspect_ratio(),
                 )
             else:
@@ -3859,6 +4119,7 @@ async def _ensure_mode5_block_loop_videos(
                     end_frame_path=img_b if img_b.resolve() != img_a.resolve() else img_a,
                     index=1000 + bid,
                     cancel_event=cancel_event,
+                    flow_max_attempts=settings.fastgen_veo_flow_max_attempts,
                     video_aspect_ratio=_mode5_image_aspect_ratio(),
                 )
             resolved = Path(video_path) if video_path else None
@@ -6408,10 +6669,14 @@ def rebuild_mode5_final_sync(session_id: str, *, action_id: str | None = None) -
         return out
 
     _rebuild_mode5_missing_previews(session_id, plan)
-    previews = [session_root / ch["preview_relpath"] for ch in (plan.get("chunks") or [])]
-    for p in previews:
-        if not p.is_file():
-            raise FileNotFoundError(f"Missing preview for final rebuild: {p}")
+    readiness = mode5_preview_readiness(session_id, plan)
+    if not bool(readiness.get("can_assemble")):
+        ready = int(readiness.get("ready_count") or 0)
+        total = int(readiness.get("total_count") or 0)
+        raise ValueError(
+            f"Mode 5 previews are not ready for final rebuild yet: {ready}/{total} valid chunks."
+        )
+    previews = [session_root / rel for rel in readiness["ready_relpaths"]]
     final_path = session_root / "video_mode5.mp4"
     _ffmpeg_concat(previews, final_path)
     final_path = _append_mode5_sleep_tail(session_id, plan, final_path)
@@ -6452,13 +6717,14 @@ def assemble_mode5_final_sync(session_id: str) -> dict[str, Any]:
         _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_COMPLETED)
         return _result_payload(session_id, plan, review_ready=False, final_video=rel)
     _rebuild_mode5_missing_previews(session_id, plan)
-    previews = [session_root / ch["preview_relpath"] for ch in (plan.get("chunks") or [])]
-    for p in previews:
-        if not p.is_file():
-            raise FileNotFoundError(
-                f"Missing preview after rebuild attempt: {p}. "
-                "Check that segment images and audio exist for this chunk (regenerate images or re-voice the chunk)."
-            )
+    readiness = mode5_preview_readiness(session_id, plan)
+    if not bool(readiness.get("can_assemble")):
+        ready = int(readiness.get("ready_count") or 0)
+        total = int(readiness.get("total_count") or 0)
+        raise ValueError(
+            f"Mode 5 previews are not ready for final assembly yet: {ready}/{total} valid chunks."
+        )
+    previews = [session_root / rel for rel in readiness["ready_relpaths"]]
     final_path = session_root / "video_mode5.mp4"
     _ffmpeg_concat(previews, final_path)
     final_path = _append_mode5_sleep_tail(session_id, plan, final_path)
@@ -6466,6 +6732,57 @@ def assemble_mode5_final_sync(session_id: str) -> dict[str, Any]:
     rel = _rel_session(session_root, final_path)
     _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_COMPLETED)
     return _result_payload(session_id, plan, review_ready=False, final_video=rel)
+
+
+def mode5_sidebar_flags_from_plan(session_id: str, plan: dict[str, Any]) -> dict[str, Any]:
+    """Лёгкий снимок для /api/pipeline/sessions без полного result_payload."""
+    _ensure_mode5_live_defaults(plan)
+    if bool(plan.get("review_dismissed")):
+        label = (plan.get("header_title") or "").strip() or f"Long-form #{session_id[-8:]}"
+        return {
+            "topic": label,
+            "mode5_runtime_status": "done",
+            "mode5_waiting_confirmation": False,
+            "mode5_await_intro_confirmation": False,
+            "mode5_review_ready": False,
+            "mode5_can_resume": False,
+            "mode5_pipeline_paused": False,
+            "mode5_can_assemble": False,
+            "mode5_ready_chunks": 0,
+            "mode5_total_chunks": 0,
+            "review_dismissed": True,
+        }
+    snap = mode5_resume_snapshot_for_plan(session_id, plan)
+    readiness = mode5_preview_readiness(session_id, plan, strict=False)
+    label = (plan.get("header_title") or "").strip() or f"Long-form #{session_id[-8:]}"
+    has_dirty = any(
+        str(ch.get("status") or "") in {"dirty", "regenerating"} or bool(ch.get("locked"))
+        for ch in list(plan.get("chunks") or [])
+    )
+    has_pending = bool(list(plan.get("pending_rebuilds") or []))
+    session_root = _session_dir(session_id)
+    final_path = session_root / "video_mode5.mp4"
+    has_final = final_path.is_file() and not has_dirty and not has_pending
+    waiting_confirmation = bool(plan.get("await_intro_confirmation"))
+    review_ready = bool(readiness.get("can_assemble")) and not has_final
+    if bool(plan.get("pipeline_paused")) and bool(snap.get("can_resume")):
+        runtime_status = "paused"
+    elif has_dirty or has_pending:
+        runtime_status = "running"
+    else:
+        runtime_status = "done"
+    return {
+        "topic": label,
+        "mode5_runtime_status": runtime_status,
+        "mode5_waiting_confirmation": waiting_confirmation,
+        "mode5_await_intro_confirmation": waiting_confirmation,
+        "mode5_review_ready": review_ready,
+        "mode5_can_resume": bool(snap.get("can_resume")),
+        "mode5_pipeline_paused": bool(plan.get("pipeline_paused")),
+        "mode5_can_assemble": bool(readiness.get("can_assemble")) and not has_final,
+        "mode5_ready_chunks": readiness["ready_count"],
+        "mode5_total_chunks": readiness["total_count"],
+    }
 
 
 def mode5_status_from_plan(session_id: str) -> dict[str, Any]:
@@ -6520,12 +6837,13 @@ def mode5_review_snapshot(session_id: str) -> dict[str, Any]:
         if not rel:
             continue
         p = session_root / rel
-        ch["preview_ready"] = bool(p.is_file())
-        if p.is_file():
+        ch["preview_ready"] = _mode5_preview_file_ready(p)
+        if ch["preview_ready"]:
             ready_chunks.append(ch)
     payload = _result_payload(session_id, {**plan, "chunks": ready_chunks}, review_ready=bool(ready_chunks))
     payload["mode5_total_chunks"] = len(chunks)
     payload["mode5_ready_chunks"] = len(ready_chunks)
+    payload["mode5_can_assemble"] = len(chunks) > 0 and len(ready_chunks) == len(chunks)
     payload["mode5_partial"] = True
     snap = mode5_resume_snapshot_for_plan(session_id, plan)
     payload["mode5_can_resume"] = bool(snap.get("can_resume"))

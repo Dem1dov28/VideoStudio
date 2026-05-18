@@ -159,7 +159,7 @@
   "pending_rebuilds": [],
   "live_events": [],
   "live_policy": "hybrid",
-  "pipeline_paused": true,
+  "pipeline_paused": false,
   "mode5_metrics": {
     "stage_seconds": {},
     "last_stage": "stub",
@@ -173,5 +173,7 @@
     "updated_at": "2026-05-12T07:56:09.942721+00:00",
     "schema": 1
   },
-  "pipeline_paused_at": "2026-05-12T08:14:16.525021+00:00"
+  "pipeline_paused_at": "2026-05-12T08:14:16.525021+00:00",
+  "review_dismissed": true,
+  "review_dismissed_at": "2026-05-17T06:10:16.093389+00:00"
 }

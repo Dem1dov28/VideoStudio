@@ -426,6 +426,12 @@ async def _poll_v2_video(client: httpx.AsyncClient, operation_id: str, cancel_ev
     raise TimeoutError(f"Video poll timeout {max_wait}s for {operation_id}")
 
 
+def _resolve_flow_max_attempts(flow_max_attempts: int | None) -> int:
+    if flow_max_attempts is not None:
+        return max(1, int(flow_max_attempts))
+    return max(1, int(getattr(settings, "fastgen_veo_flow_max_attempts", 20) or 20))
+
+
 def _v4_enabled() -> bool:
     return bool(getattr(settings, "fastgen_http_enable_v4_video", True))
 
@@ -596,6 +602,7 @@ async def _generate_one_video(
     cancel_event: threading.Event | None,
     *,
     mode4_veo_flow_flower: bool = False,
+    flow_max_attempts: int | None = None,
     keyframes: bool = False,
     start_frame: Path | None = None,
     end_frame: Path | None = None,
@@ -622,22 +629,39 @@ async def _generate_one_video(
                 video_aspect_ratio=video_aspect_ratio,
             )
 
+        max_a = _resolve_flow_max_attempts(flow_max_attempts)
+
         # ── v4: keyframes (Flow) ───────────────────────────────────────────────
         if keyframes and start_frame and start_frame.exists():
             kf_path = (getattr(settings, "fastgen_http_v4_flow_keyframes_path", None) or "").strip()
             if not kf_path.startswith("/"):
                 kf_path = "/" + kf_path
-            body: dict[str, Any] = {
-                "prompt": full_prompt,
-                "start_image": await _image_input_for_path(client, Path(start_frame)),
-                "aspect_ratio": aspect,
-            }
-            if end_frame and Path(end_frame).exists():
-                body["end_image"] = await _image_input_for_path(client, Path(end_frame))
-            op_id = await _post_v4_start(client, kf_path, body)
-            data_uri = await _poll_v4_operation(client, op_id, cancel_event)
-            out.write_bytes(_decode_data_uri(data_uri))
-            return out if out.exists() else None
+            for attempt in range(max_a):
+                if _cancel_requested(cancel_event):
+                    return None
+                try:
+                    body: dict[str, Any] = {
+                        "prompt": full_prompt,
+                        "start_image": await _image_input_for_path(client, Path(start_frame)),
+                        "aspect_ratio": aspect,
+                    }
+                    if end_frame and Path(end_frame).exists():
+                        body["end_image"] = await _image_input_for_path(client, Path(end_frame))
+                    logger.info(
+                        f"[FastGen HTTP] clip {index}: v4 Flow keyframes {attempt + 1}/{max_a}"
+                    )
+                    op_id = await _post_v4_start(client, kf_path, body)
+                    data_uri = await _poll_v4_operation(client, op_id, cancel_event)
+                    out.write_bytes(_decode_data_uri(data_uri))
+                    return out if out.exists() else None
+                except (FastGenCancelled, asyncio.CancelledError):
+                    raise
+                except Exception as e:
+                    logger.warning(
+                        f"[FastGen HTTP] clip {index} keyframes attempt {attempt + 1}/{max_a}: {e}"
+                    )
+                    await asyncio.sleep(2.0)
+            return None
 
         refs = [p for p in (reference_paths or []) if p.exists()]
         if len(refs) > 3:
@@ -657,17 +681,32 @@ async def _generate_one_video(
         # ── v4: 2–3 референса → Flow ingredients ───────────────────────────────
         if len(refs) >= 2:
             imgs = [await _image_input_for_path(client, p) for p in refs]
-            body = {"prompt": full_prompt, "reference_images": imgs, "aspect_ratio": aspect}
-            op_id = await _post_v4_start(client, flow_path, body)
-            data_uri = await _poll_v4_operation(client, op_id, cancel_event)
-            out.write_bytes(_decode_data_uri(data_uri))
-            return out if out.exists() else None
+            for attempt in range(max_a):
+                if _cancel_requested(cancel_event):
+                    return None
+                try:
+                    body = {"prompt": full_prompt, "reference_images": imgs, "aspect_ratio": aspect}
+                    logger.info(
+                        f"[FastGen HTTP] clip {index}: v4 Flow ingredients ({len(refs)} refs) "
+                        f"{attempt + 1}/{max_a}"
+                    )
+                    op_id = await _post_v4_start(client, flow_path, body)
+                    data_uri = await _poll_v4_operation(client, op_id, cancel_event)
+                    out.write_bytes(_decode_data_uri(data_uri))
+                    return out if out.exists() else None
+                except (FastGenCancelled, asyncio.CancelledError):
+                    raise
+                except Exception as e:
+                    logger.warning(
+                        f"[FastGen HTTP] clip {index} multi-ref attempt {attempt + 1}/{max_a}: {e}"
+                    )
+                    await asyncio.sleep(2.0)
+            return None
 
         # ── v4: один референс — Mode 4: Flow (Veo) N раз → Flower; остальные режимы: только Flow, как вкладка Video в UI
         if len(refs) == 1:
             img = await _image_input_for_path(client, refs[0])
             flow_n = max(1, int(getattr(settings, "mode4_veo_flow_attempts_before_flower", 3) or 3))
-            max_a = max(1, int(settings.fastgen_max_attempts or 8))
             if mode4_veo_flow_flower:
                 total = flow_n + max_a
                 for attempt in range(total):
@@ -719,11 +758,26 @@ async def _generate_one_video(
             return None
 
         # ── v4: только текст → Flow from-text (как Veo Flow по умолчанию в UI, не Flower) ──
-        body = {"prompt": full_prompt, "aspect_ratio": aspect}
-        op_id = await _post_v4_start(client, flow_txt_path, body)
-        data_uri = await _poll_v4_operation(client, op_id, cancel_event)
-        out.write_bytes(_decode_data_uri(data_uri))
-        return out if out.exists() else None
+        for attempt in range(max_a):
+            if _cancel_requested(cancel_event):
+                return None
+            try:
+                body = {"prompt": full_prompt, "aspect_ratio": aspect}
+                logger.info(
+                    f"[FastGen HTTP] clip {index}: v4 Flow from-text {attempt + 1}/{max_a}"
+                )
+                op_id = await _post_v4_start(client, flow_txt_path, body)
+                data_uri = await _poll_v4_operation(client, op_id, cancel_event)
+                out.write_bytes(_decode_data_uri(data_uri))
+                return out if out.exists() else None
+            except (FastGenCancelled, asyncio.CancelledError):
+                raise
+            except Exception as e:
+                logger.warning(
+                    f"[FastGen HTTP] clip {index} from-text attempt {attempt + 1}/{max_a}: {e}"
+                )
+                await asyncio.sleep(2.0)
+        return None
 
     async with async_fastgen_global_media_slot():
         return await _video_body()
@@ -986,6 +1040,7 @@ async def generate_videos_fastgen(
     cancel_event: threading.Event | None = None,
     *,
     mode4_veo_flow_flower: bool = False,
+    flow_max_attempts: int | None = None,
 ) -> list[Path | None]:
     _require_base()
     if not _api_key():
@@ -996,14 +1051,20 @@ async def generate_videos_fastgen(
     workers = min(len(prompts), max(1, int(getattr(settings, "fastgen_video_parallel_workers", 10) or 10)))
     sem = asyncio.Semaphore(workers)
     timeout = httpx.Timeout(float(getattr(settings, "fastgen_http_timeout_sec", 600) or 600))
-
     async def bounded(i: int, pr: str) -> Path | None:
         async with sem:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                for _ in range(max(1, settings.fastgen_max_attempts)):
+                for _ in range(1):
                     try:
                         r = await _generate_one_video(
-                            client, pr, output_dir, i, refs_single, cancel_event, mode4_veo_flow_flower=mode4_veo_flow_flower
+                            client,
+                            pr,
+                            output_dir,
+                            i,
+                            refs_single,
+                            cancel_event,
+                            mode4_veo_flow_flower=mode4_veo_flow_flower,
+                            flow_max_attempts=flow_max_attempts,
                         )
                         if r:
                             return r
@@ -1026,6 +1087,7 @@ async def generate_single_video_fastgen(
     reference_image_paths: list[str | Path] | None = None,
     cancel_event: threading.Event | None = None,
     mode4_veo_flow_flower: bool = False,
+    flow_max_attempts: int | None = None,
     video_aspect_ratio: str | None = None,
 ) -> Path | None:
     _require_base()
@@ -1041,7 +1103,7 @@ async def generate_single_video_fastgen(
         paths = [p] if p.exists() else None
     timeout = httpx.Timeout(float(getattr(settings, "fastgen_http_timeout_sec", 600) or 600))
     async with httpx.AsyncClient(timeout=timeout) as client:
-        for _ in range(max(1, settings.fastgen_max_attempts)):
+        for _ in range(1):
             try:
                 r = await _generate_one_video(
                     client,
@@ -1051,6 +1113,7 @@ async def generate_single_video_fastgen(
                     paths,
                     cancel_event,
                     mode4_veo_flow_flower=mode4_veo_flow_flower,
+                    flow_max_attempts=flow_max_attempts,
                     video_aspect_ratio=video_aspect_ratio,
                 )
                 if r:
@@ -1107,6 +1170,7 @@ async def generate_video_from_keyframes(
     index: int = 0,
     *,
     cancel_event: threading.Event | None = None,
+    flow_max_attempts: int | None = None,
     video_aspect_ratio: str | None = None,
 ) -> Path | None:
     _require_base()
@@ -1122,6 +1186,7 @@ async def generate_video_from_keyframes(
             None,
             cancel_event,
             mode4_veo_flow_flower=False,
+            flow_max_attempts=flow_max_attempts,
             keyframes=True,
             start_frame=Path(start_frame_path),
             end_frame=Path(end_frame_path),

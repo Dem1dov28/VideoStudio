@@ -412,25 +412,41 @@ def _outer_attempts() -> int:
     return max(1, min(12, configured))
 
 
+def _browser_restart_attempts(flow_max_attempts: int | None) -> int:
+    """
+    Сколько раз при ошибке закрыть браузер и открыть FastGen заново.
+    Mode 4/5: FASTGEN_VEO_FLOW_MAX_ATTEMPTS (каждая попытка = новая сессия).
+  """
+    if flow_max_attempts is not None:
+        return max(1, min(64, int(flow_max_attempts)))
+    return _outer_attempts()
+
+
 async def _restart_fastgen_after_failure(
     scraper: Any,
     attempt: int,
     err: BaseException | None,
     *,
     context: str,
+    max_outer: int | None = None,
 ) -> bool:
     """
     При ошибке генерации закрыть окно FastGen и открыть заново.
     Возвращает True, если нужно повторить запрос с теми же параметрами.
     attempt — 0-based номер неудачной попытки.
     """
-    max_outer = _outer_attempts()
+    limit = max(1, int(max_outer)) if max_outer is not None else _outer_attempts()
     detail = repr(err) if err is not None else "нет файла результата"
+    src = (
+        "FASTGEN_VEO_FLOW_MAX_ATTEMPTS"
+        if max_outer is not None and max_outer != _outer_attempts()
+        else "FASTGEN_OUTER_RESTART_ATTEMPTS"
+    )
     logger.warning(
-        f"[FastGen] {context}: попытка {attempt + 1}/{max_outer} — сбой ({detail}); "
+        f"[FastGen] {context}: перезапуск браузера {attempt + 1}/{limit} ({src}) — сбой ({detail}); "
         "закрываю браузер и открываю FastGen заново с теми же параметрами"
     )
-    if attempt >= max_outer - 1:
+    if attempt >= limit - 1:
         try:
             await scraper.stop()
         except Exception as stop_err:
@@ -1916,12 +1932,14 @@ class FastGenScraper:
         *,
         aspect_ratio: str | None = None,
         mode4_veo_flow_flower: bool = False,
+        flow_max_attempts: int | None = None,
     ) -> Path | None:
         """
         Generate video via fast-gen.ai Video tab.
         reference_image_paths: несколько референсов (напр. экстерьер + интерьер для финала).
         Если задан reference_image_paths — он приоритетнее reference_image_path.
         mode4_veo_flow_flower: Mode 4 — сначала N попыток с моделью Flow, затем переключение на Flower.
+        flow_max_attempts: лимит попыток Flow (Mode 4); иначе FASTGEN_MAX_ATTEMPTS.
         Returns path to saved .mp4 or None on failure.
         """
         page = self._page
@@ -1943,12 +1961,21 @@ class FastGenScraper:
             if p.exists():
                 ref_list = [p]
 
-        timeout_s = max(120, settings.fastgen_image_timeout * 2)
+        timeout_s = max(
+            120,
+            int(getattr(settings, "fastgen_video_wait_timeout_sec", 1800) or 1800),
+        )
         max_attempts = max(1, settings.fastgen_max_attempts)
         flow_n = max(1, int(getattr(settings, "mode4_veo_flow_attempts_before_flower", 3) or 3))
         flow_m = (getattr(settings, "mode4_veo_video_model_flow", None) or "Veo 3.1 - Flow").strip()
         flower_m = (getattr(settings, "mode4_veo_video_model_flower", None) or "Veo 3.1 - Flower").strip()
-        effective_max = (flow_n + max_attempts) if mode4_veo_flow_flower else max_attempts
+        if flow_max_attempts is not None:
+            # Одна попытка Generate+wait на сессию; перезапуск браузера — снаружи (до N раз).
+            effective_max = 1
+        elif mode4_veo_flow_flower:
+            effective_max = flow_n + max_attempts
+        else:
+            effective_max = max_attempts
         new_srcs: list[str] = []
         sel: str | None = None
 
@@ -2509,6 +2536,7 @@ def _run_single_video_sync(
     cancel_event: threading.Event | None = None,
     mode4_veo_flow_flower: bool = False,
     aspect_ratio: str | None = None,
+    flow_max_attempts: int | None = None,
 ) -> Path | None:
     """Генерация одного видео в отдельном браузере. Для параллельного запуска."""
     import asyncio as _asyncio
@@ -2520,7 +2548,8 @@ def _run_single_video_sync(
             if _cancel_requested(cancel_event):
                 return None
             upload_ref = bool(reference_image_paths) or bool(reference_image_path)
-            for attempt in range(_outer_attempts()):
+            max_browser = _browser_restart_attempts(flow_max_attempts)
+            for attempt in range(max_browser):
                 if _cancel_requested(cancel_event):
                     return None
                 try:
@@ -2535,13 +2564,14 @@ def _run_single_video_sync(
                             cancel_event=cancel_event,
                             mode4_veo_flow_flower=mode4_veo_flow_flower,
                             aspect_ratio=aspect_ratio,
+                            flow_max_attempts=flow_max_attempts,
                         )
                     if path and Path(path).exists():
                         return path
                     if _cancel_requested(cancel_event):
                         return None
                     if not await _restart_fastgen_after_failure(
-                        scraper, attempt, None, context="video"
+                        scraper, attempt, None, context="video", max_outer=max_browser
                     ):
                         return None
                 except FastGenCancelled:
@@ -2552,7 +2582,7 @@ def _run_single_video_sync(
                     if _cancel_requested(cancel_event):
                         return None
                     if not await _restart_fastgen_after_failure(
-                        scraper, attempt, e, context="video"
+                        scraper, attempt, e, context="video", max_outer=max_browser
                     ):
                         return None
             return None
@@ -2572,6 +2602,7 @@ def _run_fastgen_video_sync(
     reference_image_path: str | Path | None = None,
     cancel_event: threading.Event | None = None,
     mode4_veo_flow_flower: bool = False,
+    flow_max_attempts: int | None = None,
 ) -> list[Path | None]:
     """Генерация видео параллельно — каждое в своём окне браузера."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -2599,6 +2630,8 @@ def _run_fastgen_video_sync(
                 None,
                 cancel_event,
                 mode4_veo_flow_flower,
+                None,
+                flow_max_attempts,
             ): i
             for i in range(len(prompts))
         }
@@ -2620,6 +2653,7 @@ async def generate_videos_fastgen(
     cancel_event: threading.Event | None = None,
     *,
     mode4_veo_flow_flower: bool = False,
+    flow_max_attempts: int | None = None,
 ) -> list[Path | None]:
     """Generate videos via fast-gen.ai Video tab. Returns list of paths or None for failures."""
     logger.info("[FastGen] Starting video generation in isolated thread ...")
@@ -2631,6 +2665,7 @@ async def generate_videos_fastgen(
             reference_image_path,
             cancel_event,
             mode4_veo_flow_flower,
+            flow_max_attempts,
         )
     except FastGenCancelled:
         raise asyncio.CancelledError("FastGen cancelled") from None
@@ -2645,6 +2680,7 @@ async def generate_single_video_fastgen(
     reference_image_paths: list[str | Path] | None = None,
     cancel_event: threading.Event | None = None,
     mode4_veo_flow_flower: bool = False,
+    flow_max_attempts: int | None = None,
     video_aspect_ratio: str | None = None,
 ) -> Path | None:
     """
@@ -2668,6 +2704,7 @@ async def generate_single_video_fastgen(
             cancel_event,
             mode4_veo_flow_flower,
             video_aspect_ratio,
+            flow_max_attempts,
         )
     except FastGenCancelled:
         raise asyncio.CancelledError("FastGen cancelled") from None
@@ -3153,6 +3190,7 @@ async def generate_video_from_keyframes(
     index: int = 0,
     *,
     cancel_event: threading.Event | None = None,
+    flow_max_attempts: int | None = None,
     video_aspect_ratio: str | None = None,
 ) -> Path | None:
     """
@@ -3171,7 +3209,14 @@ async def generate_video_from_keyframes(
     """
     return await asyncio.to_thread(
         _run_keyframe_video_sync,
-        prompt, output_dir, start_frame_path, end_frame_path, index, cancel_event, video_aspect_ratio,
+        prompt,
+        output_dir,
+        start_frame_path,
+        end_frame_path,
+        index,
+        cancel_event,
+        video_aspect_ratio,
+        flow_max_attempts,
     )
 
 
@@ -3183,6 +3228,7 @@ def _run_keyframe_video_sync(
     index: int,
     cancel_event: threading.Event | None = None,
     aspect_ratio: str | None = None,
+    flow_max_attempts: int | None = None,
 ) -> Path | None:
     """Sync wrapper for keyframe video generation."""
     import asyncio as _asyncio
@@ -3264,54 +3310,45 @@ def _run_keyframe_video_sync(
             if not gen_el:
                 raise RuntimeError("Generate button not found.")
             
-            timeout_s = max(300, settings.fastgen_image_timeout * 3)  # Longer for keyframes
-            max_attempts = 1
+            timeout_s = max(
+                300,
+                int(getattr(settings, "fastgen_video_wait_timeout_sec", 1800) or 1800),
+            )
             new_srcs: list[str] = []
-            
-            for attempt in range(max_attempts):
-                if _cancel_requested(cancel_event):
-                    raise FastGenCancelled()
-                videos_before = await _collect_video_srcs(page)
-                
-                # Page-level retry is disabled: on error the caller restarts the browser
-                # and submits the same request in a fresh FastGen window.
-                if attempt == 0:
-                    # Wait for button to be enabled
-                    for _ in range(10):
-                        disabled = await gen_el.get_attribute("disabled")
-                        if disabled is None:
-                            break
-                        await asyncio.sleep(0.5)
-                    
-                    await page.keyboard.press("Escape")
-                    await asyncio.sleep(0.3)
-                    await _wake_fastgen_canvas(page)
-                    
-                    await gen_el.click()
-                    await asyncio.sleep(2)
-                    await _screenshot(page, "kf_06_generating")
-                    logger.info(f"[FastGen Keyframes] Attempt {attempt + 1}/{max_attempts} started")
-                
-                try:
-                    new_srcs = await _wait_for_new_video_with_regen(
-                        page,
-                        videos_before,
-                        timeout_s=timeout_s,
-                        gen_button_el=gen_el,
-                        gen_button_sel=gen_sel,
-                        cancel_event=cancel_event,
-                        clip_index=index,
-                    )
-                except (TimeoutError, VideoGenerationError) as e:
-                    await _screenshot(page, f"kf_timeout{'_retry' + str(attempt) if attempt > 0 else ''}")
-                    logger.warning(f"[FastGen Keyframes] Attempt {attempt + 1}/{max_attempts} failed: {e}")
-                    raise
-                
-                if new_srcs:
+            videos_before = await _collect_video_srcs(page)
+
+            for _ in range(10):
+                disabled = await gen_el.get_attribute("disabled")
+                if disabled is None:
                     break
-            
+                await asyncio.sleep(0.5)
+
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.3)
+            await _wake_fastgen_canvas(page)
+
+            await gen_el.click()
+            await asyncio.sleep(2)
+            await _screenshot(page, "kf_06_generating")
+            logger.info("[FastGen Keyframes] Generate started (одна попытка на сессию браузера)")
+
+            try:
+                new_srcs = await _wait_for_new_video_with_regen(
+                    page,
+                    videos_before,
+                    timeout_s=timeout_s,
+                    gen_button_el=gen_el,
+                    gen_button_sel=gen_sel,
+                    cancel_event=cancel_event,
+                    clip_index=index,
+                )
+            except (TimeoutError, VideoGenerationError) as e:
+                await _screenshot(page, "kf_timeout")
+                logger.warning(f"[FastGen Keyframes] Generation failed in this browser session: {e}")
+                return None
+
             if not new_srcs:
-                raise RuntimeError("[FastGen Keyframes] Новое видео не обнаружено после ожидания")
+                return None
             
             logger.success("[FastGen Keyframes] Video generated")
             await _screenshot(page, "kf_07_result")
@@ -3344,7 +3381,8 @@ def _run_keyframe_video_sync(
         scraper = FastGenScraper()
         await scraper.start()
         try:
-            for attempt in range(_outer_attempts()):
+            max_browser = _browser_restart_attempts(flow_max_attempts)
+            for attempt in range(max_browser):
                 if _cancel_requested(cancel_event):
                     raise FastGenCancelled()
                 try:
@@ -3353,7 +3391,11 @@ def _run_keyframe_video_sync(
                     if result and Path(result).exists():
                         return result
                     if not await _restart_fastgen_after_failure(
-                        scraper, attempt, None, context="keyframes video"
+                        scraper,
+                        attempt,
+                        None,
+                        context="keyframes video",
+                        max_outer=max_browser,
                     ):
                         return None
                 except asyncio.CancelledError:
@@ -3364,7 +3406,11 @@ def _run_keyframe_video_sync(
                     raise
                 except Exception as e:
                     if not await _restart_fastgen_after_failure(
-                        scraper, attempt, e, context="keyframes video"
+                        scraper,
+                        attempt,
+                        e,
+                        context="keyframes video",
+                        max_outer=max_browser,
                     ):
                         return None
             return None

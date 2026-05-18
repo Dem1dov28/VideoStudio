@@ -67,5 +67,8 @@
     "stage": "stub",
     "updated_at": "2026-05-10T07:22:09.176601+00:00",
     "schema": 1
-  }
+  },
+  "pipeline_paused": false,
+  "review_dismissed": true,
+  "review_dismissed_at": "2026-05-17T06:10:16.090924+00:00"
 }

@@ -108,6 +108,7 @@ async def generate_videos_fastgen(
     cancel_event: threading.Event | None = None,
     *,
     mode4_veo_flow_flower: bool = False,
+    flow_max_attempts: int | None = None,
 ) -> list[Path | None]:
     if _use_http():
         from agents.content_generator import fastgen_http
@@ -118,6 +119,7 @@ async def generate_videos_fastgen(
                         reference_image_path=reference_image_path,
                         cancel_event=cancel_event,
             mode4_veo_flow_flower=mode4_veo_flow_flower,
+            flow_max_attempts=flow_max_attempts,
         )
     from agents.content_generator import fastgen_playwright as _pw
 
@@ -127,6 +129,7 @@ async def generate_videos_fastgen(
         reference_image_path=reference_image_path,
         cancel_event=cancel_event,
         mode4_veo_flow_flower=mode4_veo_flow_flower,
+        flow_max_attempts=flow_max_attempts,
         )
 
 
@@ -139,6 +142,7 @@ async def generate_single_video_fastgen(
     reference_image_paths: list[str | Path] | None = None,
     cancel_event: threading.Event | None = None,
     mode4_veo_flow_flower: bool = False,
+    flow_max_attempts: int | None = None,
 ) -> Path | None:
     if _use_http():
         from agents.content_generator import fastgen_http
@@ -151,6 +155,7 @@ async def generate_single_video_fastgen(
             reference_image_paths=reference_image_paths,
             cancel_event=cancel_event,
             mode4_veo_flow_flower=mode4_veo_flow_flower,
+            flow_max_attempts=flow_max_attempts,
         )
     from agents.content_generator import fastgen_playwright as _pw
 
@@ -162,6 +167,7 @@ async def generate_single_video_fastgen(
                         reference_image_paths=reference_image_paths,
         cancel_event=cancel_event,
         mode4_veo_flow_flower=mode4_veo_flow_flower,
+        flow_max_attempts=flow_max_attempts,
     )
 
 
@@ -203,6 +209,8 @@ async def generate_video_from_keyframes(
     end_frame_path: Path,
     index: int = 0,
     *,
+    cancel_event: threading.Event | None = None,
+    flow_max_attempts: int | None = None,
     video_aspect_ratio: str | None = None,
 ) -> Path | None:
     if _use_http():
@@ -214,6 +222,8 @@ async def generate_video_from_keyframes(
             start_frame_path,
             end_frame_path,
             index=index,
+            cancel_event=cancel_event,
+            flow_max_attempts=flow_max_attempts,
             video_aspect_ratio=video_aspect_ratio,
         )
     from agents.content_generator import fastgen_playwright as _pw
@@ -224,6 +234,8 @@ async def generate_video_from_keyframes(
         start_frame_path,
         end_frame_path,
         index=index,
+        cancel_event=cancel_event,
+        flow_max_attempts=flow_max_attempts,
         video_aspect_ratio=video_aspect_ratio,
     )
 

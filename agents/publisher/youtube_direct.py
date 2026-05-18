@@ -346,6 +346,32 @@ def upload_video_file(
     return {"id": vid, "snippet": (response or {}).get("snippet"), "raw": response}
 
 
+def upload_video_thumbnail(
+    creds: Credentials,
+    video_id: str,
+    thumbnail_path: Path,
+) -> dict[str, Any]:
+    """Upload a custom thumbnail for an already uploaded YouTube video."""
+    vid = (video_id or "").strip()
+    if not vid:
+        raise ValueError("video_id is required")
+    if not thumbnail_path.is_file():
+        raise FileNotFoundError(str(thumbnail_path))
+
+    suffix = thumbnail_path.suffix.lower()
+    if suffix not in {".jpg", ".jpeg", ".png"}:
+        raise ValueError(f"Unsupported thumbnail type: {thumbnail_path.name}")
+
+    http = _authorized_http_for_youtube(creds)
+    youtube = build("youtube", "v3", http=http, cache_discovery=False)
+    mimetype = "image/png" if suffix == ".png" else "image/jpeg"
+    with open(thumbnail_path, "rb") as fh:
+        media = MediaIoBaseUpload(fh, mimetype=mimetype, resumable=False)
+        response = youtube.thumbnails().set(videoId=vid, media_body=media).execute()
+    logger.success(f"[YouTube] Preview загружен для video_id={vid}: {thumbnail_path.name}")
+    return {"video_id": vid, "raw": response}
+
+
 def format_http_error(exc: HttpError) -> str:
     try:
         content = exc.content.decode() if exc.content else str(exc)

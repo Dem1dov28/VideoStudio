@@ -146,8 +146,17 @@ _BOOK_NIGHT_STOCK_CLOSER_BAN = (
     "Ultimately; In essence; In closing; To conclude; To wrap up; At the end of the day; "
     "This shift in perspective; profound insights encapsulated; interconnected web; tapestry of; "
     "transformative journey; embracing this principle as a stock closer; the principle reminds us that; "
+    "healthier patterns; mutual understanding and respect as a vague ending; a world filled with distractions; "
+    "competing priorities as generic filler; resilient and effective version of ourselves; "
+    "navigating the ups and downs of life with grace and strength; feel valued and respected in the process; "
+    "As we move forward; let us carry these ideas; integrating them into daily practices; "
+    "guide our actions and decisions; always striving toward/towards a more effective and meaningful life; "
+    "the same thesis repeated with synonym variation in one paragraph; "
+    "incremental improvements / small steps / compounding as a looped closer when already stated; "
+    "building blocks for character or selfhood as decorative filler; "
+    "generic recap titles used as empty filler (e.g. Final Thoughts, Wrapping Up) unless that is the book's real section title. "
     "В конечном счёте; Таким образом (as a repeated paragraph closer); В заключение. "
-    "End with at most one short concrete sentence, not a rhetorical flourish."
+    "End with at most one short concrete sentence that adds specific value to the current subsection, not a rhetorical flourish."
 )
 
 
@@ -201,7 +210,7 @@ async def _expand_one_book_night_narration(
             f"You lengthen ONE calm sleep-time audiobook paragraph. Output language: {lang_name} only.\n"
             f"The paragraph must be at least {floor} characters (plain letters/spaces/punctuation — not counting filler).\n"
             "Keep the same ideas and tone; do NOT add new statistics, named studies, dates, dialogue, long quotes, or invented book details. "
-            "You may add: one clarifying angle, one concrete everyday implication, gentle transitions, and a softer closing. "
+            "You may add: one clarifying angle, one concrete everyday implication, gentle transitions, and one concrete finishing sentence. "
             "Do not loop the same thesis with synonyms. "
             "Avoid decorative metaphor chains and avoid cliche poetic images. "
             "One continuous paragraph, no bullet points, no title line, no markdown fences.\n"
@@ -358,6 +367,7 @@ async def _tighten_book_night_narrations(
                 "- Remove repeated thesis statements and synonym loops.\n"
                 "- Keep one main idea thread for this subsection; no topic jumping.\n"
                 "- Prefer concrete wording over abstract poetic phrasing.\n"
+                "- Remove generic virtue endings that could fit any nonfiction book.\n"
                 "- At most one short metaphor; no cliche metaphor chains.\n"
                 "- Keep sentence rhythm varied: mix shorter and longer sentences naturally.\n"
                 "- Keep one paragraph only, no markdown.\n"
@@ -657,9 +667,16 @@ Hard constraints:
 - Total subchapters across ALL chapters must be between {_MIN_BOOK_SUBS_TOTAL} and {_MAX_BOOK_SUBS_TOTAL} inclusive. Choose the count that **best matches how this book is really subdivided** (real TOC / parts / sections / numbered steps if the book uses them). Do **not** pad with fake subsections or split one natural section into many slices just to hit a round number. If the book naturally has very few top-level units, use finer **authentic** subsection names (as in real editions) until you reach at least {_MIN_BOOK_SUBS_TOTAL}. If the outline would exceed {_MAX_BOOK_SUBS_TOTAL}, merge smaller adjacent units **without breaking reading order**.
 - The JSON \"chapters\" array length must **never** be fewer than {_MIN_BOOK_CHAPTERS} or greater than {_MAX_BOOK_CHAPTERS}. If a printed TOC has only 2–3 top-level parts, **re-partition** the same book into at least {_MIN_BOOK_CHAPTERS} coherent major blocks (e.g. framing / early arc / middle / integration) using believable thematic or structural names — **do not output 2 or 3 objects** in \"chapters\". If you would exceed {_MAX_BOOK_CHAPTERS}, merge adjacent major parts so each remains a believable book section.
 - Subchapters must map to consecutive reading order through the book (no random reordering).
-- **Ordered multi-part structures** (any book with a fixed sequence of named or numbered units — laws, rules, steps, pillars, stages in a method, numbered arguments, etc.): each unit appears **exactly once** in the order the real book uses (1→2→…→N or the book's own sequence). Do not place a later unit's substance under an earlier title, and do not reorder units unless the printed TOC genuinely does — default is strict fidelity to the original reading order.
-- **No duplicate global overviews**: at most **one** thin introductory subsection may frame the whole framework. After detailed blocks begin, do **not** add another subsection whose "coverage" is again a full walkthrough of all N units. If you need a closing synthesis, use **one** clearly titled subsection (e.g. «Conclusion / Integration») that references themes without repeating full per-unit lessons already covered.
-- **No double blocks for the same unit**: the same named theme or numbered step must not appear twice at full depth in different subsections unless the printed book truly has two distinct sections — if unsure, **merge** into one subsection.
+- **Ordered multi-part structures** (when the book has a fixed sequence of named or numbered units — parts, chapters in a method, numbered arguments, eras, cases, etc.): each unit appears **exactly once** in the order the real book uses. Do not place a later unit's substance under an earlier title, and do not reorder unless the printed TOC genuinely does — default is strict fidelity to the original reading order.
+- **Nested structure** (apply only when this title actually groups ideas inside larger units — e.g. a principle then examples, a thesis then cases, a part then sub-arguments; skip for purely linear or chronological books):
+  - Material the author places **before** the main body of argument must stay **early** in the outline — never moved to the end as an afterthought.
+  - For each major unit: overview of that unit first, then its supporting subsections **immediately after**, before the next major unit begins. Do not interleave subsections from unit B while unit A's subsections are unfinished.
+  - Do not scatter one unit's substance across distant subsections; keep examples, applications, and supporting points **contiguous under the unit they belong to**.
+  - Specialized or late-book material that the author introduces **after** the core structure must appear **after** that core structure in the outline — not mixed into the opening or middle.
+  - In nested subsections, "coverage" should name the parent unit they support. Titles should make that parent recognizable when the book's TOC does.
+- **No duplicate global overviews**: at most **one** thin introductory subsection may frame the whole book. After detailed blocks begin, do **not** add another subsection whose "coverage" is again a full walkthrough of all major parts. If you need a closing synthesis, use **one** clearly titled final subsection specific to this book's arc — not a generic placeholder title unless that is an authentic section title in this edition.
+- **No double blocks for the same unit**: the same named theme or numbered step must not appear twice at full depth in different subsections unless the printed book truly has two distinct sections — if unsure, **merge** into one subsection. If the final subsection would merely repeat the previous unit in broader words, convert it into a compact overall synthesis across the whole book instead.
+- **Ending shape**: the last subsection must feel like the end of the listening episode, not a dangling note. It should close the book's full arc in 1–2 coverage sentences while avoiding a second detailed overview and avoiding vague inspirational filler unless that is explicitly the book's final focus. Do not plan an exhortational outro; plan a concrete synthesis of what the book has actually argued.
 - Depth vs **number of top-level chapters**: **Fewer** chapters (closer to {_MIN_BOOK_CHAPTERS}) → the same book is split into fewer big buckets, so each subchapter must carry **more** planned substance in "coverage" (still brief notes, but **denser** beats to unpack later). **More** chapters (closer to {_MAX_BOOK_CHAPTERS}) → **tighter** "coverage" per subchapter so blocks stay distinct for night listening.
 - "coverage" is planning only; do NOT write the final narration here.
 - Do not present invented quotes, page numbers, or precise statistics as facts; planning text only."""
@@ -829,7 +846,7 @@ Truthfulness / anti-hallucination (mandatory):
 For EACH subsection in the batch, write ONE continuous paragraph to be read aloud (no bullet points).
 Style anchor (keep stable across batches): warm reflective narrator, gentle cadence, medium-long flowing sentences, no sudden tonal shifts.
 - Clarity rules (strict): no rhetorical self-repetition, no synonym chains for the same claim, no "same thought said 3 times".
-- Structure rules (strict): build each paragraph as a mini-arc with 4 steps: core point → plain explanation → concrete everyday implication/example → soft closing line.
+- Structure rules (strict): build each paragraph as a mini-arc with 4 steps: core point → plain explanation → concrete everyday implication/example → one specific finishing sentence.
 - Rhythm rules (strict): vary sentence length; include at least one short sentence among longer ones.
 - Language rules (strict): prefer concrete verbs and nouns; avoid abstract decorative prose.
 - Metaphor rules (strict): zero or one brief metaphor; avoid cliche images (echoes/corridors/canvas/storm/dance/ripple style wording).
@@ -837,11 +854,15 @@ Style anchor (keep stable across batches): warm reflective narrator, gentle cade
 - Tone: slow, warm, reflective — like a trusted narrator before sleep; NOT hype, NOT a book review with scores, NOT preaching.
 - Summarize **ideas and mental models** faithfully at the level of justified content above; do NOT invent long direct quotes or dialogue. Paraphrase principles calmly.
 - This subsection must not repeat the previous subsection's thesis; advance the book's argument by one concrete step tied to this subsection title.
-- Structure: **{sent_lo}–{sent_hi}** sentences. Mini-arc: introduce the idea → explain in plain language → why it matters → soft closing.
+- Structure: **{sent_lo}–{sent_hi}** sentences. Mini-arc: introduce the idea → explain in plain language → why it matters → one specific finishing sentence.
+- **Ending discipline**: ordinary subsections should not sound like the whole episode is ending. The final subsection only should provide closure for the entire book: 1–2 calm synthesis sentences that connect the book's arc, without re-listing chapters or repeating the immediately previous subsection at the same depth. Avoid exhortational outro language such as "as we move forward", "let us carry these ideas", "integrate them into daily practices", "guide our actions and decisions", or "strive toward a more meaningful life"; those endings are too generic unless the book itself uses that exact framing.
 - **Structural integrity (any book)**: One output paragraph = exactly one input subsection title + its Plan line. Do not narrate the next chapter part or numbered unit under the current heading; do not jump ahead then back; titles and Plans define order — the paragraph must match the subsection you were given, not an adjacent one.
+- **Nested-subsection anchoring** (only when the TOC/Plan shows this block sits under a larger named unit): within the first third of the paragraph, name that parent unit using the book's own label from the chapter title, subsection title, or Plan. Do not present a subsection as freestanding generic advice when the outline ties it to a specific part of the book. For linear narrative, biography, or single-thread chapters, follow the title without forcing a parent label.
+- **Reading-order fidelity**: Follow the subsection sequence in the outline — not a rearranged "best hits" order. Do not re-introduce opening premises as if they were new when the episode is already deep into the book; do not discuss late-book specialized material before the outline reaches it.
+- **Recap / synthesis subsections**: If the title signals recap, conclusion, or integration, add at most one new integrative insight; do not restate the same thesis in multiple sentences with synonym variation.
 - **No second global overview**: Do NOT restate the complete numbered list of all main units (or a full chapter-by-chapter catalogue) in later subsections after the opening already framed the book, unless the **current subsection title** clearly signals recap / synthesis / conclusion. Do not use vague "in our journey…" framing to re-list everything.
 - **No duplicate deep dives**: If a theme or numbered unit already had a full subsection earlier, do not teach it again at the same depth under another title.
-- At most one short neutral bridge per paragraph if needed (e.g. "here we look at…"); never use it to summarize prior subsections or to re-walk the whole framework.
+- At most one short neutral bridge per paragraph if needed (e.g. "here we look at…"); never use it to summarize prior subsections or to re-walk the whole book catalogue.
 - Plain text only. Aim for roughly **{narr_lo}–{narr_hi} characters** of narration per subsection when the material allows — **this episode is sized like a full «{FACTS50_TARGET} facts» sleep video overall**, so each block must carry enough substance; if shorter, invisible padding is added server-side — do not pad with empty prose.
 """
             + _BOOK_NIGHT_STOCK_CLOSER_BAN
@@ -854,14 +875,21 @@ Style anchor (keep stable across batches): warm reflective narrator, gentle cade
             lines.append(
                 f"{g}. Book chapter: {row['chapter_title']}\n"
                 f"   Subsection: {row['subchapter_title']}\n"
+                f"   Position: {g} of {n_total}; final subsection: {'yes' if g == n_total else 'no'}\n"
                 f"   Plan: {row['coverage'] or '(summarize from chapter title and book context)'}"
             )
         cont = ""
         if start_i > 0:
+            prev = flat_rows[start_i - 1]
+            prev_line = (
+                f"{prev.get('chapter_title', '')} / {prev.get('subchapter_title', '')}".strip(" /")
+            )
             cont = (
                 f"This batch continues at subsection {start_i + 1} of {n_total}. "
+                f"Immediately before this batch: {prev_line}.\n"
                 "Earlier subsections were already narrated — do not summarize them again, "
-                "do not restate the full numbered or catalogued structure of the whole book, and do not repeat opening overview framing.\n\n"
+                "do not restate the full numbered or catalogued structure of the whole book, and do not repeat opening overview framing. "
+                "Advance in the same reading order; if the Plan or chapter title shows this block is nested under a larger unit, name that parent unit briefly using the book's own terms.\n\n"
             )
         human2 = (
             cont

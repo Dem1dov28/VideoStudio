@@ -109,6 +109,21 @@ function mergeMode5Payload(prev, incoming) {
   if ((incoming?.mode5_publish_thumbnail == null) && prev?.mode5_publish_thumbnail) {
     merged.mode5_publish_thumbnail = prev.mode5_publish_thumbnail;
   }
+  if (incoming?.mode5_can_assemble === true) {
+    merged.mode5_can_assemble = true;
+  } else if (prev?.mode5_can_assemble === true && incoming?.mode5_can_assemble !== false) {
+    merged.mode5_can_assemble = true;
+  }
+  const prevReady = Number(prev?.mode5_ready_chunks);
+  const nextReady = Number(incoming?.mode5_ready_chunks);
+  if (Number.isFinite(nextReady) && (!Number.isFinite(prevReady) || nextReady >= prevReady)) {
+    merged.mode5_ready_chunks = nextReady;
+  }
+  const prevTotal = Number(prev?.mode5_total_chunks);
+  const nextTotal = Number(incoming?.mode5_total_chunks);
+  if (Number.isFinite(nextTotal) && (!Number.isFinite(prevTotal) || nextTotal >= prevTotal)) {
+    merged.mode5_total_chunks = nextTotal;
+  }
   return merged;
 }
 
@@ -330,14 +345,17 @@ export default function Progress() {
       (
         status === 'running' ||
         status === 'paused' ||
+        (status === 'done' && done?.mode5_review_ready && done?.mode5_can_assemble !== true) ||
         ((status === 'error' || status === 'cancelled') && done?.mode5_can_resume === true)
       );
     if (!pollMode5Partial) return;
     let cancelled = false;
     let timer = null;
+    let lastSnap = null;
     const tick = async () => {
       try {
         const snap = await api.mode5ReviewState(sid);
+        lastSnap = snap;
         if (cancelled) return;
         const hintRaw = snap?.mode5_progress_hint;
         const hint = typeof hintRaw === 'string' ? hintRaw.trim() : '';
@@ -380,10 +398,13 @@ export default function Progress() {
       } catch (_e) {
         // no-op: endpoint may be unavailable before plan is created
       } finally {
+        const assembleReady = lastSnap?.mode5_can_assemble === true;
         if (
           !cancelled &&
+          !assembleReady &&
           (status === 'running' ||
             status === 'paused' ||
+            (status === 'done' && (done?.mode5_review_ready || lastSnap?.mode5_review_ready)) ||
             ((status === 'error' || status === 'cancelled') && done?.mode5_can_resume === true))
         ) {
           timer = setTimeout(tick, 2500);
@@ -395,7 +416,7 @@ export default function Progress() {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [sid, status, done?.mode5_can_resume, done?.video_path, sessionMode]);
+  }, [sid, status, done?.mode5_can_resume, done?.mode5_review_ready, done?.video_path, sessionMode]);
 
   // Video URL(s) from result — один файл или несколько (Mode 4 bilingual)
   const videoUrls = useMemo(() => {
@@ -440,7 +461,22 @@ export default function Progress() {
     });
   }, [done, sid]);
 
-  const mode5ReviewData = done?.mode5_review_ready ? done : mode5Live;
+  const mode5ReviewData = useMemo(() => {
+    if (done?.mode5_review_ready) {
+      return mode5Live ? mergeMode5Payload(done, mode5Live) : done;
+    }
+    return mode5Live;
+  }, [done, mode5Live]);
+  const mode5ReadyChunks = Number(mode5ReviewData?.mode5_ready_chunks);
+  const mode5TotalChunks = Number(mode5ReviewData?.mode5_total_chunks);
+  const mode5CanAssemble =
+    mode5ReviewData?.mode5_can_assemble === true ||
+    (
+      Number.isFinite(mode5ReadyChunks) &&
+      Number.isFinite(mode5TotalChunks) &&
+      mode5TotalChunks > 0 &&
+      mode5ReadyChunks === mode5TotalChunks
+    );
   const mode5BlockLoopEnabled = Boolean(mode5ReviewData?.mode5_block_loop_enabled);
   const mode5IntroPreviewRel =
     done?.mode5_intro_preview_video || mode5Live?.mode5_intro_preview_video || null;
@@ -782,6 +818,9 @@ export default function Progress() {
           <p className="text-xs text-[#a1a1aa] mb-3 leading-relaxed">
             Порядок сверху вниз задаёт, какой ролик пойдёт на какой участок длинного видео по времени: слот 1 — самый ранний блок, далее по таймлайну. Стрелки меняют местами соседние клипы; порядок сохраняется на сервере сразу после нажатия.
           </p>
+          <p className="text-xs text-[#a1a1aa] mb-3 leading-relaxed">
+            Каждое превью — два подряд одинаковых цикла анимации (~8+8 с). Стык между ними посередине ролика: так видно, будет ли заметен скачок при зацикливании в длинном видео.
+          </p>
           <div className="flex flex-col gap-4 mb-3">
             {mode5IntroPreviewList.map((rel, i) => (
               <div
@@ -1100,8 +1139,9 @@ export default function Progress() {
               <div className="flex gap-2">
                 <button
                   type="button"
-                  disabled={mode5AssemblyBusy}
+                  disabled={mode5AssemblyBusy || !mode5CanAssemble}
                   onClick={async () => {
+                    if (!mode5CanAssemble) return;
                     setMode5AssemblyBusy(true);
                     setError('');
                     try {
@@ -1117,12 +1157,17 @@ export default function Progress() {
                   }}
                   className="btn-primary flex items-center justify-center gap-2 text-sm font-semibold py-3 w-full"
                 >
-                  {mode5AssemblyBusy ? 'Монтаж…' : 'Финальный монтаж (склеить все части)'}
+                  {mode5AssemblyBusy
+                    ? 'Монтаж…'
+                    : mode5CanAssemble
+                      ? 'Финальный монтаж (склеить все части)'
+                      : `Ждём все части (${Number.isFinite(mode5ReadyChunks) ? mode5ReadyChunks : 0}/${Number.isFinite(mode5TotalChunks) ? mode5TotalChunks : '?'})`}
                 </button>
                 <button
                   type="button"
-                  disabled={mode5LiveActionKey === 'rebuild-final'}
+                  disabled={mode5LiveActionKey === 'rebuild-final' || !mode5CanAssemble}
                   onClick={async () => {
+                    if (!mode5CanAssemble) return;
                     setMode5LiveActionKey('rebuild-final');
                     setError('');
                     try {

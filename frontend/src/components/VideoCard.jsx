@@ -79,7 +79,14 @@ export default function VideoCard({
         privacy_status: ytPrivacy,
         channel_profile: channelProfile,
       });
-      const msg = r?.url ? `Залито: ${r.url}` : `video_id: ${r?.video_id || '?'}`;
+      const msg = [
+        r?.url ? `Залито: ${r.url}` : `video_id: ${r?.video_id || '?'}`,
+        r?.thumbnail_uploaded
+          ? 'Preview загружен.'
+          : r?.thumbnail_error
+            ? `Preview не загружен: ${r.thumbnail_error}`
+            : '',
+      ].filter(Boolean).join('\n');
       alert(msg);
     } catch (err) {
       alert(err.message || String(err));
@@ -245,7 +252,7 @@ export default function VideoCard({
           <span className="text-[10px] text-[#52525b]">{formatDate(video.created_at)}</span>
         </div>
 
-        {video.mode5_can_assemble && (
+        {(video.mode5_has_previews || video.mode5_can_assemble) && (
           <div className="grid grid-cols-1 gap-1.5">
             <button
               type="button"
@@ -262,7 +269,7 @@ export default function VideoCard({
               type="button"
               onClick={async (e) => {
                 e.stopPropagation();
-                if (!video.session_id || m5AssembleBusy) return;
+                if (!video.session_id || m5AssembleBusy || !video.mode5_can_assemble) return;
                 setM5AssembleBusy(true);
                 try {
                   await api.mode5Assemble(video.session_id);
@@ -273,10 +280,14 @@ export default function VideoCard({
                   setM5AssembleBusy(false);
                 }
               }}
-              disabled={m5AssembleBusy}
+              disabled={m5AssembleBusy || !video.mode5_can_assemble}
               className="w-full flex items-center justify-center gap-1.5 text-xs font-semibold py-2 px-2 rounded-lg bg-emerald-600/90 hover:bg-emerald-500 text-white disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {m5AssembleBusy ? 'Монтаж…' : `Склеить в одно видео${video.mode5_preview_count ? ` (${video.mode5_preview_count})` : ''}`}
+              {m5AssembleBusy
+                ? 'Монтаж…'
+                : video.mode5_can_assemble
+                  ? `Склеить в одно видео${video.mode5_preview_count ? ` (${video.mode5_preview_count})` : ''}`
+                  : `Ждём все части (${video.mode5_preview_count || 0}/${video.mode5_preview_total || '?'})`}
             </button>
           </div>
         )}
@@ -616,6 +627,17 @@ export default function VideoCard({
             <RiDownloadLine className="text-sm" />
             Скачать
           </a>
+          {thumbUrl ? (
+            <a
+              href={thumbUrl}
+              download={`preview_${video.session_id}.jpg`}
+              onClick={(e) => e.stopPropagation()}
+              className="flex items-center gap-1.5 text-brand-400 hover:text-brand-300 text-xs font-medium transition-colors"
+            >
+              <RiDownloadLine className="text-sm" />
+              Preview
+            </a>
+          ) : null}
           {quoteCaptionForVideo(video) ? (
             <button
               type="button"

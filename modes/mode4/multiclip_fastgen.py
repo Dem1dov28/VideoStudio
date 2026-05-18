@@ -163,7 +163,8 @@ async def generate_parable_clips(
                     reference_image_path=None,
                     reference_image_paths=refs,
                     cancel_event=cancel_event,
-                    mode4_veo_flow_flower=True,
+                    mode4_veo_flow_flower=settings.mode4_veo_enable_flower_fallback,
+                    flow_max_attempts=settings.fastgen_veo_flow_max_attempts,
                 )
                 if path and Path(path).exists():
                     logger.info(f"[Multiclip FG] Clip {i + 1}/{n} done")
@@ -198,7 +199,8 @@ async def regenerate_parable_clip(
             reference_image_path=None,
             reference_image_paths=refs,
             cancel_event=cancel_event,
-            mode4_veo_flow_flower=True,
+            mode4_veo_flow_flower=settings.mode4_veo_enable_flower_fallback,
+            flow_max_attempts=settings.fastgen_veo_flow_max_attempts,
         )
         if path and Path(path).exists():
             break

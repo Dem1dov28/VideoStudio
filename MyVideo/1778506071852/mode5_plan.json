@@ -16,7 +16,7 @@
   "style_suffix": "Clean editorial realism, crisp composition, balanced contrast, informative documentary look with grounded contemporary/historical fidelity by context.",
   "style_lock": "Clean editorial realism, crisp composition, balanced contrast, informative documentary look with grounded contemporary/historical fidelity by context.",
   "style_id": "clean_editorial_realistic",
-  "await_intro_confirmation": true,
+  "await_intro_confirmation": false,
   "intro_preview_video": "clips/mode5/block_loop_0000.mp4",
   "intro_preview_videos": [
     "clips/mode5/block_loop_0000.mp4",
@@ -1234,5 +1234,8 @@
     "stage": "stub",
     "updated_at": "2026-05-11T15:23:28.144674+00:00",
     "schema": 1
-  }
+  },
+  "pipeline_paused": false,
+  "review_dismissed": true,
+  "review_dismissed_at": "2026-05-17T06:10:16.091980+00:00"
 }

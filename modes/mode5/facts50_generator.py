@@ -22,6 +22,8 @@ FACTS50_TARGET = 77
 _MIN_NARRATION_CHARS = 520
 _FACTS_VERIFY_BATCH = 20
 _NARRATION_BATCH = 26
+# Один JSON на 77 фактов часто обрывается/ломается — генерируем пачками.
+_FACTS_PHASE1_BATCH_DEFAULT = 16
 _COMBINING_ACUTE = "\u0301"
 _BAD_FACT_PATTERNS = (
     re.compile(r"\bдополнительн(?:ый|ого|ые)\s+факт", re.IGNORECASE),
@@ -89,20 +91,46 @@ def _parse_json_obj(raw: str) -> dict[str, Any]:
         last_err = e
 
     if last_err is not None:
+        logger.debug(
+            "[Mode5 facts50] JSON parse failed after all strategies; response head: {}",
+            s[:800],
+        )
         raise last_err
     raise ValueError("Could not parse LLM JSON")
 
 
-def _scenario_llm():
+def _facts_phase1_batch_size() -> int:
+    raw = int(getattr(settings, "mode5_facts50_phase1_batch_size", _FACTS_PHASE1_BATCH_DEFAULT) or _FACTS_PHASE1_BATCH_DEFAULT)
+    return max(8, min(26, raw))
+
+
+def _scenario_llm(*, temperature: float = 0.45, max_tokens: int = 8192):
     model = getattr(settings, "openrouter_scenario_model", None) or settings.openrouter_model
-    return make_llm(temperature=0.45, model=model)
+    return make_llm(temperature=temperature, model=model, max_tokens=max_tokens)
 
 
-async def _invoke_json(system: str, human: str) -> dict[str, Any]:
-    llm = _scenario_llm()
-    msg = await llm.ainvoke([SystemMessage(content=system), HumanMessage(content=human)])
-    raw = msg.content if isinstance(msg.content, str) else str(msg.content)
-    return _parse_json_obj(raw)
+async def _invoke_json(system: str, human: str, *, max_attempts: int = 2) -> dict[str, Any]:
+    last_err: BaseException | None = None
+    temps = (0.45, 0.25)
+    for attempt in range(max(1, max_attempts)):
+        temp = temps[min(attempt, len(temps) - 1)]
+        llm = _scenario_llm(temperature=temp)
+        payload = human
+        if attempt > 0:
+            payload = (
+                human
+                + "\n\nIMPORTANT: Return ONLY one valid JSON object. "
+                "Escape double quotes inside strings. No markdown fences, no commentary."
+            )
+        try:
+            msg = await llm.ainvoke([SystemMessage(content=system), HumanMessage(content=payload)])
+            raw = msg.content if isinstance(msg.content, str) else str(msg.content)
+            return _parse_json_obj(raw)
+        except Exception as e:
+            last_err = e
+            logger.warning("[Mode5 facts50] JSON invoke attempt {} failed: {}", attempt + 1, e)
+    assert last_err is not None
+    raise last_err
 
 
 def _normalize_fact_lines(obj: dict[str, Any]) -> list[str]:
@@ -179,6 +207,116 @@ def _bad_fact_indices(facts: list[str]) -> list[int]:
                 bad.add(i)
                 break
     return sorted(bad)
+
+
+def _append_unique_facts(facts: list[str], batch: list[str], *, target: int) -> int:
+    """Merge batch into facts with dedup; return count added."""
+    added = 0
+    for line in batch:
+        if len(facts) >= target:
+            break
+        line = _strip_generation_artifacts(line)
+        if not line or _has_placeholder_fact(line):
+            continue
+        if all(
+            _fact_overlap(line, prev) < 0.55
+            and not (_shares_distinctive_term(line, prev) and _fact_overlap(line, prev) >= 0.30)
+            for prev in facts
+        ):
+            facts.append(line)
+            added += 1
+    return added
+
+
+def _facts_phase1_system_prompt(*, need: int, lang_name: str) -> str:
+    return f"""You write structured factual entertainment scripts for short-form / long compilations.
+The user gives a HEADLINE or THEME (e.g. "facts about France"). You must produce EXACTLY {need} distinct, interesting, verifiable facts related to that theme.
+Rules:
+- Facts should be varied (history, culture, geography, science, language, food, people, quirks) when the theme allows.
+- Each fact is ONE informative line (about 100-220 characters), no numbering prefix needed in the string.
+- Avoid repeating the same idea. No URLs or markdown.
+- Do not include myths, rumors, conspiracy claims, or uncertain claims presented as truth.
+- Prefer broadly accepted facts from general knowledge; if uncertain, choose a safer fact.
+- Output ONLY valid JSON: {{"facts": ["...", "..."]}} with exactly {need} strings.
+Language for the fact lines: {lang_name}."""
+
+
+async def _generate_facts_phase1(
+    topic_clean: str,
+    lang_name: str,
+    control: dict | None,
+) -> list[str]:
+    """Generate FACTS50_TARGET facts in smaller JSON batches (more reliable than one 77-item blob)."""
+    from pipeline_control import checkpoint
+
+    batch_size = _facts_phase1_batch_size()
+    facts: list[str] = []
+    batch_idx = 0
+
+    while len(facts) < FACTS50_TARGET:
+        need = min(batch_size, FACTS50_TARGET - len(facts))
+        batch_idx += 1
+        sys = _facts_phase1_system_prompt(need=need, lang_name=lang_name)
+        human_parts = [f"Theme / headline:\n{topic_clean}"]
+        if facts:
+            human_parts.append(
+                f"\nAlready have {len(facts)} facts — add {need} NEW ones; "
+                "do not repeat or closely paraphrase any line below:\n"
+                + json.dumps(facts[-min(40, len(facts)):], ensure_ascii=False)
+            )
+        human = "\n".join(human_parts)
+
+        await checkpoint(control)
+        try:
+            obj = await _invoke_json(sys, human)
+        except Exception as e:
+            logger.error(
+                "[Mode5 facts50] Phase 1 batch {} (have {}) JSON failed: {}",
+                batch_idx,
+                len(facts),
+                e,
+            )
+            raise ValueError(
+                "Mode 5 (77 фактов): не удалось разобрать ответ модели (фаза 1). Повторите запуск."
+            ) from e
+
+        batch = [_strip_generation_artifacts(x) for x in _normalize_fact_lines(obj)]
+        if len(batch) != need:
+            logger.warning(
+                "[Mode5 facts50] Phase 1 batch {} returned {} facts, expected {}",
+                batch_idx,
+                len(batch),
+                need,
+            )
+            repair_sys = sys + f"\nYou returned {len(batch)} items. Fix to EXACTLY {need}."
+            repair_human = human + "\n\nReturn corrected JSON only."
+            try:
+                obj = await _invoke_json(repair_sys, repair_human)
+                batch = [_strip_generation_artifacts(x) for x in _normalize_fact_lines(obj)]
+            except Exception as e:
+                logger.error("[Mode5 facts50] Phase 1 batch {} repair failed: {}", batch_idx, e)
+
+        added = _append_unique_facts(facts, batch, target=FACTS50_TARGET)
+        if added == 0 and need > 0:
+            raise ValueError(
+                "Mode 5 (77 фактов): модель не добавила новых уникальных фактов на этом шаге. Повторите запуск."
+            )
+
+    if len(facts) > FACTS50_TARGET:
+        facts = facts[:FACTS50_TARGET]
+    elif len(facts) < FACTS50_TARGET:
+        facts = await _complete_facts_to_target(
+            facts,
+            target=FACTS50_TARGET,
+            lang_name=lang_name,
+            topic=topic_clean,
+        )
+
+    if len(facts) != FACTS50_TARGET:
+        raise ValueError(
+            f"Mode 5 (77 фактов): модель вернула {len(facts)} фактов вместо {FACTS50_TARGET}. Попробуйте ещё раз."
+        )
+    return facts
 
 
 async def _complete_facts_to_target(
@@ -364,53 +502,7 @@ async def generate_facts50_script(
         lang = "ru"
     lang_name = lang_map[lang]
 
-    sys1 = f"""You write structured factual entertainment scripts for short-form / long compilations.
-The user gives a HEADLINE or THEME (e.g. "facts about France"). You must produce EXACTLY {FACTS50_TARGET} distinct, interesting, verifiable facts related to that theme.
-Rules:
-- Facts should be varied (history, culture, geography, science, language, food, people, quirks) when the theme allows.
-- Each fact is ONE informative line (about 100-220 characters), no numbering prefix needed in the string.
-- Avoid repeating the same idea. No URLs or markdown.
-- Do not include myths, rumors, conspiracy claims, or uncertain claims presented as truth.
-- Prefer broadly accepted facts from general knowledge; if uncertain, choose a safer fact.
-- Output ONLY valid JSON: {{"facts": ["...", "..."]}} with exactly {FACTS50_TARGET} strings."""
-
-    human1 = f"""Theme / headline:\n{topic_clean}\n\nLanguage for the fact lines: {lang_name} (same language as narrations)."""
-
-    await checkpoint(control)
-    try:
-        obj1 = await _invoke_json(sys1, human1)
-    except Exception as e:
-        logger.error(f"[Mode5 facts50] Phase 1 JSON failed: {e}")
-        raise ValueError("Mode 5 (77 фактов): не удалось разобрать ответ модели (фаза 1). Повторите запуск.") from e
-
-    facts = _normalize_fact_lines(obj1)
-    if len(facts) != FACTS50_TARGET:
-        logger.warning(f"[Mode5 facts50] Phase 1 got {len(facts)} facts, retrying repair")
-        repair_sys = sys1 + f"\nYou previously returned {len(facts)} items. Fix to EXACTLY {FACTS50_TARGET}."
-        repair_human = f"Same theme:\n{topic_clean}\n\nPrevious JSON had wrong length. Output ONLY valid JSON with exactly {FACTS50_TARGET} strings in \"facts\"."
-        try:
-            obj1b = await _invoke_json(repair_sys, repair_human)
-            facts = _normalize_fact_lines(obj1b)
-        except Exception as e:
-            logger.error(f"[Mode5 facts50] Phase 1 repair failed: {e}")
-    if len(facts) > FACTS50_TARGET:
-        # Модель иногда возвращает лишние факты; безопасно обрезаем до целевого количества.
-        logger.warning(
-            f"[Mode5 facts50] Phase 1 still has {len(facts)} facts after repair; trimming to {FACTS50_TARGET}"
-        )
-        facts = [_strip_generation_artifacts(x) for x in facts[:FACTS50_TARGET]]
-    elif len(facts) < FACTS50_TARGET:
-        logger.warning(
-            f"[Mode5 facts50] Phase 1 still has {len(facts)} facts after repair; asking model to complete to {FACTS50_TARGET}"
-        )
-        facts = await _complete_facts_to_target(
-            facts,
-            target=FACTS50_TARGET,
-            lang_name=lang_name,
-            topic=topic_clean,
-        )
-    if len(facts) != FACTS50_TARGET:
-        raise ValueError(f"Mode 5 (77 фактов): модель вернула {len(facts)} фактов вместо {FACTS50_TARGET}. Попробуйте ещё раз.")
+    facts = await _generate_facts_phase1(topic_clean, lang_name, control)
     facts = await _repair_bad_fact_slots(facts, topic=topic_clean, lang_name=lang_name)
 
     if control and control.get("_mode5_test_run"):

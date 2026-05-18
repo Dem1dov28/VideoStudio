@@ -1,7 +1,7 @@
 """Central configuration loaded from environment variables."""
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pathlib import Path
 
 
@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     fastgen_headless: bool = Field(False, alias="FASTGEN_HEADLESS")
     # Сколько секунд ждать появления нового превью на fast-gen.ai (иногда >2 мин)
     fastgen_image_timeout: int = Field(300, alias="FASTGEN_IMAGE_TIMEOUT")
+    # Ожидание готового видео в Playwright (keyframes / Video tab), сек. Раньше = image_timeout*3 (900).
+    fastgen_video_wait_timeout_sec: int = Field(1800, alias="FASTGEN_VIDEO_WAIT_TIMEOUT_SEC", ge=120, le=7200)
     # Сколько раз повторить при таймауте/ошибке (изображения и видео; img+ref в т.ч. multiclip)
     fastgen_max_attempts: int = Field(8, alias="FASTGEN_MAX_ATTEMPTS")
     # Сколько раз полностью перезапускать контекст браузера при фатальном сбое FastGen.
@@ -87,7 +89,7 @@ class Settings(BaseSettings):
     )
     fastgen_http_timeout_sec: float = Field(600.0, alias="FASTGEN_HTTP_TIMEOUT_SEC")
     fastgen_http_poll_interval_sec: float = Field(2.0, alias="FASTGEN_HTTP_POLL_INTERVAL_SEC")
-    fastgen_http_poll_max_sec: float = Field(900.0, alias="FASTGEN_HTTP_POLL_MAX_SEC")
+    fastgen_http_poll_max_sec: float = Field(1800.0, alias="FASTGEN_HTTP_POLL_MAX_SEC")
     fastgen_http_job_id_path: str = Field("operation_id", alias="FASTGEN_HTTP_JOB_ID_PATH")
     fastgen_http_poll_path_template: str = Field(
         "/api/v2/videos/status/{operation_id}", alias="FASTGEN_HTTP_POLL_PATH_TEMPLATE"
@@ -175,9 +177,22 @@ class Settings(BaseSettings):
     subtitle_whisper_word_start_lead_sec: float = Field(0.06, alias="SUBTITLE_WHISPER_WORD_START_LEAD_SEC")
     # Mode 4 (цитаты): масштаб шрифта субтитров/подписи цитаты. 1.0 = базовый, 1.6 = заметно крупнее.
     mode4_quote_subtitle_scale: float = Field(1.6, alias="MODE4_QUOTE_SUBTITLE_SCALE")
-    # Mode 4: подписи моделей на вкладке Video (fast-gen.ai), как в UI; после N неудач Flow — Flower.
+    # Mode 4: подписи моделей на вкладке Video (fast-gen.ai), как в UI.
     mode4_veo_video_model_flow: str = Field("Veo 3.1 - Flow", alias="MODE4_VEO_VIDEO_MODEL_FLOW")
     mode4_veo_video_model_flower: str = Field("Veo 3.1 - Flower", alias="MODE4_VEO_VIDEO_MODEL_FLOWER")
+    # После N неудач Flow переключаться на Flower (HTTP + Playwright). По умолчанию выкл. — только Flow.
+    mode4_veo_enable_flower_fallback: bool = Field(False, alias="MODE4_VEO_ENABLE_FLOWER_FALLBACK")
+    # Сколько попыток v4 Flow на один клип (Mode 4, Mode 5 и др.; без Flower).
+    fastgen_veo_flow_max_attempts: int = Field(
+        20,
+        validation_alias=AliasChoices(
+            "FASTGEN_VEO_FLOW_MAX_ATTEMPTS",
+            "MODE4_VEO_FLOW_MAX_ATTEMPTS",
+            "MODE5_VEO_FLOW_MAX_ATTEMPTS",
+        ),
+        ge=1,
+        le=64,
+    )
     mode4_veo_flow_attempts_before_flower: int = Field(3, alias="MODE4_VEO_FLOW_ATTEMPTS_BEFORE_FLOWER", ge=1, le=20)
     # Legacy TTS voice setting (for backward compatibility)
     tts_voice: str = Field("ru-RU-SvetlanaNeural", alias="TTS_VOICE")
@@ -293,7 +308,7 @@ class Settings(BaseSettings):
     # Сколько независимых animated block-loop клипов генерировать одновременно.
     mode5_block_loop_parallel: int = Field(10, alias="MODE5_BLOCK_LOOP_PARALLEL", ge=1, le=20)
     mode5_block_loop_include_facts50: bool = Field(True, alias="MODE5_BLOCK_LOOP_INCLUDE_FACTS50")
-    # True: FastGen still → FastGen image-to-video → loop; False: только keyframes из JPEG сегментов (старое поведение).
+    # True: FastGen still → FastGen «Ключ. кадры» (start=end=still) → loop; False: keyframes только из JPEG сегментов.
     mode5_block_loop_still_then_animate: bool = Field(True, alias="MODE5_BLOCK_LOOP_STILL_THEN_ANIMATE")
     # Два клипа на блок: A от still, B от последнего кадра A к тому же still — замкнутый цикл при повторе A+B.
     mode5_block_loop_two_part_loop: bool = Field(False, alias="MODE5_BLOCK_LOOP_TWO_PART_LOOP")
@@ -302,6 +317,8 @@ class Settings(BaseSettings):
     mode5_block_loop_concat_preset: str = Field("slow", alias="MODE5_BLOCK_LOOP_CONCAT_PRESET")
     # Before full long-video pipeline: generate one animated intro preview and wait for user confirmation.
     mode5_intro_confirm_enabled: bool = Field(True, alias="MODE5_INTRO_CONFIRM_ENABLED")
+    # Intro preview MP4: сколько подряд склеить циклов loop (~8 с каждый); 2 = стык посередине для проверки.
+    mode5_intro_preview_loop_cycles: int = Field(2, alias="MODE5_INTRO_PREVIEW_LOOP_CYCLES", ge=1, le=4)
     # Сколько intro-preview still→video вариантов генерировать одновременно.
     mode5_intro_pool_parallel: int = Field(8, alias="MODE5_INTRO_POOL_PARALLEL", ge=1, le=20)
     # Mode5 segment encode quality (image/video -> per-segment mp4): lower CRF = sharper output.

@@ -16,7 +16,7 @@
   "style_suffix": "Soft cinematic realism, calm low-contrast lighting, gentle depth cues, cozy but realistic environment rendering with layered production design.",
   "style_lock": "Soft cinematic realism, calm low-contrast lighting, gentle depth cues, cozy but realistic environment rendering with layered production design.",
   "style_id": "soft_cinematic_realistic",
-  "await_intro_confirmation": true,
+  "await_intro_confirmation": false,
   "intro_preview_video": "clips/mode5/block_loop_0004.mp4",
   "intro_preview_videos": [
     "clips/mode5/block_loop_0004.mp4",
@@ -221,5 +221,7 @@
     "stage": "stub",
     "updated_at": "2026-05-13T11:38:01.831956+00:00",
     "schema": 1
-  }
+  },
+  "review_dismissed": true,
+  "review_dismissed_at": "2026-05-17T06:10:16.096300+00:00"
 }

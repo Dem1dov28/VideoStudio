@@ -1,4 +1,4 @@
-import { useEffect, useState, useReducer, useRef, useCallback } from 'react';
+import { useEffect, useState, useReducer, useRef, useCallback, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -8,6 +8,7 @@ import {
   RiFileCopyLine,
   RiRestartLine,
   RiDeleteBinLine,
+  RiDownloadLine,
 } from 'react-icons/ri';
 import { api } from '../services/api';
 import VideoCard from '../components/VideoCard';
@@ -68,6 +69,8 @@ export default function History() {
   const [selected, setSelected] = useState(null);
   const [regenBusy, setRegenBusy] = useState(false);
   const [mode5AssembleBusy, setMode5AssembleBusy] = useState(false);
+  const [mode5ThumbRegenBusy, setMode5ThumbRegenBusy] = useState(false);
+  const [mode5ThumbNonce, setMode5ThumbNonce] = useState(0);
   const [clearAllBusy, setClearAllBusy] = useState(false);
   const [ytStatus, setYtStatus] = useState(null);
   /** Пока true — не полагаемся на ytStatus (быстрый первый paint без «пропавшей» кнопки). */
@@ -78,6 +81,19 @@ export default function History() {
     loading: state.loading,
     networkError: state.error,
   };
+
+  const mode5PublishThumbUrl = useMemo(() => {
+    const sid = selected?.session_id;
+    if (!sid) return '';
+    if (!selected?.mode5_has_final && !selected?.mode5_publish_thumbnail && !selected?.publish_thumbnail_url) {
+      return '';
+    }
+    return `${api.mode5PublishThumbnailUrl(sid)}?v=${encodeURIComponent(String(mode5ThumbNonce))}`;
+  }, [selected, mode5ThumbNonce]);
+
+  const showMode5PublishThumb = Boolean(
+    selected?.mode5_has_final || selected?.mode5_publish_thumbnail || selected?.publish_thumbnail_url,
+  );
 
   const load = () => {
     dispatch({ type: 'loading' });
@@ -155,6 +171,10 @@ export default function History() {
   useEffect(() => {
     refreshYoutubeStatus();
   }, [refreshYoutubeStatus]);
+
+  useEffect(() => {
+    setMode5ThumbNonce(0);
+  }, [selected?.session_id]);
 
   useEffect(() => {
     const ok = searchParams.get('youtube_oauth');
@@ -452,8 +472,92 @@ export default function History() {
                     </div>
                   );
                 })()}
+                {showMode5PublishThumb ? (
+                  <div className="px-3 sm:px-4 py-3 border-t border-[#27272f] shrink-0 bg-[#0a0a0f]">
+                    <motion.div className="flex items-center justify-between gap-2 mb-2">
+                      <span className="text-xs font-semibold text-[#71717a] uppercase tracking-wider">
+                        YouTube превью
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          className="btn-secondary text-xs flex items-center gap-1.5 py-1.5 px-2.5"
+                          disabled={mode5ThumbRegenBusy || !mode5PublishThumbUrl}
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            if (!mode5PublishThumbUrl) return;
+                            try {
+                              const res = await fetch(mode5PublishThumbUrl);
+                              if (!res.ok) throw new Error('Не удалось скачать превью');
+                              const blob = await res.blob();
+                              const objectUrl = URL.createObjectURL(blob);
+                              const a = document.createElement('a');
+                              a.href = objectUrl;
+                              a.download = `${selected.session_id}_youtube_preview.jpg`;
+                              document.body.appendChild(a);
+                              a.click();
+                              document.body.removeChild(a);
+                              URL.revokeObjectURL(objectUrl);
+                            } catch (err) {
+                              alert(err.message || 'Не удалось скачать превью');
+                            }
+                          }}
+                        >
+                          <RiDownloadLine /> Скачать
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-secondary text-xs flex items-center gap-1.5 py-1.5 px-2.5"
+                          disabled={mode5ThumbRegenBusy}
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            const sid = selected?.session_id;
+                            if (!sid) return;
+                            setMode5ThumbRegenBusy(true);
+                            try {
+                              const res = await api.mode5LiveRegeneratePublishThumbnail(sid);
+                              setSelected((prev) =>
+                                prev
+                                  ? {
+                                      ...prev,
+                                      mode5_publish_thumbnail:
+                                        res?.thumbnail_relpath || prev.mode5_publish_thumbnail || 'clips/mode5/youtube_thumbnail.jpg',
+                                      publishing: res?.publishing || prev.publishing,
+                                    }
+                                  : prev,
+                              );
+                              setMode5ThumbNonce((v) => v + 1);
+                              load();
+                            } catch (err) {
+                              alert(err.message || 'Не удалось регенерировать превью');
+                            } finally {
+                              setMode5ThumbRegenBusy(false);
+                            }
+                          }}
+                        >
+                          <RiRestartLine />
+                          {mode5ThumbRegenBusy ? 'Регенерация…' : 'Регенерировать превью'}
+                        </button>
+                      </div>
+                    </motion.div>
+                    {mode5PublishThumbUrl ? (
+                      <img
+                        src={mode5PublishThumbUrl}
+                        alt="YouTube превью"
+                        className="w-full rounded-xl border border-[#27272f] object-cover aspect-video bg-[#111]"
+                        onError={(e) => {
+                          e.currentTarget.style.display = 'none';
+                        }}
+                      />
+                    ) : (
+                      <p className="text-xs text-[#52525b] text-center py-6 border border-dashed border-[#27272f] rounded-xl">
+                        Превью ещё не сгенерировано — нажмите «Регенерировать превью»
+                      </p>
+                    )}
+                  </div>
+                ) : null}
                 <div className="p-3 sm:p-4 border-t border-[#27272f] flex flex-col gap-2 shrink-0">
-                  {selected?.mode5_can_assemble && (
+                  {(selected?.mode5_has_previews || selected?.mode5_can_assemble) && (
                     <button
                       type="button"
                       onClick={(e) => {
@@ -467,14 +571,14 @@ export default function History() {
                       Открыть редактирование фрагментов
                     </button>
                   )}
-                  {selected?.mode5_can_assemble && (
+                  {(selected?.mode5_has_previews || selected?.mode5_can_assemble) && (
                     <button
                       type="button"
-                      disabled={mode5AssembleBusy}
+                      disabled={mode5AssembleBusy || !selected?.mode5_can_assemble}
                       onClick={async (e) => {
                         e.stopPropagation();
                         const sid = selected?.session_id;
-                        if (!sid) return;
+                        if (!sid || !selected?.mode5_can_assemble) return;
                         setMode5AssembleBusy(true);
                         try {
                           await api.mode5Assemble(sid);
@@ -488,7 +592,11 @@ export default function History() {
                       }}
                       className="btn-primary flex items-center justify-center gap-2 text-sm w-full bg-emerald-600 hover:bg-emerald-500 border-emerald-500/40"
                     >
-                      {mode5AssembleBusy ? 'Монтаж…' : 'Склеить все части в одно видео'}
+                      {mode5AssembleBusy
+                        ? 'Монтаж…'
+                        : selected?.mode5_can_assemble
+                          ? 'Склеить все части в одно видео'
+                          : `Ждём все части (${selected?.mode5_preview_count || 0}/${selected?.mode5_preview_total || '?'})`}
                     </button>
                   )}
                   <a
@@ -498,6 +606,15 @@ export default function History() {
                   >
                     ⬇ Скачать
                   </a>
+                  {selected?.thumbnail_url && !showMode5PublishThumb ? (
+                    <a
+                      href={`${import.meta.env.VITE_API_URL || ''}${selected.thumbnail_url}`}
+                      download={`preview_${selected.session_id}.jpg`}
+                      className="btn-secondary flex items-center justify-center gap-2 text-sm w-full"
+                    >
+                      <RiDownloadLine /> Скачать Preview
+                    </a>
+                  ) : null}
                   {selected?.can_regenerate && (
                     <button
                       type="button"

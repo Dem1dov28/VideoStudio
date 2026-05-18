@@ -170,7 +170,11 @@ async def generate_quote_videos(
             f"[Mode4 Video] Generating RU + EN in parallel; same reference for both: {ref_path}"
         )
         paths = await generate_videos_fastgen(
-            enriched, output_dir, str(ref_path), mode4_veo_flow_flower=True
+            enriched,
+            output_dir,
+            str(ref_path),
+            mode4_veo_flow_flower=settings.mode4_veo_enable_flower_fallback,
+            flow_max_attempts=settings.fastgen_veo_flow_max_attempts,
         )
         if any(p is None or not Path(p).exists() for p in paths):
             failed = [i for i, p in enumerate(paths) if p is None or not Path(p).exists()]
@@ -186,7 +190,8 @@ async def generate_quote_videos(
                         i,
                         ref_path,
                         cancel_event=cancel_event,
-                        mode4_veo_flow_flower=True,
+                        mode4_veo_flow_flower=settings.mode4_veo_enable_flower_fallback,
+                        flow_max_attempts=settings.fastgen_veo_flow_max_attempts,
                     )
                     if path and Path(path).exists():
                         out[i] = path
@@ -211,7 +216,8 @@ async def generate_quote_videos(
                 i,
                 ref_path,
                 cancel_event=cancel_event,
-                mode4_veo_flow_flower=True,
+                mode4_veo_flow_flower=settings.mode4_veo_enable_flower_fallback,
+                flow_max_attempts=settings.fastgen_veo_flow_max_attempts,
             )
             if path and Path(path).exists():
                 break

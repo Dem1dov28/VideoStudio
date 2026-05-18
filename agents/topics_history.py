@@ -245,17 +245,19 @@ def get_publishing_by_session() -> dict[str, dict]:
             sid = d.name
             if _publishing_dict_usable(result.get(sid)):
                 continue
-            pf = d / "publishing.json"
-            if not pf.is_file():
-                continue
-            try:
-                disk = json.loads(pf.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            if isinstance(disk, dict) and _publishing_dict_usable(disk):
-                result[sid] = disk
+            for pf in (d / "publishing.json", d / "mode5_plan.json"):
+                if not pf.is_file():
+                    continue
+                try:
+                    disk = json.loads(pf.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                pub = disk.get("publishing") if pf.name == "mode5_plan.json" else disk
+                if isinstance(pub, dict) and _publishing_dict_usable(pub):
+                    result[sid] = pub
+                    break
     except Exception as ex:
-        logger.debug(f"[TopicsHistory] publishing.json scan: {ex}")
+        logger.debug(f"[TopicsHistory] publishing metadata scan: {ex}")
     return result
 
 
