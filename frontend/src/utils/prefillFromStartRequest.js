@@ -135,6 +135,8 @@ export function applyStartRequestToForm(req, f, options = {}) {
     else if (req.mode5_test_run === false) f.setMode5TestRun?.(false);
     if (req.mode5_skip_chunk_previews === true) f.setMode5SkipChunkPreviews?.(true);
     else if (req.mode5_skip_chunk_previews === false) f.setMode5SkipChunkPreviews?.(false);
+    if (req.mode5_sequential_chunks === true) f.setMode5SequentialChunks?.(true);
+    else if (req.mode5_sequential_chunks === false) f.setMode5SequentialChunks?.(false);
   }
 
   if (m === 6) {

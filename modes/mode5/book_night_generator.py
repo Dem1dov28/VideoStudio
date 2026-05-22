@@ -511,6 +511,104 @@ def _book_night_outline_ok(outline: dict[str, Any]) -> bool:
     return _MIN_BOOK_SUBS_TOTAL <= n_sub <= _MAX_BOOK_SUBS_TOTAL
 
 
+def _book_night_outline_error_detail(outline: dict[str, Any]) -> str:
+    chs = outline.get("chapters") or []
+    n_ch = len(chs)
+    n_sub = _count_subchapters(outline)
+    thin = sum(
+        1 for ch in chs if len(ch.get("subchapters") or []) < _MIN_SUBS_PER_CHAPTER
+    )
+    fat = sum(
+        1 for ch in chs if len(ch.get("subchapters") or []) > _MAX_SUBS_PER_CHAPTER
+    )
+    parts = [
+        f"Сейчас: {n_ch} глав, {n_sub} подглав.",
+        f"Нужно: {_MIN_BOOK_CHAPTERS}–{_MAX_BOOK_CHAPTERS} глав, "
+        f"{_MIN_BOOK_SUBS_TOTAL}–{_MAX_BOOK_SUBS_TOTAL} подглав всего, "
+        f"в каждой главе {_MIN_SUBS_PER_CHAPTER}–{_MAX_SUBS_PER_CHAPTER} подглав.",
+    ]
+    if thin:
+        parts.append(
+            f"В {thin} из {n_ch} глав меньше {_MIN_SUBS_PER_CHAPTER} подглав "
+            f"(часто модель ставит одну подглаву на главу — так нельзя)."
+        )
+    if fat:
+        parts.append(f"В {fat} главах больше {_MAX_SUBS_PER_CHAPTER} подглав.")
+    if n_ch < _MIN_BOOK_CHAPTERS or n_ch > _MAX_BOOK_CHAPTERS:
+        parts.append("Число верхнеуровневых глав вне диапазона.")
+    elif _MIN_BOOK_SUBS_TOTAL <= n_sub <= _MAX_BOOK_SUBS_TOTAL and thin:
+        parts.append(
+            f"Суммарно подглав достаточно ({n_sub}), но распределение по главам неверное."
+        )
+    return " ".join(parts)
+
+
+def _split_text_halves(text: str) -> tuple[str, str]:
+    text = (text or "").strip()
+    if not text:
+        return "", ""
+    sentences = re.split(r"(?<=[.!?…])\s+", text)
+    if len(sentences) >= 2:
+        mid = len(sentences) // 2
+        a = " ".join(sentences[:mid]).strip()
+        b = " ".join(sentences[mid:]).strip()
+        if a and b:
+            return a, b
+    mid = max(1, len(text) // 2)
+    sp = text.rfind(" ", 0, mid)
+    if sp > len(text) // 4:
+        return text[:sp].strip(), text[sp:].strip()
+    return text[:mid].strip(), text[mid:].strip()
+
+
+def _part_sub_titles(base: str, *, lang: str) -> tuple[str, str]:
+    base = (base or "").strip() or ("Подраздел" if lang == "ru" else "Section")
+    if lang == "ru":
+        return f"{base} (часть 1)", f"{base} (часть 2)"
+    return f"{base} (part 1)", f"{base} (part 2)"
+
+
+def _split_subchapter_halves(sc: dict[str, Any], *, lang: str) -> tuple[dict[str, str], dict[str, str]]:
+    title = str(sc.get("title") or "").strip()
+    cov = str(sc.get("coverage") or "").strip()
+    t1, t2 = _part_sub_titles(title, lang=lang)
+    c1, c2 = _split_text_halves(cov)
+    if not c1 and not c2:
+        c1, c2 = cov, cov
+    elif not c1 or not c2:
+        c1, c2 = _split_text_halves(cov or title)
+    return {"title": t1, "coverage": c1}, {"title": t2, "coverage": c2}
+
+
+def _pad_chapter_to_min_subs(ch: dict[str, Any], *, lang: str) -> dict[str, Any]:
+    ch = copy.deepcopy(ch)
+    subs = list(ch.get("subchapters") or [])
+    guard = 0
+    while len(subs) < _MIN_SUBS_PER_CHAPTER and subs and guard < 12:
+        guard += 1
+        idx = max(
+            range(len(subs)),
+            key=lambda i: len(str((subs[i] or {}).get("coverage") or "")),
+        )
+        a, b = _split_subchapter_halves(subs[idx], lang=lang)
+        subs = subs[:idx] + [a, b] + subs[idx + 1 :]
+    ch["subchapters"] = subs
+    return ch
+
+
+def _pad_thin_chapters(outline: dict[str, Any], *, lang: str) -> dict[str, Any]:
+    """Если в главе одна подглава — делим её на две части (последний программный fallback)."""
+    chs = copy.deepcopy(outline.get("chapters") or [])
+    new_chs: list[dict[str, Any]] = []
+    for ch in chs:
+        subs = ch.get("subchapters") or []
+        if len(subs) < _MIN_SUBS_PER_CHAPTER and subs:
+            new_chs.append(_pad_chapter_to_min_subs(ch, lang=lang))
+        else:
+            new_chs.append(ch)
+    return {**outline, "chapters": new_chs}
+
+
 def _split_richest_chapter_for_min_count(outline: dict[str, Any], *, lang: str) -> dict[str, Any]:
     """Делит одну главу с наибольшим числом подглав пополам (≥2+2), чтобы увеличить число верхнеуровневых глав."""
     chs = copy.deepcopy(outline.get("chapters") or [])
@@ -574,12 +672,16 @@ def _merge_smallest_adjacent_pair(outline: dict[str, Any]) -> dict[str, Any]:
 
 
 def _programmatic_enforce_chapter_bounds(outline: dict[str, Any], *, lang: str) -> dict[str, Any]:
-    """Последняя линия защиты: слишком мало верхних глав → деление самой «толстой»; слишком много → слияние соседей."""
+    """Последняя линия защиты: число глав, подглав в главе и суммарный счётчик."""
     o = _normalize_outline(copy.deepcopy(outline))
     for _ in range(40):
         if _book_night_outline_ok(o):
             return o
         n_ch = len(o.get("chapters") or [])
+        thin = any(
+            len(ch.get("subchapters") or []) < _MIN_SUBS_PER_CHAPTER
+            for ch in o.get("chapters") or []
+        )
         if n_ch < _MIN_BOOK_CHAPTERS:
             before = n_ch
             o = _normalize_outline(_split_richest_chapter_for_min_count(o, lang=lang))
@@ -590,6 +692,12 @@ def _programmatic_enforce_chapter_bounds(outline: dict[str, Any], *, lang: str) 
             before = n_ch
             o = _normalize_outline(_merge_smallest_adjacent_pair(o))
             if len(o.get("chapters") or []) >= before:
+                break
+            continue
+        if thin or _count_subchapters(o) < _MIN_BOOK_SUBS_TOTAL:
+            before_sub = _count_subchapters(o)
+            o = _normalize_outline(_pad_thin_chapters(o, lang=lang))
+            if _count_subchapters(o) <= before_sub:
                 break
             continue
         break
@@ -664,6 +772,7 @@ Hard constraints:
 - All strings in {lang_name}.
 - Between {_MIN_BOOK_CHAPTERS} and {_MAX_BOOK_CHAPTERS} top-level chapters inclusive (book parts / main chapters).
 - Each chapter has between {_MIN_SUBS_PER_CHAPTER} and {_MAX_SUBS_PER_CHAPTER} subchapters inclusive.
+- **Never** output exactly one subchapter per top-level chapter (e.g. 16 chapters × 1 sub = invalid even if the total count looks fine). Split each major part into at least {_MIN_SUBS_PER_CHAPTER} real subsections from the book's TOC.
 - Total subchapters across ALL chapters must be between {_MIN_BOOK_SUBS_TOTAL} and {_MAX_BOOK_SUBS_TOTAL} inclusive. Choose the count that **best matches how this book is really subdivided** (real TOC / parts / sections / numbered steps if the book uses them). Do **not** pad with fake subsections or split one natural section into many slices just to hit a round number. If the book naturally has very few top-level units, use finer **authentic** subsection names (as in real editions) until you reach at least {_MIN_BOOK_SUBS_TOTAL}. If the outline would exceed {_MAX_BOOK_SUBS_TOTAL}, merge smaller adjacent units **without breaking reading order**.
 - The JSON \"chapters\" array length must **never** be fewer than {_MIN_BOOK_CHAPTERS} or greater than {_MAX_BOOK_CHAPTERS}. If a printed TOC has only 2–3 top-level parts, **re-partition** the same book into at least {_MIN_BOOK_CHAPTERS} coherent major blocks (e.g. framing / early arc / middle / integration) using believable thematic or structural names — **do not output 2 or 3 objects** in \"chapters\". If you would exceed {_MAX_BOOK_CHAPTERS}, merge adjacent major parts so each remains a believable book section.
 - Subchapters must map to consecutive reading order through the book (no random reordering).
@@ -763,6 +872,34 @@ Hard constraints:
                 logger.error(f"[Mode5 book_night] Phase 1 chapter-count repair failed: {e}")
 
     if not _book_night_outline_ok(outline):
+        n_ch_bad = len(outline.get("chapters") or [])
+        n_sub_bad = _count_subchapters(outline)
+        thin_ch = sum(
+            1
+            for ch in outline.get("chapters") or []
+            if len(ch.get("subchapters") or []) < _MIN_SUBS_PER_CHAPTER
+        )
+        if (
+            _MIN_BOOK_CHAPTERS <= n_ch_bad <= _MAX_BOOK_CHAPTERS
+            and thin_ch
+            and n_sub_bad < n_ch_bad * _MIN_SUBS_PER_CHAPTER
+        ):
+            repair_thin = (
+                sys1
+                + f"\n\nCRITICAL: you returned {n_ch_bad} chapters but only {n_sub_bad} subchapters total "
+                f"({thin_ch} chapter(s) have only one subchapter). "
+                f"EVERY chapter MUST have at least {_MIN_SUBS_PER_CHAPTER} subchapters "
+                f"(authentic subsections from the book's TOC / parts / steps — not one blob per chapter). "
+                f"Total subchapters must be {_MIN_BOOK_SUBS_TOTAL}–{_MAX_BOOK_SUBS_TOTAL}. "
+                "Return the **full** corrected JSON."
+            )
+            try:
+                await checkpoint(control)
+                outline = _normalize_outline(await _invoke_json(repair_thin, repair_human, temperature=0.25))
+            except Exception as e:
+                logger.error(f"[Mode5 book_night] Phase 1 thin-chapter repair failed: {e}")
+
+    if not _book_night_outline_ok(outline):
         prev_dims = (len(outline.get("chapters") or []), _count_subchapters(outline))
         outline = _programmatic_enforce_chapter_bounds(outline, lang=lang)
         new_dims = (len(outline.get("chapters") or []), _count_subchapters(outline))
@@ -773,11 +910,9 @@ Hard constraints:
             )
 
     if not _book_night_outline_ok(outline):
-        n_ch = len(outline.get("chapters") or [])
-        n_sub = _count_subchapters(outline)
         raise ValueError(
-            f"Mode 5 (книга на ночь): число подглав должно быть от {_MIN_BOOK_SUBS_TOTAL} до {_MAX_BOOK_SUBS_TOTAL} "
-            f"(по логике книги), глав — {_MIN_BOOK_CHAPTERS}–{_MAX_BOOK_CHAPTERS}. Сейчас: {n_ch} глав, {n_sub} подглав."
+            "Mode 5 (книга на ночь): структура оглавления не прошла проверку. "
+            + _book_night_outline_error_detail(outline)
         )
 
     flat_rows = _flatten_outline(outline)

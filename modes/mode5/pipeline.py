@@ -297,6 +297,7 @@ def write_mode5_early_pause_placeholder(
         "intro_preview_videos": [],
         "skip_final_assembly": bool(request.get("mode5_skip_final_assembly", True)),
         "skip_chunk_previews": bool(request.get("mode5_skip_chunk_previews", False)),
+        "sequential_chunks": bool(request.get("mode5_sequential_chunks", False)),
         "chunks": [],
         "early_pause_before_chunks": True,
         "pipeline_paused": True,
@@ -1462,6 +1463,28 @@ def _mode5_skip_chunk_previews(plan: dict[str, Any]) -> bool:
     return bool(plan.get("skip_chunk_previews"))
 
 
+def _mode5_sequential_chunks(plan: dict[str, Any] | None) -> bool:
+    return bool((plan or {}).get("sequential_chunks"))
+
+
+def _mode5_chunk_lane_parallel(requested: int, plan: dict[str, Any] | None = None) -> int:
+    """Chunk-level parallelism (TTS / images / preview MP4 lanes). Segment fan-out inside a chunk is unchanged."""
+    if _mode5_sequential_chunks(plan):
+        return 1
+    return max(1, int(requested or 1))
+
+
+async def _mode5_await_chunk_coroutines(coros: list[Any], plan: dict[str, Any] | None = None) -> list[Any]:
+    if not coros:
+        return []
+    if _mode5_sequential_chunks(plan):
+        out: list[Any] = []
+        for c in coros:
+            out.append(await c)
+        return out
+    return list(await asyncio.gather(*coros))
+
+
 def _mode5_append_chunk_render_rows(
     session_id: str,
     chunk_index: int,
@@ -1651,12 +1674,21 @@ def _mode5_ui_phase_from_metrics(
     n_ch: int,
     prev_done: int,
     plan: dict[str, Any],
+    wav_ready: int = 0,
+    wav_total: int = 0,
 ) -> str:
     """Стабильная метка фазы для UI (не зависит от формулировки hint)."""
     if has_final_mp4:
         return "final_mp4_on_disk"
     if bool(plan.get("await_intro_confirmation")) and stage == MODE5_CKPT_STUB and seg_total == 0:
         return "intro_await_confirm"
+    if (
+        wav_ready > 0
+        and wav_total > 0
+        and stage == MODE5_CKPT_STUB
+        and seg_total == 0
+    ):
+        return "tts_chunks_parallel"
     if bool(plan.get("preflight_only")) and stage == MODE5_CKPT_STUB and seg_total == 0:
         return "intro_preflight_generating"
     if seg_total == 0 and stage == MODE5_CKPT_STUB:
@@ -1752,11 +1784,13 @@ def _mode5_progress_hint_payload(session_id: str, plan: dict[str, Any]) -> dict[
                     "Проверьте анимированные превью стиля и подтвердите продолжение. "
                     "Озвучка и монтаж основного видео до подтверждения не запускаются."
                 )
-            elif bool(plan.get("preflight_only")):
+            elif bool(plan.get("preflight_only")) and wav_ready <= 0:
                 hint = (
                     "Генерируются короткие анимированные превью стиля. "
                     "Параллельная озвучка всего ролика начнётся только после вашего подтверждения."
                 )
+            elif wav_total > 0:
+                hint = f"Параллельная озвучка чанков: {wav_ready} из {wav_total}…"
             else:
                 hint = "Параллельная озвучка чанков (TTS)…"
         elif stage == MODE5_CKPT_AFTER_TTS:
@@ -1782,6 +1816,8 @@ def _mode5_progress_hint_payload(session_id: str, plan: dict[str, Any]) -> dict[
         n_ch=n_ch,
         prev_done=prev_done,
         plan=plan,
+        wav_ready=wav_ready,
+        wav_total=wav_total,
     )
 
     return {
@@ -4212,7 +4248,17 @@ def _build_all_chunk_previews_parallel(session_id: str, plan: dict[str, Any]) ->
     chunks = plan.get("chunks") or []
     if not chunks:
         return
-    workers = max(1, int(getattr(settings, "mode5_preview_mp4_workers", 16) or 16))
+    if _mode5_sequential_chunks(plan):
+        for idx in range(len(chunks)):
+            _build_chunk_preview_sync(session_id, idx, plan)
+            if 0 <= idx < len(chunks):
+                chunks[idx]["preview_ready"] = True
+                _save_mode5_plan(session_id, plan)
+        return
+    workers = _mode5_chunk_lane_parallel(
+        int(getattr(settings, "mode5_preview_mp4_workers", 16) or 16),
+        plan,
+    )
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futs = {
             executor.submit(_build_chunk_preview_sync, session_id, idx, plan): idx
@@ -4840,6 +4886,7 @@ async def run_mode5_pipeline(
     language: str = "ru",
     skip_final_assembly: bool = True,
     skip_chunk_previews: bool = False,
+    sequential_chunks: bool = False,
     chunk_seconds: int = CHUNK_SEC_DEFAULT,
     segment_seconds: int = SEG_SEC_DEFAULT,
     max_parallel_images: int | None = None,
@@ -5109,6 +5156,7 @@ async def run_mode5_pipeline(
                 "preflight_only": True,
                 "skip_final_assembly": bool(skip_final_assembly),
                 "skip_chunk_previews": bool(skip_chunk_previews),
+                "sequential_chunks": bool(sequential_chunks),
                 "test_run": bool(test_run),
                 "test_target_sec": int(test_target) if bool(test_run) else None,
                 "chunks": pre_chunks,
@@ -5216,6 +5264,7 @@ async def run_mode5_pipeline(
             **plan_test_meta,
             "skip_final_assembly": bool(skip_final_assembly),
             "skip_chunk_previews": bool(skip_chunk_previews),
+            "sequential_chunks": bool(sequential_chunks),
         }
         _save_mode5_plan(session_id, stub_plan, checkpoint=MODE5_CKPT_STUB)
     elif chunk_texts and sm != "facts50":
@@ -5271,14 +5320,16 @@ async def run_mode5_pipeline(
             **plan_test_meta,
             "skip_final_assembly": bool(skip_final_assembly),
             "skip_chunk_previews": bool(skip_chunk_previews),
+            "sequential_chunks": bool(sequential_chunks),
         }
         _save_mode5_plan(session_id, stub_plan_lf, checkpoint=MODE5_CKPT_STUB)
 
     chunks_plan: list[dict[str, Any]] = []
+    plan = load_mode5_plan(session_id)
 
     if sm == "facts50":
         # Параллельно до N фактов: TTS и затем картинки (типичный паттерн — asyncio + семафор под лимиты API).
-        par = _mode5_tts_chunk_parallel_cap()
+        par = _mode5_chunk_lane_parallel(_mode5_tts_chunk_parallel_cap(), plan)
         par = min(par, voiceapi_mode5_recommended_tts_parallel())
         sem_tts = asyncio.Semaphore(par)
 
@@ -5293,10 +5344,14 @@ async def run_mode5_pipeline(
                 pack = await _synthesize_chunk(session_id, ci, source_text, language=language)
                 return ci, pack
 
-        logger.info(f"[Mode5 facts50] TTS parallel workers={par} ({len(chunk_texts)} facts)")
+        logger.info(
+            f"[Mode5 facts50] TTS workers={par} ({len(chunk_texts)} facts)"
+            f"{' [sequential chunks]' if _mode5_sequential_chunks(plan) else ''}"
+        )
         tts_started = time.monotonic()
-        tts_pairs = await asyncio.gather(
-            *[_facts50_tts(ci, ct) for ci, ct in enumerate(chunk_texts)]
+        tts_pairs = await _mode5_await_chunk_coroutines(
+            [_facts50_tts(ci, ct) for ci, ct in enumerate(chunk_texts)],
+            plan,
         )
         await checkpoint(control)
         tts_by_ci = {p[0]: p[1] for p in tts_pairs}
@@ -5335,14 +5390,14 @@ async def run_mode5_pipeline(
         for ch in chunks_plan:
             _rebuild_chunk_segment_paths(session_id, ch)
 
-        plan = load_mode5_plan(session_id)
         plan["chunks"] = chunks_plan
         plan["skip_chunk_previews"] = bool(skip_chunk_previews)
         plan["skip_final_assembly"] = bool(skip_final_assembly)
+        plan["sequential_chunks"] = bool(sequential_chunks)
         _record_mode5_operation_seconds(plan, "tts_facts50", tts_started, count=len(chunk_texts))
         _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_TTS)
 
-        img_par = _mode5_facts50_image_parallel()
+        img_par = _mode5_chunk_lane_parallel(_mode5_facts50_image_parallel(), plan)
         sem_img = asyncio.Semaphore(img_par)
         logger.info("[Mode5 facts50] Image chunk lanes={} (TTS lanes={})", img_par, par)
 
@@ -5369,7 +5424,7 @@ async def run_mode5_pipeline(
                 )
 
         images_started = time.monotonic()
-        await asyncio.gather(*[_facts50_images(ch) for ch in chunks_plan])
+        await _mode5_await_chunk_coroutines([_facts50_images(ch) for ch in chunks_plan], plan)
         _record_mode5_operation_seconds(plan, "images_facts50", images_started, count=len(chunks_plan))
 
         for ch in chunks_plan:
@@ -5392,16 +5447,16 @@ async def run_mode5_pipeline(
         # Long-form manual / bible / outline / book_night / unwritten_chapter:
         # keep prompt/segment quality tied to real TTS output, but overlap image generation
         # of ready chunks with TTS still running on the remaining chunks.
-        par = _mode5_tts_chunk_parallel_cap()
+        par = _mode5_chunk_lane_parallel(_mode5_tts_chunk_parallel_cap(), plan)
         par = min(par, voiceapi_mode5_recommended_tts_parallel())
         sem_tts = asyncio.Semaphore(par)
         # _generate_chunk_images already fans out segment image requests inside one chunk,
         # so keep one chunk-level image lane to avoid explosive API concurrency.
-        sem_img = asyncio.Semaphore(_mode5_longform_chunk_image_parallel())
+        sem_img = asyncio.Semaphore(_mode5_chunk_lane_parallel(_mode5_longform_chunk_image_parallel(), plan))
 
-        plan = load_mode5_plan(session_id)
         plan["skip_chunk_previews"] = bool(skip_chunk_previews)
         plan["skip_final_assembly"] = bool(skip_final_assembly)
+        plan["sequential_chunks"] = bool(sequential_chunks)
         chunks_plan = plan.get("chunks") or []
 
         async def _longform_pipeline_chunk(ci: int, chunk_text: str) -> None:
@@ -5541,10 +5596,14 @@ async def run_mode5_pipeline(
                 _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_SLICES, chunk_index=ci)
                 await checkpoint(control)
 
-            await asyncio.gather(*[_tts_after_images(ci, ch) for ci, ch in enumerate(chunks_plan)])
+            await _mode5_await_chunk_coroutines(
+                [_tts_after_images(ci, ch) for ci, ch in enumerate(chunks_plan)],
+                plan,
+            )
         else:
-            await asyncio.gather(
-                *[_longform_pipeline_chunk(ci, ct) for ci, ct in enumerate(chunk_texts)]
+            await _mode5_await_chunk_coroutines(
+                [_longform_pipeline_chunk(ci, ct) for ci, ct in enumerate(chunk_texts)],
+                plan,
             )
         await checkpoint(control)
         if _mode5_block_loop_applies(plan):
@@ -5601,6 +5660,7 @@ async def resume_mode5_pipeline(
             language=str(plan.get("language") or "ru"),
             skip_final_assembly=bool(plan.get("skip_final_assembly", True)),
             skip_chunk_previews=bool(plan.get("skip_chunk_previews", False)),
+            sequential_chunks=bool(plan.get("sequential_chunks", False)),
             chunk_seconds=int(plan.get("chunk_seconds") or CHUNK_SEC_DEFAULT),
             segment_seconds=int(plan.get("segment_seconds") or SEG_SEC_DEFAULT),
             max_parallel_images=int(plan.get("max_parallel_images") or 10),
@@ -5633,8 +5693,17 @@ async def resume_mode5_pipeline(
     # On continue, bootstrap chunk audio + segments from saved stub texts first,
     # then proceed with the normal resume logic below.
     if stage == MODE5_CKPT_STUB:
-        logger.info("[Mode5 resume] bootstrap from STUB: generating chunk audio before resume")
+        plan["preflight_only"] = False
+        plan["await_intro_confirmation"] = False
         chunks_boot = list(plan.get("chunks") or [])
+        on_disk = sum(
+            1 for ch in chunks_boot if _resolve_mode5_chunk_audio_paths(session_id, ch)[1] is not None
+        )
+        logger.info(
+            "[Mode5 resume] bootstrap from STUB: TTS {} already on disk, {} to synthesize",
+            on_disk,
+            max(0, len(chunks_boot) - on_disk),
+        )
         if not chunks_boot:
             # Backward-compat for old preflight plans created before chunk stubs were persisted.
             if bool(plan.get("preflight_only")):
@@ -5647,6 +5716,7 @@ async def resume_mode5_pipeline(
                     language=str(plan.get("language") or "ru"),
                     skip_final_assembly=bool(plan.get("skip_final_assembly", True)),
                     skip_chunk_previews=bool(plan.get("skip_chunk_previews", False)),
+                    sequential_chunks=bool(plan.get("sequential_chunks", False)),
                     chunk_seconds=int(plan.get("chunk_seconds") or CHUNK_SEC_DEFAULT),
                     segment_seconds=int(plan.get("segment_seconds") or SEG_SEC_DEFAULT),
                     max_parallel_images=int(plan.get("max_parallel_images") or 10),
@@ -5659,31 +5729,44 @@ async def resume_mode5_pipeline(
                     control={**(control or {}), "_mode5_skip_intro_confirmation": True},
                 )
             raise ValueError("Mode5 resume: no chunks in stub plan")
-        tts_par = _mode5_tts_chunk_parallel_cap()
+        tts_par = _mode5_chunk_lane_parallel(_mode5_tts_chunk_parallel_cap(), plan)
         tts_par = min(tts_par, voiceapi_mode5_recommended_tts_parallel())
         sem_resume_tts = asyncio.Semaphore(tts_par)
 
-        async def _bootstrap_one(ch: dict[str, Any]) -> None:
+        seg_sec_boot = int(plan.get("segment_seconds") or SEG_SEC_DEFAULT)
+
+        async def _bootstrap_fill_segments_from_wav(
+            ch: dict[str, Any],
+            *,
+            wav_path: Path,
+            mp3_path: Path | None,
+            visible_text: str,
+        ) -> None:
             ci = int(ch.get("index") or 0)
-            text = str(ch.get("text") or "").strip()
-            if not text:
-                raise ValueError(f"Mode5 resume: empty chunk text at index {ci}")
-            async with sem_resume_tts:
-                mp3_path, wav_path, dur, wts, words, tts_plain = await _synthesize_chunk(
-                    session_id,
-                    ci,
-                    text,
-                    language=language,
-                )
-            visible_text = _mode5_visible_text(tts_plain)
+            dur = float(ch.get("duration_sec") or 0.0)
+            if dur <= 0:
+                dur = await asyncio.to_thread(_wav_duration_sec, wav_path)
+            default_mp3, _ = _default_mode5_chunk_audio_paths(session_id, ci)
+            mp3_eff = mp3_path if mp3_path is not None and mp3_path.is_file() else default_mp3
+            wts, words = await asyncio.to_thread(
+                get_word_timestamps_from_audio_path,
+                wav_path,
+                script=visible_text,
+                language=language,
+                vad_filter=False,
+            )
             ch["text"] = visible_text
-            ch["chunk_audio"] = _rel_session(session_root, mp3_path)
+            if mp3_eff.is_file():
+                ch["chunk_audio"] = _rel_session(session_root, mp3_eff)
             ch["chunk_audio_wav"] = _rel_session(session_root, wav_path)
             ch["duration_sec"] = dur
+            ch["audio_status"] = "done"
             if sm == "facts50":
                 is_intro = bool(ch.get("is_intro"))
                 is_outro = bool(ch.get("is_outro"))
-                fact_hint = str(ch.get("fact_hint") or "").strip() or (visible_text if (is_intro or is_outro) else "")
+                fact_hint = str(ch.get("fact_hint") or "").strip() or (
+                    visible_text if (is_intro or is_outro) else ""
+                )
                 overlay_title = "" if (is_intro or is_outro) else _fact_overlay_title(ci - 1)
                 ch["segments"] = _segments_for_facts50_chunk(
                     fact_hint,
@@ -5695,13 +5778,65 @@ async def resume_mode5_pipeline(
                 ch["segments"] = _segments_for_chunk(
                     visible_text,
                     dur,
-                    int(plan.get("segment_seconds") or SEG_SEC_DEFAULT),
+                    seg_sec_boot,
                     wts,
                     words,
                 )
             _rebuild_chunk_segment_paths(session_id, ch)
 
-        await asyncio.gather(*[_bootstrap_one(ch) for ch in chunks_boot])
+        async def _bootstrap_one(ch: dict[str, Any]) -> None:
+            ci = int(ch.get("index") or 0)
+            text = str(ch.get("text") or "").strip()
+            if not text:
+                raise ValueError(f"Mode5 resume: empty chunk text at index {ci}")
+            mp3_existing, wav_existing = _resolve_mode5_chunk_audio_paths(session_id, ch)
+            if wav_existing is not None:
+                visible_text = _mode5_visible_text(text)
+                await _bootstrap_fill_segments_from_wav(
+                    ch,
+                    wav_path=wav_existing,
+                    mp3_path=mp3_existing,
+                    visible_text=visible_text,
+                )
+            else:
+                async with sem_resume_tts:
+                    mp3_path, wav_path, dur, wts, words, tts_plain = await _synthesize_chunk(
+                        session_id,
+                        ci,
+                        text,
+                        language=language,
+                    )
+                visible_text = _mode5_visible_text(tts_plain)
+                ch["text"] = visible_text
+                ch["chunk_audio"] = _rel_session(session_root, mp3_path)
+                ch["chunk_audio_wav"] = _rel_session(session_root, wav_path)
+                ch["duration_sec"] = dur
+                ch["audio_status"] = "done"
+                if sm == "facts50":
+                    is_intro = bool(ch.get("is_intro"))
+                    is_outro = bool(ch.get("is_outro"))
+                    fact_hint = str(ch.get("fact_hint") or "").strip() or (
+                        visible_text if (is_intro or is_outro) else ""
+                    )
+                    overlay_title = "" if (is_intro or is_outro) else _fact_overlay_title(ci - 1)
+                    ch["segments"] = _segments_for_facts50_chunk(
+                        fact_hint,
+                        visible_text,
+                        dur,
+                        overlay_title=overlay_title,
+                    )
+                else:
+                    ch["segments"] = _segments_for_chunk(
+                        visible_text,
+                        dur,
+                        seg_sec_boot,
+                        wts,
+                        words,
+                    )
+                _rebuild_chunk_segment_paths(session_id, ch)
+            _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_STUB)
+
+        await _mode5_await_chunk_coroutines([_bootstrap_one(ch) for ch in chunks_boot], plan)
         _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_TTS)
         stage = MODE5_CKPT_AFTER_TTS
 
@@ -5847,7 +5982,7 @@ async def resume_mode5_pipeline(
             done_log_message="=== Mode 5 RESUME DONE ===",
         )
 
-    par = _mode5_facts50_image_parallel()
+    par = _mode5_chunk_lane_parallel(_mode5_facts50_image_parallel(), plan)
     sem_img = asyncio.Semaphore(par)
     logger.info("[Mode5 facts50 resume] Image chunk lanes={}", par)
 
@@ -5875,7 +6010,7 @@ async def resume_mode5_pipeline(
                     session_id, plan, checkpoint=MODE5_CKPT_AFTER_IMAGES, chunk_index=idx
                 )
 
-        await asyncio.gather(*[_resume_one_images(ch) for ch in chunks])
+        await _mode5_await_chunk_coroutines([_resume_one_images(ch) for ch in chunks], plan)
         await checkpoint(control)
 
     for ch in chunks:

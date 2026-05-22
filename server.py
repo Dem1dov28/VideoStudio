@@ -198,6 +198,7 @@ async def _run_pipeline_task(
             mode5_segment_seconds=int(getattr(req, "mode5_segment_seconds", 15) or 15),
             mode5_skip_final_assembly=bool(getattr(req, "mode5_skip_final_assembly", True)),
             mode5_skip_chunk_previews=bool(getattr(req, "mode5_skip_chunk_previews", False)),
+            mode5_sequential_chunks=bool(getattr(req, "mode5_sequential_chunks", False)),
             mode5_max_parallel_images=int(getattr(req, "mode5_max_parallel_images", 10) or 10),
             mode5_image_backend=getattr(req, "mode5_image_backend", None),
             mode5_video_header_title=getattr(req, "mode5_video_header_title", None),
@@ -722,6 +723,7 @@ class StartRequest(BaseModel):
     mode5_segment_seconds: int = 15
     mode5_skip_final_assembly: bool = True
     mode5_skip_chunk_previews: bool = False
+    mode5_sequential_chunks: bool = False
     mode5_max_parallel_images: int = Field(10, ge=1, le=64)
     mode5_image_backend: str | None = None  # api | playwright | auto
     mode5_video_header_title: str | None = None
@@ -2101,9 +2103,6 @@ async def mode5_continue_generation_ep(session_id: str):
         if isinstance(existing, dict):
             t = existing.get("task")
             if t is not None and not t.done():
-                raise HTTPException(409, "Для этой сессии уже идёт генерация")
-            st = str(existing.get("status") or "").strip().lower()
-            if st in ("running", "paused"):
                 raise HTTPException(409, "Для этой сессии уже идёт генерация")
 
         try:

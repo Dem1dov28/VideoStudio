@@ -276,6 +276,8 @@ export default function Generate() {
   const [mode5TestRun, setMode5TestRun] = useState(false);
   /** Без коротких mp4 по частям — сразу один финальный монтаж после картинок и озвучки. */
   const [mode5SkipChunkPreviews, setMode5SkipChunkPreviews] = useState(false);
+  /** Озвучка, картинки и превью MP4 по одному чанку за раз (без параллели между частями). */
+  const [mode5SequentialChunks, setMode5SequentialChunks] = useState(false);
   useEffect(() => {
     if (mode !== 5) return;
     if (
@@ -409,6 +411,7 @@ export default function Generate() {
       setMode5SubMode,
       setMode5TestRun,
       setMode5SkipChunkPreviews,
+      setMode5SequentialChunks,
       setMode6NumCharacters,
       setMode7AnimalType,
       setMode7Keyboards,
@@ -667,6 +670,7 @@ export default function Generate() {
         mode5_image_backend: mode5ImageBackend,
         mode5_skip_final_assembly: true,
         mode5_skip_chunk_previews: mode5SkipChunkPreviews,
+        mode5_sequential_chunks: mode5SequentialChunks,
         mode5_video_header_title: headerTrim,
         mode5_bible_mode: effectiveSubMode === 'bible',
         mode5_sub_mode: effectiveSubMode,
@@ -1339,6 +1343,17 @@ export default function Generate() {
                       </p>
                     </div>
                     <Toggle value={mode5SkipChunkPreviews} onChange={setMode5SkipChunkPreviews} />
+                  </div>
+                  <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <div className="text-sm font-semibold text-[#ececf4]">Без параллельной генерации частей</div>
+                      <p className="text-xs text-[#71717a] mt-0.5 max-w-md leading-relaxed">
+                        Озвучка, иллюстрации и сборка превью{' '}
+                        <code className="text-[#71717a]">mode5_preview_*.mp4</code> по одной части за раз — медленнее,
+                        но меньше нагрузка на VoiceAPI, FastGen и CPU при монтаже.
+                      </p>
+                    </div>
+                    <Toggle value={mode5SequentialChunks} onChange={setMode5SequentialChunks} />
                   </div>
                 </div>
 
