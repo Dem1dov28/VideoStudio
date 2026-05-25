@@ -23,6 +23,45 @@ if TYPE_CHECKING:
 
 _NUMBER_RE = re.compile(r"\d[\d.,]*%?")
 # Standalone dash (тире должно идти вместе со словом, не отдельно)
+
+_SUBTITLE_QUOTE_TRANSLATION = str.maketrans(
+    {
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u201e": '"',
+        "\u201f": '"',
+        "\u00ab": '"',
+        "\u00bb": '"',
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201a": "'",
+        "\u201b": "'",
+        "\u2039": "'",
+        "\u203a": "'",
+    }
+)
+# Zero-width, bidi marks, replacement / placeholder glyphs → drop (often render as □).
+_SUBTITLE_DROP_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\ufeff\ufffc\ufffd\u25a1]")
+
+
+def normalize_subtitle_display_text(text: str) -> str:
+    """
+    Make on-screen subtitles font-safe: ASCII quotes, no invisible/tofu characters.
+
+    Bible and other pasted sources often use curly quotes (U+201C/U+201D); if the
+    active UI font lacks those glyphs, Pillow draws empty squares (□).
+    """
+    if not text:
+        return ""
+    s = str(text).translate(_SUBTITLE_QUOTE_TRANSLATION)
+    s = _SUBTITLE_DROP_RE.sub("", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    # Whisper window slices can leave orphaned punctuation at segment starts.
+    s = re.sub(r'^[,;:]+(?=\s*["\'])', "", s)
+    s = re.sub(r"^[,;:]+", "", s)
+    return s
+
+
 _STANDALONE_DASH_RE = re.compile(r"^[\-\u2010\u2011\u2012\u2013\u2014\u2015\u2212]+$")
 
 # Короткие слова и местоимения — не показывать отдельно (RU + EN)
@@ -680,6 +719,9 @@ def _render_subtitle_block_static(
     height: int,
     *,
     font_divisor: int = 15,
+    vertical_center_frac: float | None = None,
+    min_font_size: int = 18,
+    max_font_size: int = 34,
 ) -> np.ndarray:
     """
     Весь текст сегмента сразу: перенос по ширине, несколько строк, без пословного караоке.
@@ -692,7 +734,9 @@ def _render_subtitle_block_static(
 
     draw = ImageDraw.Draw(img)
     div = max(10, min(26, int(font_divisor)))
-    font_size = max(18, min(34, width // div))
+    lo = max(12, int(min_font_size))
+    hi = max(lo, int(max_font_size))
+    font_size = max(lo, min(hi, width // div))
     font = load_ui_font(font_size, bold=True)
     stroke_w = max(2, font_size // 12)
 
@@ -714,7 +758,13 @@ def _render_subtitle_block_static(
     max_lh = max(line_heights)
     n = len(lines)
     total_h = n * max_lh + (n - 1) * line_gap
-    center_y = height * dt.SUBTITLE_VERTICAL_CENTER_FRAC
+    v_frac = (
+        float(vertical_center_frac)
+        if vertical_center_frac is not None
+        else dt.SUBTITLE_VERTICAL_CENTER_FRAC
+    )
+    v_frac = max(0.08, min(0.92, v_frac))
+    center_y = height * v_frac
     y_band = int(center_y - total_h / 2)
     y_band = max(dt.SUBTITLE_PAD_Y, y_band)
 
@@ -906,6 +956,9 @@ def render_subtitle_overlay(
     tts_words: list[str] | None = None,
     transition_state: dict | None = None,
     static_font_divisor: int = 15,
+    vertical_center_frac: float | None = None,
+    static_min_font_size: int = 18,
+    static_max_font_size: int = 34,
     timed_plain: bool = False,
     timed_plain_font_scale: float = 1.0,
 ) -> np.ndarray:
@@ -915,6 +968,7 @@ def render_subtitle_overlay(
     karaoke=False: весь текст сегмента сразу, меньший шрифт (mode 13).
     """
     img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    text = normalize_subtitle_display_text(text)
     if not text or not text.strip():
         return np.array(img)
 
@@ -933,7 +987,13 @@ def render_subtitle_overlay(
 
     if not karaoke:
         return _render_subtitle_block_static(
-            text.strip(), width, height, font_divisor=static_font_divisor
+            text.strip(),
+            width,
+            height,
+            font_divisor=static_font_divisor,
+            vertical_center_frac=vertical_center_frac,
+            min_font_size=static_min_font_size,
+            max_font_size=static_max_font_size,
         )
 
     draw = ImageDraw.Draw(img)

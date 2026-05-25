@@ -18,12 +18,14 @@ INTER_BOLD = ASSETS_FONTS / "Inter-Bold.ttf"
 INTER_REGULAR = ASSETS_FONTS / "Inter-Regular.ttf"
 
 _SYSTEM_BOLD_FALLBACK = [
+    # Broad Unicode coverage first (avoids □ for curly quotes in Bible subtitles).
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "C:/Windows/Fonts/ARIALUNI.TTF",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     # macOS
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
     "/System/Library/Fonts/Supplemental/Helvetica.ttc",
-    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
     # Linux (common)
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
     # Windows
     "C:/Windows/Fonts/segoeuib.ttf",

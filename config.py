@@ -20,9 +20,10 @@ class Settings(BaseSettings):
     # ── fast-gen.ai ───────────────────────────────────────────────────────────
     # API ключ с сайта fast-gen.ai (вход через /generator → поле "Введите API ключ")
     fastgen_api_key: str = Field("", alias="FASTGEN_API_KEY")
-    # Модель: значение option[value=…] или подпись в UI (см. лог [FastGen] Available model options).
-    # Пример value: GEM_PIX_2 (вместо устаревшего NARWHAL).
-    fastgen_model: str = Field("NARWHAL", alias="FASTGEN_MODEL")
+    # Модель на вкладке Image (подпись в UI fast-gen.ai, напр. «Nano Banana Pro»).
+    fastgen_model: str = Field("Nano Banana Pro", alias="FASTGEN_MODEL")
+    # Провайдер на вкладке Image (UI: «Flow»; HTTP: flow).
+    fastgen_image_provider: str = Field("Flow", alias="FASTGEN_IMAGE_PROVIDER")
     # false = видимый браузер (для отладки), true = фоновый (продакшн)
     fastgen_headless: bool = Field(False, alias="FASTGEN_HEADLESS")
     # Сколько секунд ждать появления нового превью на fast-gen.ai (иногда >2 мин)
@@ -65,7 +66,7 @@ class Settings(BaseSettings):
     fastgen_http_image_path: str = Field("/api/v2/images", alias="FASTGEN_HTTP_IMAGE_PATH")
     fastgen_http_video_path: str = Field("/api/v2/videos", alias="FASTGEN_HTTP_VIDEO_PATH")
     fastgen_http_keyframe_path: str = Field("", alias="FASTGEN_HTTP_KEYFRAME_PATH")
-    fastgen_http_media_provider: str = Field("google_fx", alias="FASTGEN_HTTP_MEDIA_PROVIDER")
+    fastgen_http_media_provider: str = Field("flow", alias="FASTGEN_HTTP_MEDIA_PROVIDER")
     fastgen_storage_base_url: str = Field("https://storage.fast-gen.ai", alias="FASTGEN_STORAGE_BASE_URL")
     # Видео через v4 (Veo Flow / Flower) ближе к UI Playwright; v2 legacy — только если false.
     fastgen_http_enable_v4_video: bool = Field(True, alias="FASTGEN_HTTP_ENABLE_V4_VIDEO")
@@ -166,6 +167,12 @@ class Settings(BaseSettings):
     mode5_loop_trim_tail_sec: float = Field(0.0, alias="MODE5_LOOP_TRIM_TAIL_SEC")
     # Mode5: для превью YouTube (book_night / unwritten_chapter) подтянуть обложку с openlibrary.org и отдать в FastGen как reference.
     mode5_thumbnail_openlibrary_cover: bool = Field(True, alias="MODE5_THUMBNAIL_OPENLIBRARY_COVER")
+    # Mode5 Bible: reference portrait для центральной фигуры на YouTube-превью (без имени в промпте).
+    mode5_bible_thumbnail_use_figure_ref: bool = Field(True, alias="MODE5_BIBLE_THUMBNAIL_USE_FIGURE_REF")
+    mode5_bible_thumbnail_figure_ref: str = Field(
+        "assets/mode5/bible_central_figure_ref.png",
+        alias="MODE5_BIBLE_THUMBNAIL_FIGURE_REF",
+    )
     # Mode5: freeze detector for generated loop clips (ffmpeg freezedetect).
     mode5_freeze_detect_noise: float = Field(0.0018, alias="MODE5_FREEZE_DETECT_NOISE")
     mode5_freeze_detect_min_sec: float = Field(0.35, alias="MODE5_FREEZE_DETECT_MIN_SEC")
@@ -180,6 +187,10 @@ class Settings(BaseSettings):
     # Mode 4: подписи моделей на вкладке Video (fast-gen.ai), как в UI.
     mode4_veo_video_model_flow: str = Field("Veo 3.1 - Flow", alias="MODE4_VEO_VIDEO_MODEL_FLOW")
     mode4_veo_video_model_flower: str = Field("Veo 3.1 - Flower", alias="MODE4_VEO_VIDEO_MODEL_FLOWER")
+    # Подмодель на вкладке Video после выбора «Veo … - Flow» (второй селект «Модель Flow» в UI fast-gen.ai).
+    fastgen_veo_flow_variant: str = Field("Veo 3.1 Fast", alias="FASTGEN_VEO_FLOW_VARIANT")
+    # HTTP v4: явный model id (напр. veo-3.1-fast-generate-preview). Пусто = авто из FASTGEN_VEO_FLOW_VARIANT.
+    fastgen_http_v4_veo_model: str = Field("", alias="FASTGEN_HTTP_V4_VEO_MODEL")
     # После N неудач Flow переключаться на Flower (HTTP + Playwright). По умолчанию выкл. — только Flow.
     mode4_veo_enable_flower_fallback: bool = Field(False, alias="MODE4_VEO_ENABLE_FLOWER_FALLBACK")
     # Сколько попыток v4 Flow на один клип (Mode 4, Mode 5 и др.; без Flower).
@@ -303,13 +314,21 @@ class Settings(BaseSettings):
     # Нужны FASTGEN_HTTP_BASE_URL + ключ; иначе пайплайн остаётся на JPEG по сегментам (~30 с).
     mode5_block_loop_video_enabled: bool = Field(True, alias="MODE5_BLOCK_LOOP_VIDEO_ENABLED")
     mode5_block_loop_seconds: float = Field(1800.0, alias="MODE5_BLOCK_LOOP_SECONDS", ge=60.0, le=14400.0)
+    # Bible long-form: один block-loop на 30 мин wall-clock (как manual/facts50).
+    mode5_bible_block_loop_seconds: float = Field(1800.0, alias="MODE5_BIBLE_BLOCK_LOOP_SECONDS", ge=60.0, le=14400.0)
     # Fixed pool size of reusable animated block-loops (default 5 => covers 2.5h by 30-min slots).
     mode5_block_loop_pool_size: int = Field(5, alias="MODE5_BLOCK_LOOP_POOL_SIZE", ge=1, le=20)
+    # Bible: одно подтверждённое анимированное видео на каждые ~30 мин (повтор того же клипа между слотами).
+    mode5_bible_block_loop_pool_size: int = Field(1, alias="MODE5_BIBLE_BLOCK_LOOP_POOL_SIZE", ge=1, le=20)
     # Сколько независимых animated block-loop клипов генерировать одновременно.
     mode5_block_loop_parallel: int = Field(10, alias="MODE5_BLOCK_LOOP_PARALLEL", ge=1, le=20)
     mode5_block_loop_include_facts50: bool = Field(True, alias="MODE5_BLOCK_LOOP_INCLUDE_FACTS50")
     # True: FastGen still → FastGen «Ключ. кадры» (start=end=still) → loop; False: keyframes только из JPEG сегментов.
     mode5_block_loop_still_then_animate: bool = Field(True, alias="MODE5_BLOCK_LOOP_STILL_THEN_ANIMATE")
+    # Bible: один чанк озвучки = одна глава (параллельный TTS по главам), не разрез по ~5 мин.
+    mode5_bible_split_by_chapter: bool = Field(True, alias="MODE5_BIBLE_SPLIT_BY_CHAPTER")
+    # Fallback still→video через «Обычный»+референс, если «Ключ. кадры» не удались (по умолчанию выкл.).
+    mode5_still_motion_normal_fallback: bool = Field(False, alias="MODE5_STILL_MOTION_NORMAL_FALLBACK")
     # Два клипа на блок: A от still, B от последнего кадра A к тому же still — замкнутый цикл при повторе A+B.
     mode5_block_loop_two_part_loop: bool = Field(False, alias="MODE5_BLOCK_LOOP_TWO_PART_LOOP")
     # FFmpeg libx264 после склейки двух частей: меньше CRF = выше качество (и размер файла).

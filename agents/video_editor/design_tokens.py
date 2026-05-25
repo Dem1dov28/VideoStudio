@@ -35,6 +35,8 @@ RADIUS_WATERMARK: int = 10
 
 # Позиция субтитров: 0.75 = центр в середине нижней половины экрана
 SUBTITLE_VERTICAL_CENTER_FRAC: float = 0.75
+# Mode5 Bible / long-form: chapter banner at top; subtitles use default bottom band (0.75)
+MODE5_CHAPTER_TOP_FRAC: float = 0.045
 SUBTITLE_PAD_X: int = 36
 SUBTITLE_PAD_Y: int = 22
 SUBTITLE_MAX_WIDTH_FRAC: float = 0.88

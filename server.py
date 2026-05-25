@@ -204,6 +204,13 @@ async def _run_pipeline_task(
             mode5_video_header_title=getattr(req, "mode5_video_header_title", None),
             mode5_bible_mode=bool(getattr(req, "mode5_bible_mode", False)),
             mode5_sub_mode=getattr(req, "mode5_sub_mode", "manual") or "manual",
+            mode5_bible_chapters=[
+                {"overlay_label": c.overlay_label, "text": c.text}
+                for c in (getattr(req, "mode5_bible_chapters", None) or [])
+            ]
+            or None,
+            mode5_block_loop_pool_size=getattr(req, "mode5_block_loop_pool_size", None),
+            mode5_thumbnail_overlay_text=getattr(req, "mode5_thumbnail_overlay_text", None),
             mode5_test_run=bool(getattr(req, "mode5_test_run", False)),
             mode5_test_duration_sec=int(getattr(req, "mode5_test_duration_sec", 300) or 300),
             mode6_num_characters=getattr(req, "mode6_num_characters", 3),
@@ -684,6 +691,15 @@ class YouTubeUploadBody(BaseModel):
         return x
 
 
+class Mode5BibleChapterEntry(BaseModel):
+    overlay_label: str = ""
+    text: str = ""
+
+
+class Mode5SplitBibleChaptersBody(BaseModel):
+    script_text: str = ""
+
+
 class StartRequest(BaseModel):
     topic: str | None = None
     auto_topic: bool = False
@@ -730,6 +746,10 @@ class StartRequest(BaseModel):
     mode5_bible_mode: bool = False
     # manual | bible | facts50 | outline | book_night | unwritten_chapter (legacy: mode5_bible_mode)
     mode5_sub_mode: str = "manual"
+    mode5_bible_chapters: list[Mode5BibleChapterEntry] | None = None
+    # Mode 5: сколько анимированных клипов генерировать до intro-подтверждения (1–20)
+    mode5_block_loop_pool_size: int | None = Field(None, ge=1, le=20)
+    mode5_thumbnail_overlay_text: str | None = None
     # Mode 5: короткий тестовый прогон (~test_duration_sec озвучки по оценке слов)
     mode5_test_run: bool = False
     mode5_test_duration_sec: int = 300
@@ -916,6 +936,11 @@ class Mode5LiveFinalBody(BaseModel):
     action_id: str | None = None
 
 
+class Mode5RegenerateThumbnailBody(BaseModel):
+    action_id: str | None = None
+    thumbnail_overlay_text: str | None = None
+
+
 class Mode13VoicePreviewBody(BaseModel):
     """Предпрослушивание обработки голоса (первые ~45 с). path — файл из /api/upload/audio."""
 
@@ -1050,6 +1075,20 @@ def _validate_start_request(req: StartRequest) -> None:
                 400,
                 "Mode 5: для «The Unwritten Chapter» укажите тему расследования (от 8 символов).",
             )
+        elif sub5 == "bible":
+            chapters = getattr(req, "mode5_bible_chapters", None) or []
+            chapter_text = sum(
+                len((getattr(c, "text", None) or "").strip())
+                for c in chapters
+                if (getattr(c, "text", None) or "").strip()
+            )
+            if chapter_text >= 80:
+                pass
+            elif len(txt) < 80:
+                raise HTTPException(
+                    400,
+                    "Mode 5 Bible: добавьте главы с текстом (суммарно от ~80 символов) или вставьте полный текст.",
+                )
         elif sub5 not in ("facts50", "outline", "book_night", "unwritten_chapter") and len(txt) < 80:
             raise HTTPException(400, "Mode 5: вставьте полноценный текст для озвучки")
         lang5 = (getattr(req, "mode5_language", None) or getattr(req, "language", "auto") or "auto").strip().lower()
@@ -1084,6 +1123,15 @@ def _normalize_mode_specific_request(req: StartRequest) -> None:
         sub5 = _effective_mode5_sub_mode(req)
         req.mode5_sub_mode = sub5
         req.mode5_bible_mode = sub5 == "bible"
+        chapters5 = list(getattr(req, "mode5_bible_chapters", None) or [])
+        if sub5 == "bible" and chapters5:
+            parts = [
+                (getattr(c, "text", None) or "").strip()
+                for c in chapters5
+                if (getattr(c, "text", None) or "").strip()
+            ]
+            if parts:
+                req.mode5_script_text = "\n\n".join(parts)
         script_text = (req.mode5_script_text or "").strip()
         hdr = (req.mode5_video_header_title or "").strip()
         preferred_lang = (req.mode5_language or req.language or "auto").strip().lower() or "auto"
@@ -1523,6 +1571,11 @@ async def get_status(session_id: str):
             merged["mode5_intro_preview_videos"] = list(plan.get("intro_preview_videos") or [])
             merged["mode5_waiting_confirmation"] = bool(plan.get("await_intro_confirmation"))
             merged["mode5_block_loop_pool_size"] = int(plan.get("mode5_block_loop_pool_size") or 0) or None
+            overlay_txt = str(plan.get("thumbnail_overlay_text") or "").strip()
+            if overlay_txt:
+                merged["mode5_thumbnail_overlay_text"] = overlay_txt
+            bls = plan.get("block_loop_seconds")
+            merged["mode5_block_loop_seconds"] = float(bls) if bls is not None else None
             if isinstance(plan.get("publishing"), dict):
                 merged["publishing"] = plan.get("publishing")
             thumb_rel = str(plan.get("publish_thumbnail_rel") or "").strip()
@@ -1951,7 +2004,7 @@ async def mode5_live_rebuild_final_ep(session_id: str, body: Mode5LiveFinalBody)
 
 
 @app.post("/api/mode5/{session_id}/live/regenerate-publish-thumbnail")
-async def mode5_live_regenerate_publish_thumbnail_ep(session_id: str, body: Mode5LiveFinalBody):
+async def mode5_live_regenerate_publish_thumbnail_ep(session_id: str, body: Mode5RegenerateThumbnailBody):
     from modes.mode5.pipeline import regenerate_mode5_publish_thumbnail, load_mode5_plan
 
     try:
@@ -1959,15 +2012,45 @@ async def mode5_live_regenerate_publish_thumbnail_ep(session_id: str, body: Mode
     except FileNotFoundError as e:
         raise HTTPException(404, str(e)) from e
     try:
-        result = await regenerate_mode5_publish_thumbnail(session_id, action_id=body.action_id)
+        result = await regenerate_mode5_publish_thumbnail(
+            session_id,
+            action_id=body.action_id,
+            thumbnail_overlay_text=body.thumbnail_overlay_text,
+        )
         sess = _sessions.get(session_id)
         if isinstance(sess, dict):
             sess_result = sess.get("result")
             if isinstance(sess_result, dict):
                 thumb_rel = str(result.get("thumbnail_relpath") or "").strip()
                 sess_result["mode5_publish_thumbnail"] = thumb_rel or None
+                overlay = str(result.get("mode5_thumbnail_overlay_text") or "").strip()
+                if overlay:
+                    sess_result["mode5_thumbnail_overlay_text"] = overlay
                 if isinstance(result.get("publishing"), dict):
                     sess_result["publishing"] = result.get("publishing")
+        result["policy_decision"] = "background"
+        return result
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.post("/api/mode5/{session_id}/live/regenerate-publish-metadata")
+async def mode5_live_regenerate_publish_metadata_ep(session_id: str, body: Mode5LiveFinalBody):
+    from modes.mode5.pipeline import regenerate_mode5_publish_metadata, load_mode5_plan
+
+    try:
+        load_mode5_plan(session_id)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    try:
+        result = await regenerate_mode5_publish_metadata(session_id, action_id=body.action_id)
+        sess = _sessions.get(session_id)
+        if isinstance(sess, dict):
+            sess_result = sess.get("result")
+            if isinstance(sess_result, dict) and isinstance(result.get("publishing"), dict):
+                sess_result["publishing"] = result.get("publishing")
         result["policy_decision"] = "background"
         return result
     except FileNotFoundError as e:
@@ -2164,6 +2247,22 @@ async def mode5_continue_generation_ep(session_id: str):
         task = asyncio.create_task(_run_mode5_resume_task(session_id, queue, control))
         _sessions[session_id]["task"] = task
         return {"session_id": session_id, "continuing": True}
+
+
+@app.post("/api/mode5/split-bible-chapters")
+async def mode5_split_bible_chapters_ep(body: Mode5SplitBibleChaptersBody):
+    from modes.mode5.bible_chapters import bible_chapters_payload_from_script
+
+    script = (body.script_text or "").strip()
+    if len(script) < 20:
+        raise HTTPException(400, "Вставьте текст для разбивки (от ~20 символов).")
+    chapters = bible_chapters_payload_from_script(script)
+    if not chapters:
+        raise HTTPException(
+            400,
+            "Не удалось разбить текст на главы. Добавьте заголовки «Chapter N», «Matthew 2» или «глава 2».",
+        )
+    return {"chapters": chapters, "count": len(chapters)}
 
 
 @app.post("/api/mode5/topic-ideas")
@@ -2426,30 +2525,65 @@ async def resume_pipeline(session_id: str):
 
 @app.post("/api/pipeline/{session_id}/cancel")
 async def cancel_pipeline(session_id: str):
+    def _mode5_abandonable() -> bool:
+        try:
+            from modes.mode5.pipeline import (
+                _session_dir,
+                load_mode5_plan,
+                mode5_resume_snapshot_for_plan,
+            )
+
+            plan = load_mode5_plan(session_id)
+            if bool(plan.get("user_cancelled")):
+                return False
+            snap = mode5_resume_snapshot_for_plan(session_id, plan)
+            if not snap.get("can_resume"):
+                return False
+            return not (_session_dir(session_id) / "video_mode5.mp4").is_file()
+        except FileNotFoundError:
+            return False
+        except Exception:
+            return False
+
     session = _sessions.get(session_id)
+    mode5_abandon = _mode5_abandonable()
+
     if not session:
+        if mode5_abandon:
+            from modes.mode5.pipeline import mark_mode5_generation_cancelled
+
+            mark_mode5_generation_cancelled(session_id)
+            return {"status": "cancelled", "session_id": session_id}
         raise HTTPException(404, "Session not found")
-    if session["status"] in ("done", "error", "cancelled"):
-        raise HTTPException(400, f"Pipeline already finished: {session['status']}")
+
+    task = session.get("task")
+    task_alive = task is not None and not task.done()
+    st = session.get("status")
+    if st in ("done", "error", "cancelled") and not task_alive and not mode5_abandon:
+        raise HTTPException(400, f"Pipeline already finished: {st}")
+
     control = session.get("control", {})
+    if not isinstance(control, dict):
+        control = {}
+        session["control"] = control
     control["cancelled"] = True
     fce = control.get("fastgen_cancel_event")
     if isinstance(fce, threading.Event):
         fce.set()
-    task = session.get("task")
-    if task and not task.done():
+    if task_alive:
         task.cancel()
     session["status"] = "cancelled"
     session["error"] = session.get("error") or "Генерация отменена"
-    if int(session.get("mode") or 0) == 5:
+    if int(session.get("mode") or 0) == 5 or mode5_abandon:
         try:
-            from modes.mode5.pipeline import set_mode5_pipeline_paused
+            from modes.mode5.pipeline import mark_mode5_generation_cancelled, set_mode5_pipeline_paused
 
+            mark_mode5_generation_cancelled(session_id)
             set_mode5_pipeline_paused(session_id, False)
         except FileNotFoundError:
             pass
         except Exception as e:
-            logger.warning(f"[Mode5] failed to clear persisted pause on cancel for {session_id}: {e}")
+            logger.warning(f"[Mode5] failed to persist cancel for {session_id}: {e}")
     return {"status": "cancelled", "session_id": session_id}
 
 

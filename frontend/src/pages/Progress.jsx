@@ -111,8 +111,20 @@ function mergeMode5Payload(prev, incoming) {
   }
   if (incoming?.mode5_can_assemble === true) {
     merged.mode5_can_assemble = true;
+  } else if (incoming?.mode5_can_assemble === false) {
+    merged.mode5_can_assemble = false;
   } else if (prev?.mode5_can_assemble === true && incoming?.mode5_can_assemble !== false) {
     merged.mode5_can_assemble = true;
+  }
+  if (incoming?.mode5_can_resume === true) {
+    merged.mode5_can_resume = true;
+  } else if (incoming?.mode5_can_resume === false) {
+    merged.mode5_can_resume = false;
+  }
+  if (incoming?.mode5_review_ready === true) {
+    merged.mode5_review_ready = true;
+  } else if (incoming?.mode5_review_ready === false) {
+    merged.mode5_review_ready = false;
   }
   const prevReady = Number(prev?.mode5_ready_chunks);
   const nextReady = Number(incoming?.mode5_ready_chunks);
@@ -165,8 +177,10 @@ export default function Progress() {
   const [mode5LiveActionKey, setMode5LiveActionKey] = useState('');
   const [mode5PolicyNote, setMode5PolicyNote] = useState('');
   const [mode5ThumbRegenBusy, setMode5ThumbRegenBusy] = useState(false);
+  const [mode5PublishMetaRegenBusy, setMode5PublishMetaRegenBusy] = useState(false);
   const [mode5ThumbDownloadBusy, setMode5ThumbDownloadBusy] = useState(false);
   const [mode5ThumbNonce, setMode5ThumbNonce] = useState(0);
+  const [mode5ThumbOverlayText, setMode5ThumbOverlayText] = useState('');
   /** Снимок /review-state для шага степпера (checkpoint + hint), без привязки к превью на диске */
   const [mode5ReviewProgress, setMode5ReviewProgress] = useState(null);
   const [streamNonce, setStreamNonce] = useState(0);
@@ -345,7 +359,9 @@ export default function Progress() {
       (
         status === 'running' ||
         status === 'paused' ||
-        (status === 'done' && done?.mode5_review_ready && done?.mode5_can_assemble !== true) ||
+        (status === 'done' &&
+          done?.mode5_can_assemble !== true &&
+          (done?.mode5_review_ready || done?.mode5_can_resume === true)) ||
         ((status === 'error' || status === 'cancelled') && done?.mode5_can_resume === true)
       );
     if (!pollMode5Partial) return;
@@ -388,7 +404,7 @@ export default function Progress() {
         } else if (!snap?.mode5_plan_pending) {
           setMode5WaitUi(null);
         }
-        if (Array.isArray(snap?.mode5_clip_filenames) && snap.mode5_clip_filenames.length > 0) {
+        if (sessionMode === 5 || snap?.mode5_sub_mode != null) {
           applyMode5Snapshot(snap);
           setSessionMode(5);
           if (snap?.topic) {
@@ -404,7 +420,9 @@ export default function Progress() {
           !assembleReady &&
           (status === 'running' ||
             status === 'paused' ||
-            (status === 'done' && (done?.mode5_review_ready || lastSnap?.mode5_review_ready)) ||
+            (status === 'done' &&
+              lastSnap?.mode5_can_assemble !== true &&
+              (done?.mode5_review_ready || lastSnap?.mode5_review_ready || done?.mode5_can_resume || lastSnap?.mode5_can_resume)) ||
             ((status === 'error' || status === 'cancelled') && done?.mode5_can_resume === true))
         ) {
           timer = setTimeout(tick, 2500);
@@ -499,6 +517,35 @@ export default function Progress() {
     Boolean(mode5Live?.mode5_waiting_confirmation) ||
     Boolean(mode5Live?.mode5_await_intro_confirmation);
   const isMode5IntroGate = sessionMode === 5 && mode5WaitingConfirmation;
+  const mode5CanResume =
+    done?.mode5_can_resume === true || mode5Live?.mode5_can_resume === true;
+  const isMode5Session =
+    sessionMode === 5 || typeof done?.mode5_sub_mode === 'string';
+  const mode5HasFinalVideo = !!(
+    done?.video_path ||
+    (Array.isArray(done?.video_paths) && done.video_paths.length > 0)
+  );
+  const mode5PreviewsIncomplete =
+    sessionMode === 5 &&
+    !done?.video_path &&
+    done?.mode5_can_assemble !== true &&
+    Number(done?.mode5_total_chunks) > 0 &&
+    Number(done?.mode5_ready_chunks ?? mode5ReviewProgress?.readyChunks ?? 0) <
+      Number(done?.mode5_total_chunks ?? mode5ReviewProgress?.totalChunks ?? 0);
+  const showMode5ContinueSaved =
+    mode5CanResume && !done?.video_path && (done?.mode5_can_assemble !== true || mode5PreviewsIncomplete);
+  const mode5ActiveOrResumable =
+    isMode5Session &&
+    !mode5HasFinalVideo &&
+    (status === 'running' ||
+      status === 'paused' ||
+      status === 'waiting_confirmation' ||
+      mode5CanResume ||
+      mode5PreviewsIncomplete ||
+      showMode5ContinueSaved);
+  const showPipelineControls =
+    status !== 'cancelled' &&
+    ((!done && (!error || isTransientReconnectError)) || mode5ActiveOrResumable);
 
   useEffect(() => {
     if (!isMode5IntroGate) {
@@ -517,12 +564,6 @@ export default function Progress() {
 
   const mode5IntroPreviewList =
     mode5IntroOrder.length > 0 ? mode5IntroOrder : mode5IntroPreviewRels;
-  const isMode5Session =
-    sessionMode === 5 || typeof done?.mode5_sub_mode === 'string';
-  const mode5HasFinalVideo = !!(
-    done?.video_path ||
-    (Array.isArray(done?.video_paths) && done.video_paths.length > 0)
-  );
   /** Раньше любой merge mode5 в `done` считался «готово» — степпер зеленел целиком при первых превью. */
   const stepIndicatorDone =
     !isMode5IntroGate &&
@@ -600,6 +641,24 @@ export default function Progress() {
     return `${url}?v=${encodeURIComponent(String(mode5ThumbNonce))}`;
   }, [sessionMode, done?.video_path, done?.mode5_publish_thumbnail, done?.session_id, sid, mode5ThumbNonce]);
 
+  useEffect(() => {
+    if (sessionMode !== 5) return;
+    const fromDone = typeof done?.mode5_thumbnail_overlay_text === 'string'
+      ? done.mode5_thumbnail_overlay_text.trim()
+      : '';
+    const fromLive = typeof mode5Live?.mode5_thumbnail_overlay_text === 'string'
+      ? mode5Live.mode5_thumbnail_overlay_text.trim()
+      : '';
+    const src = fromDone || fromLive;
+    if (src) {
+      setMode5ThumbOverlayText((prev) => (prev.trim() ? prev : src));
+    }
+  }, [
+    sessionMode,
+    done?.mode5_thumbnail_overlay_text,
+    mode5Live?.mode5_thumbnail_overlay_text,
+  ]);
+
   // Copy to clipboard helper
   const copyToClipboard = async (text, field) => {
     if (text == null || String(text).trim() === '') return;
@@ -666,6 +725,36 @@ export default function Progress() {
             <span className="font-mono text-[#52525b]">session …{sid?.slice(-8)}</span>
           </p>
         </div>
+        {showMode5ContinueSaved && (
+          <div className="mb-4 p-4 rounded-xl bg-emerald-950/40 border border-emerald-600/35">
+            <p className="text-sm text-emerald-100/95 leading-relaxed mb-3">
+              Генерация прервалась на сборке превью. Нажмите «Продолжить с сохранённого этапа» — дорисуются
+              недостающие части (озвучка и картинки уже на диске).
+            </p>
+            <button
+              type="button"
+              onClick={async () => {
+                setMode5ContinueBusy(true);
+                try {
+                  await api.mode5ContinueGeneration(sid);
+                  setError('');
+                  setDone((prev) => (prev ? { ...prev, mode5_waiting_confirmation: false } : prev));
+                  setMode5Live((prev) => (prev ? { ...prev, mode5_waiting_confirmation: false } : prev));
+                  setStatus('running');
+                  setStreamNonce((n) => n + 1);
+                } catch (e) {
+                  setError(e.message || String(e));
+                } finally {
+                  setMode5ContinueBusy(false);
+                }
+              }}
+              disabled={mode5ContinueBusy || busy}
+              className="flex items-center gap-2 text-sm px-4 py-2.5 rounded-xl font-medium bg-emerald-700 hover:bg-emerald-600 text-white border border-emerald-500/40 disabled:opacity-50"
+            >
+              <RiPlayLine /> Продолжить с сохранённого этапа
+            </button>
+          </div>
+        )}
         {showMode5WaitBanner && (
           <div className="mb-4 p-3 rounded-xl bg-[#1a1810] border border-amber-500/25">
             <p className="text-sm text-amber-100/95 leading-relaxed">{mode5WaitUi.hint}</p>
@@ -690,8 +779,10 @@ export default function Progress() {
           {isMode5IntroGate
             ? '🧪 Проверьте анимированное превью'
             : done
-            ? done.mode4_multiclip_ready || done.mode5_review_ready
+            ? done.mode4_multiclip_ready || (done.mode5_review_ready && done.mode5_can_assemble !== false)
               ? 'Фрагменты готовы'
+              : mode5PreviewsIncomplete
+                ? 'Превью частей не завершены'
               : '🎉 Видео готово!'
             : status === 'cancelled'
               ? '⏹️ Остановлено'
@@ -723,7 +814,7 @@ export default function Progress() {
       </div>
 
       {/* Pause / Resume / Cancel */}
-      {!done && (!error || isTransientReconnectError) && status !== 'cancelled' && (
+      {showPipelineControls && (
         <div className="flex gap-2 mb-4">
           {status === 'running' && (
             <button
@@ -765,6 +856,12 @@ export default function Progress() {
                 await api.cancelPipeline(sid);
                 setStatus('cancelled');
                 setError('Генерация отменена');
+                setDone((prev) =>
+                  prev ? { ...prev, mode5_can_resume: false, mode5_waiting_confirmation: false } : prev,
+                );
+                setMode5Live((prev) =>
+                  prev ? { ...prev, mode5_can_resume: false, mode5_waiting_confirmation: false } : prev,
+                );
               } catch (e) { setError(e.message); }
               finally { setBusy(false); }
             }}
@@ -816,7 +913,9 @@ export default function Progress() {
             Сначала проверьте стартовые анимированные блоки. После подтверждения начнётся генерация текста, озвучки и остальной сборки.
           </p>
           <p className="text-xs text-[#a1a1aa] mb-3 leading-relaxed">
-            Порядок сверху вниз задаёт, какой ролик пойдёт на какой участок длинного видео по времени: слот 1 — самый ранний блок, далее по таймлайну. Стрелки меняют местами соседние клипы; порядок сохраняется на сервере сразу после нажатия.
+            Порядок сверху вниз задаёт последовательность по таймлайну: слот 1 — самый ранний блок (~30 мин озвучки),
+            слот 2 — следующий и т.д. Стрелки ↑↓ меняют местами соседние клипы (как в режимах «77 фактов» и «книга на ночь»).
+            Если озвучка короче, чем число слотов, в финальное видео попадут только первые N клипов в этом порядке — остальные не используются.
           </p>
           <p className="text-xs text-[#a1a1aa] mb-3 leading-relaxed">
             Каждое превью — два подряд одинаковых цикла анимации (~8+8 с). Стык между ними посередине ролика: так видно, будет ли заметен скачок при зацикливании в длинном видео.
@@ -1007,15 +1106,19 @@ export default function Progress() {
         >
           {error && (
             <p className="text-sm text-[#d4d4d8] mb-3 leading-relaxed">
-              Повторите запуск с тем же аудио и настройками — как перегенерация в других режимах. Если файл аудио удалён,
-              загрузите его снова на странице «Создать».
+              {showMode5ContinueSaved
+                ? 'Связь с сервером прервалась. Продолжить с сохранённого этапа — кнопка выше; перезапуск с нуля — ниже.'
+                : 'Повторите запуск с тем же аудио и настройками — как перегенерация в других режимах. Если файл аудио удалён, загрузите его снова на странице «Создать».'}
             </p>
           )}
           <div className="flex flex-wrap gap-2">
             {mode5IntroPreviewRels.length > 0 && (
               <div className="w-full mb-2">
                 <p className="text-xs text-[#a1a1aa] mb-2">
-                  Стартовые анимированные блоки ({mode5IntroPreviewRels.length}). Если всё ок — нажмите «Продолжить с сохранённого этапа».
+                  Стартовые анимированные блоки ({mode5IntroPreviewRels.length}).
+                  {showMode5ContinueSaved
+                    ? ' Если всё ок — продолжайте кнопкой выше.'
+                    : ' Если всё ок — нажмите «Продолжить с сохранённого этапа».'}
                 </p>
                 <div className="flex flex-wrap gap-3">
                   {mode5IntroPreviewRels.map((rel, i) => (
@@ -1033,30 +1136,6 @@ export default function Progress() {
                   ))}
                 </div>
               </div>
-            )}
-            {done?.mode5_can_resume === true && !done?.mode5_review_ready && !done?.video_path && (
-              <button
-                type="button"
-                onClick={async () => {
-                  setMode5ContinueBusy(true);
-                  try {
-                    await api.mode5ContinueGeneration(sid);
-                    setError('');
-                  setDone((prev) => (prev ? { ...prev, mode5_waiting_confirmation: false } : prev));
-                  setMode5Live((prev) => (prev ? { ...prev, mode5_waiting_confirmation: false } : prev));
-                    setStatus('running');
-                    setStreamNonce((n) => n + 1);
-                  } catch (e) {
-                    setError(e.message || String(e));
-                  } finally {
-                    setMode5ContinueBusy(false);
-                  }
-                }}
-                disabled={mode5ContinueBusy || busy}
-                className="flex items-center gap-2 text-sm px-4 py-2.5 rounded-xl font-medium transition-colors bg-emerald-700 hover:bg-emerald-600 text-white border border-emerald-500/40 disabled:opacity-50"
-              >
-                <RiPlayLine /> {mode5WaitingConfirmation ? 'Подтвердить и продолжить генерацию' : 'Продолжить с сохранённого этапа'}
-              </button>
             )}
             <button
               onClick={async () => {
@@ -2193,9 +2272,37 @@ export default function Progress() {
               animate={{ opacity: 1, scale: 1, y: 0 }}
               className="card overflow-hidden mb-4"
             >
-              <div className="p-4 border-b border-[#27272f] flex items-center gap-2">
-                <span className="text-lg">📝</span>
-                <span className="text-sm font-semibold text-white">Данные для публикации</span>
+              <div className="p-4 border-b border-[#27272f] flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-lg">📝</span>
+                  <span className="text-sm font-semibold text-white">Данные для публикации</span>
+                </div>
+                {sessionMode === 5 && (
+                  <button
+                    type="button"
+                    className="btn-secondary text-xs flex items-center gap-1.5 shrink-0"
+                    disabled={mode5PublishMetaRegenBusy}
+                    onClick={async () => {
+                      setMode5PublishMetaRegenBusy(true);
+                      try {
+                        const res = await api.mode5LiveRegeneratePublishMetadata(done?.session_id || sid);
+                        const snap = await api.mode5ReviewState(done?.session_id || sid).catch(() => null);
+                        if (snap && typeof snap === 'object') {
+                          applyMode5Snapshot(snap);
+                        }
+                        if (typeof res?.publishing === 'object' && res.publishing) {
+                          setDone((prev) => (prev ? { ...prev, publishing: res.publishing } : prev));
+                        }
+                      } catch (e) {
+                        setError(e.message || 'Не удалось обновить метаданные');
+                      } finally {
+                        setMode5PublishMetaRegenBusy(false);
+                      }
+                    }}
+                  >
+                    <RiRestartLine /> {mode5PublishMetaRegenBusy ? 'Обновление…' : 'Обновить метаданные'}
+                  </button>
+                )}
               </div>
               <div className="p-4 space-y-2">
                 {sessionMode === 5 && mode5PublishThumbUrl && (
@@ -2237,10 +2344,16 @@ export default function Progress() {
                           onClick={async () => {
                             setMode5ThumbRegenBusy(true);
                             try {
-                              await api.mode5LiveRegeneratePublishThumbnail(done?.session_id || sid);
+                              const res = await api.mode5LiveRegeneratePublishThumbnail(
+                                done?.session_id || sid,
+                                { thumbnailOverlayText: mode5ThumbOverlayText },
+                              );
                               const snap = await api.mode5ReviewState(done?.session_id || sid).catch(() => null);
                               if (snap && typeof snap === 'object') {
                                 applyMode5Snapshot(snap);
+                              }
+                              if (typeof res?.mode5_thumbnail_overlay_text === 'string') {
+                                setMode5ThumbOverlayText(res.mode5_thumbnail_overlay_text);
                               }
                               setMode5ThumbNonce((v) => v + 1);
                             } catch (e) {
@@ -2254,6 +2367,21 @@ export default function Progress() {
                         </button>
                       </div>
                     </div>
+                    <label className="block text-[11px] font-medium text-[#a1a1aa] mb-1.5">
+                      Надпись на превью
+                    </label>
+                    <input
+                      type="text"
+                      className="input text-sm mb-3 bg-[#14141d]/90 border-[#323242]"
+                      placeholder="Например: GENEALOGY OF JESUS"
+                      value={mode5ThumbOverlayText}
+                      onChange={(e) => setMode5ThumbOverlayText(e.target.value)}
+                      maxLength={48}
+                      disabled={mode5ThumbRegenBusy}
+                    />
+                    <p className="text-[11px] text-[#71717a] mb-3 leading-relaxed">
+                      На превью будет только эта надпись — никаких других строк. Пустое поле = без текста на картинке.
+                    </p>
                     <img
                       src={mode5PublishThumbUrl}
                       alt="Mode5 YouTube thumbnail"

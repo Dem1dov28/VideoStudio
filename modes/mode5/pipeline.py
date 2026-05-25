@@ -11,6 +11,7 @@ import base64
 import functools
 import hashlib
 import json
+import math
 import os
 import random
 import threading
@@ -42,6 +43,12 @@ from modes.mode13.pipeline import (
     _text_for_window,
     _windows_for_duration,
 )
+from modes.mode5.bible_chapters import (
+    apply_bible_chapter_labels,
+    build_bible_slices_from_explicit_chapters,
+    split_script_into_bible_chapters,
+)
+from modes.mode5.text_length import _WORDS_PER_MIN, mode5_approx_speech_sec
 from modes.mode5.prompt_builder import (
     build_mode5_image_prompt,
     mode5_style_id_for_sub_mode,
@@ -281,7 +288,7 @@ def write_mode5_early_pause_placeholder(
         "script_text": script,
         "source_input_text": script,
         "language": language,
-        "show_subtitles": False,
+        "show_subtitles": _mode5_default_show_subtitles(sm),
         "chunk_seconds": chunk_sec,
         "segment_seconds": seg_sec,
         "max_parallel_images": mpi,
@@ -803,6 +810,51 @@ def _ensure_mode5_style_lock(plan: dict[str, Any]) -> str:
     return locked
 
 
+
+def _mode5_default_show_subtitles(sub_mode: str | None) -> bool:
+    """Long-form modes with chapter overlays: top chapter label + bottom subtitles."""
+    return normalize_mode5_sub_mode(sub_mode) in (
+        "bible",
+        "outline",
+        "book_night",
+        "unwritten_chapter",
+    )
+
+
+def _mode5_chapter_overlay_label(
+    ch: dict[str, Any],
+    plan: dict[str, Any],
+    seg: dict[str, Any] | None = None,
+) -> str:
+    sm = normalize_mode5_sub_mode(plan.get("sub_mode"))
+    if sm == "bible":
+        if seg is not None:
+            seg_label = re.sub(r"\s+", " ", str(seg.get("chapter_label") or "").strip())
+            if not seg_label:
+                apply_bible_chapter_labels(plan)
+                seg_label = re.sub(r"\s+", " ", str(seg.get("chapter_label") or "").strip())
+            if seg_label:
+                return seg_label[:140]
+        apply_bible_chapter_labels(plan)
+        chapter = re.sub(r"\s+", " ", str(ch.get("chapter_title") or "").strip())
+        if chapter:
+            return chapter[:140]
+        header = re.sub(r"\s+", " ", str(plan.get("header_title") or "").strip())
+        ci = int(ch.get("index") or 0) + 1
+        if header:
+            return f"{header} · part {ci}"[:140]
+        return f"Chapter {ci}"
+    chapter = re.sub(r"\s+", " ", str(ch.get("chapter_title") or "").strip())
+    subchapter = re.sub(r"\s+", " ", str(ch.get("subchapter_title") or "").strip())
+    if chapter and subchapter:
+        return f"{chapter} — {subchapter}"[:140]
+    if chapter:
+        return chapter[:140]
+    if subchapter:
+        return subchapter[:140]
+    return ""
+
+
 def _mode5_chunk_context_text(chunk: dict[str, Any], seg_idx: int, *, window: int = 1) -> str:
     segments = list(chunk.get("segments") or [])
     if not segments:
@@ -1247,6 +1299,12 @@ def _build_mode5_intro_still_prompt(
         style_line = (
             "Style target: painterly-cartoon documentary look (soft semi-cartoon stylization), calm and factual, with clear real-world detail."
         )
+    elif sm == "bible":
+        style_line = (
+            "Style target: reverent painterly-biblical illustration (soft cinematic stylization), "
+            "ancient Near East authenticity, warm golden-hour light, temple courtyards, desert wadi, "
+            "scrolls and olive groves."
+        )
     parts = [
         "Create one high-quality cinematic still frame.",
         style_line,
@@ -1497,9 +1555,12 @@ def _mode5_append_chunk_render_rows(
     """Сегменты одного чанка в формате assemble_mode5_video (для превью чанка или одного финала)."""
     session_root = _session_dir(session_id)
     ch = plan["chunks"][chunk_index]
-    show_sub = bool(plan.get("show_subtitles", True))
     sm = (plan.get("sub_mode") or "").strip().lower()
+    show_sub = bool(plan.get("show_subtitles")) or _mode5_default_show_subtitles(sm)
     ci = int(ch.get("index", chunk_index))
+    chapter_modes = sm in ("bible", "outline", "book_night", "unwritten_chapter")
+    if sm == "bible":
+        apply_bible_chapter_labels(plan)
     for seg in ch.get("segments") or []:
         img_rel = str(seg.get("image") or "").strip()
         img = (session_root / img_rel) if img_rel else None
@@ -1534,7 +1595,9 @@ def _mode5_append_chunk_render_rows(
                 }
             )
         subtitle_texts.append(seg.get("text", "") if show_sub else "")
-        if sm == "facts50" and (bool(ch.get("is_intro")) or bool(ch.get("is_outro"))):
+        if chapter_modes:
+            label = _mode5_chapter_overlay_label(ch, plan, seg=seg)
+        elif sm == "facts50" and (bool(ch.get("is_intro")) or bool(ch.get("is_outro"))):
             label = ""
         else:
             label = (seg.get("overlay_title") or "").strip()
@@ -1745,8 +1808,9 @@ def _mode5_progress_hint_payload(session_id: str, plan: dict[str, Any]) -> dict[
     chunks = list(plan.get("chunks") or [])
     n_ch = len(chunks)
     seg_done, seg_total, ch_img, ch_w_seg = _mode5_segment_image_counts(session_root, plan)
-    prev_done = _mode5_previews_on_disk_count(session_root, chunks)
     readiness = mode5_preview_readiness(session_id, plan)
+    # UI progress must count playable previews (ffprobe), not truncated mp4 left by a killed worker.
+    prev_done = int(readiness.get("ready_count") or 0)
     ck = plan.get("pipeline_checkpoint")
     stage = (ck.get("stage") or "").strip() if isinstance(ck, dict) else ""
 
@@ -1806,7 +1870,14 @@ def _mode5_progress_hint_payload(session_id: str, plan: dict[str, Any]) -> dict[
         if bool(plan.get("skip_chunk_previews")):
             hint = "Финальная сборка длинного видео (без превью по частям)…"
         else:
-            hint = "Сборка превью по частям (короткие mp4 для проверки)…"
+            loose_on_disk = _mode5_previews_on_disk_count(session_root, chunks, strict=False)
+            if loose_on_disk > prev_done:
+                hint = (
+                    f"Сборка превью по частям: {prev_done} из {n_ch} готовы "
+                    f"({loose_on_disk - prev_done} файл(ов) на диске битые — пересобираем)…"
+                )
+            else:
+                hint = f"Сборка превью по частям: {prev_done} из {n_ch}…"
 
     phase = _mode5_ui_phase_from_metrics(
         has_final_mp4=False,
@@ -1835,6 +1906,19 @@ def _mode5_progress_hint_payload(session_id: str, plan: dict[str, Any]) -> dict[
     }
 
 
+def mark_mode5_generation_cancelled(session_id: str) -> dict[str, Any]:
+    """Пользователь отменил незавершённую генерацию — resume больше недоступен."""
+
+    def _mutate(plan: dict[str, Any]) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        plan["user_cancelled"] = True
+        plan["user_cancelled_at"] = now
+        plan["pipeline_paused"] = False
+        plan["await_intro_confirmation"] = False
+
+    return _update_mode5_plan_atomic(session_id, _mutate)
+
+
 def dismiss_mode5_review(session_id: str) -> dict[str, Any]:
     """Убрать сессию из сайдбара «Проверка» без финального монтажа (превью остаются на диске)."""
 
@@ -1853,6 +1937,8 @@ def mode5_resume_snapshot_for_plan(session_id: str, plan: dict[str, Any]) -> dic
     stage = _checkpoint_stage(plan)
     if bool(plan.get("review_dismissed")):
         return {"can_resume": False, "stage": stage, "reason": "review_dismissed"}
+    if bool(plan.get("user_cancelled")):
+        return {"can_resume": False, "stage": stage, "reason": "user_cancelled"}
     root = _session_dir(session_id)
     final_mp4 = root / "video_mode5.mp4"
     if final_mp4.is_file():
@@ -2329,6 +2415,7 @@ def _result_payload(
         "report": None,
         "publishing": plan.get("publishing") if isinstance(plan.get("publishing"), dict) else None,
         "mode5_publish_thumbnail": str(plan.get("publish_thumbnail_rel") or "").strip() or None,
+        "mode5_thumbnail_overlay_text": str(plan.get("thumbnail_overlay_text") or "").strip() or None,
         "mode5_review_ready": review_ready,
         "mode5_clip_filenames": preview_filenames if review_ready else [],
         "mode5_chunks_meta": [_chunk_meta_public(ch) for ch in chunks] if review_ready else [],
@@ -2341,7 +2428,9 @@ def _result_payload(
         "mode5_test_run": bool(plan.get("test_run")),
         "mode5_test_target_sec": plan.get("test_target_sec"),
         "mode5_block_loop_enabled": bool(_mode5_block_loop_applies(plan)),
-        "mode5_block_loop_pool_size": _mode5_block_loop_pool_size(),
+        "mode5_block_loop_pool_size": _mode5_block_loop_pool_size_for_plan(plan, session_id=session_id),
+        "mode5_block_loop_pool_size_requested": _mode5_user_block_loop_pool_from_plan(plan),
+        "mode5_block_loop_seconds": _mode5_block_loop_seconds_for_plan(plan),
         "mode5_await_intro_confirmation": bool(plan.get("await_intro_confirmation")),
         "mode5_intro_preview_video": plan.get("intro_preview_video"),
         "mode5_intro_preview_videos": list(plan.get("intro_preview_videos") or []),
@@ -2406,10 +2495,10 @@ async def _mode5_generate_publish_assets(
     session_root = _session_dir(session_id)
     m5dir = _mode5_dir(session_id)
     m5dir.mkdir(parents=True, exist_ok=True)
+    sub_mode = normalize_mode5_sub_mode(plan.get("sub_mode"))
     topic = re.sub(r"\s+", " ", str(plan.get("header_title") or plan.get("facts_topic") or "").strip())
     if not topic:
-        topic = "Sleep long-form video"
-    sub_mode = normalize_mode5_sub_mode(plan.get("sub_mode"))
+        topic = "Bible Scripture Reading" if sub_mode == "bible" else "Sleep long-form video"
     excerpt = _mode5_script_excerpt_for_publish(plan)
     duration_min = _mode5_duration_minutes(plan)
 
@@ -2441,10 +2530,16 @@ async def _mode5_generate_publish_assets(
         return
 
     from agents.content_generator import fastgen_playwright
+    from modes.mode5.publishing_metadata import resolve_mode5_bible_thumbnail_figure_ref
 
     try:
         cover_ref: Path | None = None
-        if (
+        figure_ref: Path | None = None
+        if sub_mode == "bible":
+            figure_ref = resolve_mode5_bible_thumbnail_figure_ref()
+            if figure_ref is not None:
+                logger.info("[Mode5] Bible thumbnail: using central-figure reference {}", figure_ref.name)
+        elif (
             sub_mode in ("book_night", "unwritten_chapter")
             and bool(getattr(settings, "mode5_thumbnail_openlibrary_cover", True))
         ):
@@ -2463,9 +2558,17 @@ async def _mode5_generate_publish_assets(
             sub_mode=sub_mode,
             script_excerpt=excerpt,
             use_reference_cover=cover_ref is not None,
+            use_reference_figure=figure_ref is not None,
+            overlay_text=str(plan.get("thumbnail_overlay_text") or "").strip() or None,
         )
         thumb_prompt = _mode5_clean_prompt_text(thumb_prompt)
-        if cover_ref is not None:
+        if figure_ref is not None:
+            generated = await fastgen_playwright.generate_images_with_references_fastgen(
+                [(thumb_prompt, [figure_ref])],
+                m5dir,
+                parallel=False,
+            )
+        elif cover_ref is not None:
             generated = await fastgen_playwright.generate_images_with_references_fastgen(
                 [(thumb_prompt, [cover_ref])],
                 m5dir,
@@ -2811,6 +2914,16 @@ def _mode5_block_loop_applies(plan: dict[str, Any]) -> bool:
     return bool(sm)
 
 
+def _mode5_skip_segment_images_for_block_loop(plan: dict[str, Any]) -> bool:
+    """
+    Per-segment JPEGs are redundant when block-loop uses still→motion:
+    one hero still + one short MP4 per block replaces dozens of img_c*_s*.jpg.
+    """
+    if not _mode5_block_loop_applies(plan):
+        return False
+    return bool(getattr(settings, "mode5_block_loop_still_then_animate", True))
+
+
 def _mode5_submode_animation_directive(sub_mode: str | None) -> str:
     sm = normalize_mode5_sub_mode(sub_mode)
     if sm == "facts50":
@@ -2866,30 +2979,45 @@ async def _mode5_animate_still_to_motion_clip(
         return None
 
     async def _from_keyframes() -> Path | None:
-        if backend == "api":
-            raw = await fastgen_http.generate_video_from_keyframes(
-                motion_prompt,
-                output_dir,
-                still,
-                still,
-                index=clip_index,
-                cancel_event=cancel_event,
-                flow_max_attempts=flow_n,
-                video_aspect_ratio=aspect,
-            )
-        else:
-            raw = await fastgen_playwright.generate_video_from_keyframes(
-                motion_prompt,
-                output_dir,
-                still,
-                still,
-                index=clip_index,
-                cancel_event=cancel_event,
-                flow_max_attempts=flow_n,
-                video_aspect_ratio=aspect,
-            )
-        p = Path(raw) if raw else None
-        return p if p and p.is_file() else None
+        http_base = (getattr(settings, "fastgen_http_base_url", None) or "").strip()
+        backends: list[str] = []
+        if http_base:
+            backends.append("api")
+        if backend == "api" and "api" not in backends:
+            backends.append("api")
+        if backend == "playwright":
+            backends.append("playwright")
+        if not backends:
+            backends.append(backend if backend in {"api", "playwright"} else "playwright")
+
+        for kind in backends:
+            if kind == "api":
+                raw = await fastgen_http.generate_video_from_keyframes(
+                    motion_prompt,
+                    output_dir,
+                    still,
+                    still,
+                    index=clip_index,
+                    cancel_event=cancel_event,
+                    flow_max_attempts=flow_n,
+                    video_aspect_ratio=aspect,
+                )
+            else:
+                raw = await fastgen_playwright.generate_video_from_keyframes(
+                    motion_prompt,
+                    output_dir,
+                    still,
+                    still,
+                    index=clip_index,
+                    cancel_event=cancel_event,
+                    flow_max_attempts=flow_n,
+                    video_aspect_ratio=aspect,
+                )
+            p = Path(raw) if raw else None
+            if p and p.is_file():
+                logger.info("[Mode5] still→motion clip {} via keyframes ({})", clip_index, kind)
+                return p
+        return None
 
     async def _from_single_ref() -> Path | None:
         if backend == "api":
@@ -2919,21 +3047,21 @@ async def _mode5_animate_still_to_motion_clip(
 
     clip = await _from_keyframes()
     if clip:
-        logger.info(
-            "[Mode5] still→motion clip {} via keyframes (start=end={})",
-            clip_index,
-            still.name,
-        )
         return clip
-    logger.warning(
-        "[Mode5] still→motion clip {}: keyframes failed after {} attempts; trying normal+reference",
+    if bool(getattr(settings, "mode5_still_motion_normal_fallback", False)):
+        logger.warning(
+            "[Mode5] still→motion clip {}: keyframes failed; MODE5_STILL_MOTION_NORMAL_FALLBACK=true — trying normal+reference",
+            clip_index,
+        )
+        clip = await _from_single_ref()
+        if clip:
+            logger.info("[Mode5] still→motion clip {} via Flow+reference (fallback)", clip_index)
+        return clip
+    logger.error(
+        "[Mode5] still→motion clip {}: keyframes failed (no normal+reference fallback; set MODE5_STILL_MOTION_NORMAL_FALLBACK=true to enable)",
         clip_index,
-        flow_n,
     )
-    clip = await _from_single_ref()
-    if clip:
-        logger.info("[Mode5] still→motion clip {} via Flow+reference (fallback)", clip_index)
-    return clip
+    return None
 
 
 async def _mode5_animate_still_preview_clip(
@@ -3720,9 +3848,143 @@ def _mode5_block_rows_max_image_mtime(
     return latest
 
 
+def _mode5_clamp_block_loop_pool_size(n: int) -> int:
+    return max(1, min(20, int(n)))
+
+
+def _mode5_stamp_user_block_loop_pool(plan: dict[str, Any], user_pool_size: int | None) -> None:
+    if user_pool_size is None:
+        return
+    n = _mode5_clamp_block_loop_pool_size(user_pool_size)
+    plan["block_loop_pool_size"] = n
+    plan["block_loop_pool_size_user"] = n
+
+
+def _mode5_user_block_loop_pool_from_plan(plan: dict[str, Any]) -> int | None:
+    raw = plan.get("block_loop_pool_size_user")
+    if raw is None:
+        return None
+    try:
+        return _mode5_clamp_block_loop_pool_size(int(raw))
+    except (TypeError, ValueError):
+        return None
+
+
 def _mode5_block_loop_pool_size() -> int:
     n = int(getattr(settings, "mode5_block_loop_pool_size", 5) or 5)
     return max(1, min(20, n))
+
+
+def _mode5_estimated_plan_speech_sec(plan: dict[str, Any]) -> float:
+    """Rough total narration length for block-loop pool sizing (before/without full TTS)."""
+    language = str(plan.get("language") or "ru").strip() or "ru"
+    chunks = list(plan.get("chunks") or [])
+    texts: list[str] = []
+    for ch in chunks:
+        t = re.sub(r"\s+", " ", str(ch.get("text") or "").strip())
+        if t:
+            texts.append(t)
+    if texts:
+        return sum(mode5_approx_speech_sec(t, language) for t in texts)
+    script = re.sub(
+        r"\s+",
+        " ",
+        str(plan.get("script_text") or plan.get("source_input_text") or "").strip(),
+    )
+    if script:
+        return mode5_approx_speech_sec(script, language)
+    return 0.0
+
+
+def _mode5_block_loop_seconds_for_plan(plan: dict[str, Any]) -> float:
+    stored = plan.get("block_loop_seconds")
+    if stored is not None:
+        try:
+            v = float(stored)
+            return max(60.0, min(14400.0, v))
+        except (TypeError, ValueError):
+            pass
+    sm = normalize_mode5_sub_mode(plan.get("sub_mode"))
+    if sm == "bible":
+        v = float(getattr(settings, "mode5_bible_block_loop_seconds", 600.0) or 600.0)
+    else:
+        v = float(getattr(settings, "mode5_block_loop_seconds", 1800.0) or 1800.0)
+    return max(60.0, min(14400.0, v))
+
+
+def _mode5_actual_plan_audio_sec(session_id: str, plan: dict[str, Any]) -> float:
+    """Sum segment WAV durations when available (more accurate than word-count estimate)."""
+    session_root = _session_dir(session_id)
+    total = 0.0
+    found = False
+    for ch in plan.get("chunks") or []:
+        dur = ch.get("duration_sec")
+        if dur is not None:
+            try:
+                d = float(dur)
+                if d > 0:
+                    total += d
+                    found = True
+                    continue
+            except (TypeError, ValueError):
+                pass
+        for seg in ch.get("segments") or []:
+            aud_rel = str(seg.get("audio") or "").strip()
+            if not aud_rel:
+                continue
+            ap = session_root / aud_rel
+            if not ap.is_file():
+                continue
+            total += _wav_duration_sec(ap)
+            found = True
+    return total if found else 0.0
+
+
+def _mode5_block_loop_needed_blocks(plan: dict[str, Any], *, session_id: str | None = None) -> int:
+    block_sec = _mode5_block_loop_seconds_for_plan(plan)
+    actual_sec = _mode5_actual_plan_audio_sec(session_id, plan) if session_id else 0.0
+    est_sec = _mode5_estimated_plan_speech_sec(plan)
+    basis_sec = actual_sec if actual_sec > 0 else est_sec
+    if basis_sec <= 0:
+        basis_sec = block_sec
+    return max(1, int(math.ceil(basis_sec / block_sec)))
+
+
+def _mode5_block_loop_pool_size_for_plan(plan: dict[str, Any], *, session_id: str | None = None) -> int:
+    needed = _mode5_block_loop_needed_blocks(plan, session_id=session_id)
+    user = _mode5_user_block_loop_pool_from_plan(plan)
+    actual_sec = _mode5_actual_plan_audio_sec(session_id, plan) if session_id else 0.0
+
+    if user is not None:
+        # User sets how many clips to generate; after TTS only min(requested, needed) are used.
+        if actual_sec > 0:
+            return min(user, needed)
+        return user
+
+    sm = normalize_mode5_sub_mode(plan.get("sub_mode"))
+    stored = plan.get("block_loop_pool_size")
+    if stored is not None:
+        try:
+            stored_n = max(1, min(20, int(stored)))
+            # After TTS: never shrink below what real audio timeline requires.
+            if sm == "bible" and actual_sec > 0:
+                return max(stored_n, min(needed, 20))
+            return stored_n
+        except (TypeError, ValueError):
+            pass
+    if sm != "bible":
+        return _mode5_block_loop_pool_size()
+    if bool(plan.get("test_run")):
+        return 1
+    cap = int(getattr(settings, "mode5_bible_block_loop_pool_size", 20) or 20)
+    cap = max(1, min(20, cap))
+    return max(1, min(needed, cap))
+
+
+def _apply_mode5_block_loop_timing_to_plan(plan: dict[str, Any], *, session_id: str | None = None) -> None:
+    """Persist block-loop cadence on the plan (Bible: 30 min slots + pool sized to script length)."""
+    plan["block_loop_seconds"] = _mode5_block_loop_seconds_for_plan(plan)
+    plan["block_loop_pool_size"] = _mode5_block_loop_pool_size_for_plan(plan, session_id=session_id)
 
 
 async def _ensure_mode5_block_loop_videos(
@@ -3778,9 +4040,17 @@ async def _ensure_mode5_block_loop_videos(
                     pass
 
     chunks = sorted(plan.get("chunks") or [], key=lambda c: int(c.get("index") or 0))
-    block_sec = float(getattr(settings, "mode5_block_loop_seconds", 1800.0) or 1800.0)
-    block_sec = max(60.0, min(14400.0, block_sec))
-    pool_size = _mode5_block_loop_pool_size()
+    _apply_mode5_block_loop_timing_to_plan(plan, session_id=session_id)
+    block_sec = _mode5_block_loop_seconds_for_plan(plan)
+    pool_size = _mode5_block_loop_pool_size_for_plan(plan, session_id=session_id)
+    sm_loop = normalize_mode5_sub_mode(plan.get("sub_mode"))
+    if sm_loop == "bible":
+        logger.info(
+            "[Mode5] bible block-loop cadence: {:.0f}s per animated clip, pool_size={} (est speech {:.0f}s)",
+            block_sec,
+            pool_size,
+            _mode5_estimated_plan_speech_sec(plan),
+        )
     # In test mode we must keep exactly one animated block.
     if bool(plan.get("test_run")):
         pool_size = 1
@@ -3828,7 +4098,7 @@ async def _ensure_mode5_block_loop_videos(
         p = session_root / rel
         if p.is_file():
             intro_pool_existing.append(rel)
-    if intro_pool_existing and not force:
+    if intro_pool_existing and not force and timeline:
         normalized_intro_pool: list[str] = []
         for idx, src_rel in enumerate(intro_pool_existing):
             src_abs = session_root / src_rel
@@ -3856,17 +4126,38 @@ async def _ensure_mode5_block_loop_videos(
             normalized_intro_pool.append(norm_rel)
         if not normalized_intro_pool:
             normalized_intro_pool = intro_pool_existing
+        needed_blocks = max(1, int(math.ceil(cumulative / block_sec))) if cumulative > 0 else 1
+        effective_slots = min(len(normalized_intro_pool), needed_blocks, pool_size)
+        active_intro_pool = normalized_intro_pool[:effective_slots]
+        if len(normalized_intro_pool) > effective_slots:
+            logger.info(
+                "[Mode5] Using {}/{} approved intro clip(s) for {:.0f}s audio ({:.0f}s per block)",
+                effective_slots,
+                len(normalized_intro_pool),
+                cumulative,
+                block_sec,
+            )
+        if needed_blocks > len(normalized_intro_pool):
+            logger.warning(
+                "[Mode5] Approved intro pool has {} clip(s) but audio needs {} block(s) "
+                "({:.0f}s / {:.0f}s); extra blocks reuse the last approved clip",
+                len(normalized_intro_pool),
+                needed_blocks,
+                cumulative,
+                block_sec,
+            )
         for ch, seg, t0, _dur in timeline:
             bid_raw = int(t0 // block_sec)
-            bid = min(bid_raw, max(0, pool_size - 1))
-            src_rel = normalized_intro_pool[min(bid, len(normalized_intro_pool) - 1)]
+            bid = min(bid_raw, max(0, effective_slots - 1))
+            src_rel = active_intro_pool[bid]
             seg["video"] = src_rel
             seg["asset_type"] = "video"
             ch["block_loop_id"] = int(bid)
         mode_tag = "test run" if bool(plan.get("test_run")) else "standard run"
         logger.info(
-            "[Mode5] {}: reusing approved intro preview pool as block-loop source(s), count={}",
+            "[Mode5] {}: reusing approved intro preview pool as block-loop source(s), active={} of {}",
             mode_tag,
+            effective_slots,
             len(normalized_intro_pool),
         )
         return
@@ -4115,16 +4406,25 @@ async def _ensure_mode5_block_loop_videos(
                     bid,
                     smart_err,
                 )
+                if still_path.is_file() and (
+                    not img_a or not img_a.is_file()
+                ):
+                    img_a = still_path
+                    img_b = still_path
 
         if motion_ok:
             return
 
         if not img_a or not img_b or (not img_a.is_file()) or (not img_b.is_file()):
-            logger.warning("[Mode5] Block loop {}: нет keyframe-изображений, оставляем image", bid)
-            for _ch, seg, _t0, _d in rows:
-                seg.pop("video", None)
-                seg.pop("asset_type", None)
-            return
+            if still_path.is_file():
+                img_a = still_path
+                img_b = still_path
+            else:
+                logger.warning("[Mode5] Block loop {}: нет keyframe-изображений, оставляем image", bid)
+                for _ch, seg, _t0, _d in rows:
+                    seg.pop("video", None)
+                    seg.pop("asset_type", None)
+                return
 
         prompt = _build_mode5_block_loop_video_prompt(
             sub_mode=plan.get("sub_mode"),
@@ -4171,9 +4471,14 @@ async def _ensure_mode5_block_loop_videos(
                 raise RuntimeError("empty path")
         except Exception as err:
             logger.warning("[Mode5] Block loop {}: генерация не удалась — image: {}", bid, err)
+            still_rel = _rel_session(session_root, still_path) if still_path.is_file() else ""
             for _ch, seg, _t0, _d in rows:
                 seg.pop("video", None)
-                seg.pop("asset_type", None)
+                if still_rel:
+                    seg["asset_type"] = "image"
+                    seg["image"] = still_rel
+                else:
+                    seg.pop("asset_type", None)
 
     await asyncio.gather(*[_process_block_loop(bid) for bid in block_ids])
 
@@ -4202,6 +4507,8 @@ def _build_chunk_preview_sync(session_id: str, chunk_index: int, plan: dict[str,
         subtitle_texts=subtitle_texts,
         top_labels=top_labels,
         facts50_static_still=use_static,
+        chapter_overlay_layout=bool(plan.get("show_subtitles"))
+        or _mode5_default_show_subtitles(plan.get("sub_mode")),
     )
     return out_mp4
 
@@ -4232,6 +4539,8 @@ def _build_mode5_final_direct_sync(session_id: str, plan: dict[str, Any]) -> Pat
         subtitle_texts=subtitle_texts,
         top_labels=top_labels,
         facts50_static_still=use_static,
+        chapter_overlay_layout=bool(plan.get("show_subtitles"))
+        or _mode5_default_show_subtitles(plan.get("sub_mode")),
     )
     return out_mp4
 
@@ -4244,16 +4553,44 @@ def _mode5_refresh_final_video_from_plan_sync(session_id: str, plan: dict[str, A
     return _append_mode5_sleep_tail(session_id, plan, final_path)
 
 
+def _mode5_chunk_preview_needs_build(session_id: str, chunk_index: int, plan: dict[str, Any]) -> bool:
+    """True when preview mp4 is missing or corrupt (e.g. process killed mid-write, no moov atom)."""
+    chunks = plan.get("chunks") or []
+    if chunk_index < 0 or chunk_index >= len(chunks):
+        return False
+    rel = str(chunks[chunk_index].get("preview_relpath") or "").strip()
+    if not rel:
+        return True
+    path = _session_dir(session_id) / rel
+    if not _mode5_preview_file_ready(path, strict=True):
+        if path.is_file():
+            logger.warning("[Mode5] Chunk {} preview invalid or truncated — rebuilding {}", chunk_index, path)
+        return True
+    return False
+
+
 def _build_all_chunk_previews_parallel(session_id: str, plan: dict[str, Any]) -> None:
     chunks = plan.get("chunks") or []
     if not chunks:
         return
-    if _mode5_sequential_chunks(plan):
+    pending = [i for i in range(len(chunks)) if _mode5_chunk_preview_needs_build(session_id, i, plan)]
+    if not pending:
         for idx in range(len(chunks)):
+            chunks[idx]["preview_ready"] = True
+        _save_mode5_plan(session_id, plan)
+        return
+    logger.info("[Mode5] Building chunk previews: {} pending of {}", len(pending), len(chunks))
+
+    def _mark_preview_ready(idx: int) -> None:
+        if 0 <= idx < len(chunks):
+            chunks[idx]["preview_ready"] = True
+            chunks[idx]["preview_status"] = "ready"
+            _save_mode5_plan(session_id, plan)
+
+    if _mode5_sequential_chunks(plan):
+        for idx in pending:
             _build_chunk_preview_sync(session_id, idx, plan)
-            if 0 <= idx < len(chunks):
-                chunks[idx]["preview_ready"] = True
-                _save_mode5_plan(session_id, plan)
+            _mark_preview_ready(idx)
         return
     workers = _mode5_chunk_lane_parallel(
         int(getattr(settings, "mode5_preview_mp4_workers", 16) or 16),
@@ -4261,16 +4598,12 @@ def _build_all_chunk_previews_parallel(session_id: str, plan: dict[str, Any]) ->
     )
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futs = {
-            executor.submit(_build_chunk_preview_sync, session_id, idx, plan): idx
-            for idx in range(len(chunks))
+            executor.submit(_build_chunk_preview_sync, session_id, idx, plan): idx for idx in pending
         }
         for fut in as_completed(futs):
             idx = futs[fut]
             fut.result()
-            if 0 <= idx < len(chunks):
-                chunks[idx]["preview_ready"] = True
-                # Persist incremental progress so UI can show ready clips while pipeline is still running.
-                _save_mode5_plan(session_id, plan)
+            _mark_preview_ready(idx)
 
 
 def _rebuild_mode5_missing_previews(session_id: str, plan: dict[str, Any]) -> int:
@@ -4831,16 +5164,22 @@ async def _revoice_chunk(
         chunk["segments"] = _segments_for_chunk(visible_text, dur, segment_seconds, wts, words)
     _rebuild_chunk_segment_paths(session_id, chunk)
     locked_style = _ensure_mode5_style_lock(plan)
-    await _generate_chunk_images(
-        session_id,
-        chunk,
-        locked_style,
-        sub_mode=normalize_mode5_sub_mode(plan.get("sub_mode")),
-        max_parallel_images=max_parallel_images,
-        image_backend=plan.get("image_backend"),
-        refresh_all=True,
-        topic_seed_override=str(plan.get("facts_topic") or plan.get("header_title") or ""),
-    )
+    if not _mode5_skip_segment_images_for_block_loop(plan):
+        await _generate_chunk_images(
+            session_id,
+            chunk,
+            locked_style,
+            sub_mode=normalize_mode5_sub_mode(plan.get("sub_mode")),
+            max_parallel_images=max_parallel_images,
+            image_backend=plan.get("image_backend"),
+            refresh_all=True,
+            topic_seed_override=str(plan.get("facts_topic") or plan.get("header_title") or ""),
+        )
+    else:
+        logger.info(
+            "[Mode5] Regenerate chunk {}: skip segment JPEGs (block-loop still→motion)",
+            chunk_index,
+        )
     _render_chunk_audio_slices(session_id, chunk)
     if _mode5_block_loop_applies(plan):
         await _ensure_mode5_block_loop_videos(session_id, plan, force=True)
@@ -4894,6 +5233,9 @@ async def run_mode5_pipeline(
     video_header_title: str | None = None,
     bible_mode: bool = False,
     sub_mode: str = "manual",
+    bible_chapters: list[dict[str, Any]] | None = None,
+    block_loop_pool_size: int | None = None,
+    thumbnail_overlay_text: str | None = None,
     test_run: bool = False,
     test_duration_sec: int = 300,
     control: dict | None = None,
@@ -4911,6 +5253,15 @@ async def run_mode5_pipeline(
         sm = "manual"
     if sm == "manual" and bible_mode:
         sm = "bible"
+
+    user_block_loop_pool_size: int | None = None
+    if block_loop_pool_size is not None:
+        try:
+            user_block_loop_pool_size = _mode5_clamp_block_loop_pool_size(block_loop_pool_size)
+        except (TypeError, ValueError):
+            user_block_loop_pool_size = None
+
+    thumbnail_overlay_stripped = re.sub(r"\s+", " ", (thumbnail_overlay_text or "").strip()) or None
 
     test_target = max(60, min(7200, int(test_duration_sec or 300)))
     gen_control = dict(control or {})
@@ -5034,15 +5385,64 @@ async def run_mode5_pipeline(
         )
     await checkpoint(control)
 
+    outline_labels: list[tuple[str, str]] = []
+    bible_locked_labels = False
     if sm not in ("facts50", "outline", "book_night", "unwritten_chapter"):
-        chunk_texts = _estimate_chunks_from_script(script_clean, language=language, chunk_seconds=chunk_sec)
-        if not chunk_texts:
-            raise ValueError(
-                "Mode 5 (ручной текст): не удалось разбить сценарий на чанки для озвучки. "
-                "Убедитесь, что в тексте есть обычные слова (не один набор символов без пробелов), "
-                "или добавьте абзацы — и попробуйте снова."
-            )
-        logger.info(f"[Mode5] Planned {len(chunk_texts)} chunk(s) from manual script")
+        if sm == "bible":
+            explicit = [
+                dict(x)
+                for x in (bible_chapters or [])
+                if isinstance(x, dict) and str(x.get("text") or "").strip()
+            ]
+            if explicit:
+                bible_slices = build_bible_slices_from_explicit_chapters(explicit)
+                if not bible_slices:
+                    raise ValueError(
+                        "Mode 5 (Bible): добавьте хотя бы одну главу с текстом для озвучки."
+                    )
+                chunk_texts = [s.text for s in bible_slices]
+                outline_labels = [(s.label, "") for s in bible_slices]
+                bible_locked_labels = True
+                logger.info(
+                    "[Mode5] Bible: {} explicit chapter part(s): {}",
+                    len(chunk_texts),
+                    ", ".join(s.label for s in bible_slices[:8])
+                    + ("…" if len(bible_slices) > 8 else ""),
+                )
+            elif bool(getattr(settings, "mode5_bible_split_by_chapter", True)):
+                bible_slices = split_script_into_bible_chapters(script_clean)
+                if not bible_slices:
+                    raise ValueError(
+                        "Mode 5 (Bible): не удалось разбить текст на главы. "
+                        "Добавьте заголовки «Chapter N» или вставьте текст с узнаваемым началом главы."
+                    )
+                chunk_texts = [s.text for s in bible_slices]
+                outline_labels = [(s.label, "") for s in bible_slices]
+                bible_locked_labels = True
+                logger.info(
+                    "[Mode5] Bible: {} chapter part(s) for parallel TTS: {}",
+                    len(chunk_texts),
+                    ", ".join(s.label for s in bible_slices[:8])
+                    + ("…" if len(bible_slices) > 8 else ""),
+                )
+            else:
+                chunk_texts = _estimate_chunks_from_script(script_clean, language=language, chunk_seconds=chunk_sec)
+                if not chunk_texts:
+                    raise ValueError(
+                        "Mode 5 (ручной текст): не удалось разбить сценарий на чанки для озвучки. "
+                        "Убедитесь, что в тексте есть обычные слова (не один набор символов без пробелов), "
+                        "или добавьте абзацы — и попробуйте снова."
+                    )
+                logger.info(f"[Mode5] Planned {len(chunk_texts)} chunk(s) from manual script")
+        else:
+            chunk_texts = _estimate_chunks_from_script(script_clean, language=language, chunk_seconds=chunk_sec)
+            if not chunk_texts:
+                raise ValueError(
+                    "Mode 5 (ручной текст): не удалось разбить сценарий на чанки для озвучки. "
+                    "Убедитесь, что в тексте есть обычные слова (не один набор символов без пробелов), "
+                    "или добавьте абзацы — и попробуйте снова."
+                )
+            logger.info(f"[Mode5] Planned {len(chunk_texts)} chunk(s) from manual script")
 
     mode_key = normalize_mode5_sub_mode(sm)
     style_suffix = mode5_style_lock_for_sub_mode(mode_key)
@@ -5051,7 +5451,6 @@ async def run_mode5_pipeline(
     style_id = mode5_style_id_for_sub_mode(mode_key)
     await checkpoint(control)
 
-    outline_labels: list[tuple[str, str]] = []
     unwritten_anchor_map: dict[int, dict[str, str]] = {}
     if sm in ("outline", "book_night", "unwritten_chapter") and isinstance(outline_doc, dict):
         from modes.mode5.outline_generator import get_chunk_outline_labels
@@ -5106,7 +5505,6 @@ async def run_mode5_pipeline(
         if bool(sm):
             style_lock_pre = re.sub(r"\s+", " ", (mode5_style_lock_for_sub_mode(normalize_mode5_sub_mode(sm)) or "").strip())
             header_stripped_pre = (video_header_title or "").strip() or None
-            pre_pool_size = 1 if bool(test_run) else _mode5_block_loop_pool_size()
             pre_backend = _normalize_mode5_image_backend(
                 image_backend if image_backend is not None else getattr(settings, "mode5_image_backend", "playwright")
             )
@@ -5129,6 +5527,8 @@ async def run_mode5_pipeline(
                         row["fact_hint"] = str(facts_outline[i - 1] or "").strip()
                     else:
                         row["fact_hint"] = text_stub
+                elif sm == "bible" and i < len(outline_labels):
+                    row["chapter_title"] = outline_labels[i][0]
                 pre_chunks.append(row)
             pre_plan: dict[str, Any] = {
                 "version": 1,
@@ -5136,7 +5536,7 @@ async def run_mode5_pipeline(
                 "script_text": topic_input,
                 "source_input_text": topic_input,
                 "language": language,
-                "show_subtitles": False,
+                "show_subtitles": _mode5_default_show_subtitles(sm),
                 "chunk_seconds": max(120, min(900, int(chunk_seconds or CHUNK_SEC_DEFAULT))),
                 "segment_seconds": max(10, min(90, int(segment_seconds or SEG_SEC_DEFAULT))),
                 "max_parallel_images": _clamp_mode5_parallel_images(max_parallel_images),
@@ -5144,7 +5544,17 @@ async def run_mode5_pipeline(
                     image_backend if image_backend is not None else getattr(settings, "mode5_image_backend", "playwright")
                 ),
                 "header_title": header_stripped_pre,
+                "thumbnail_overlay_text": thumbnail_overlay_stripped,
                 "bible_mode": sm == "bible",
+                "bible_locked_labels": bool(bible_locked_labels and sm == "bible"),
+                "bible_chapters": (
+                    [
+                        {"overlay_label": ol[0], "text": txt}
+                        for ol, txt in zip(outline_labels, chunk_texts)
+                    ]
+                    if bible_locked_labels and sm == "bible"
+                    else None
+                ),
                 "sub_mode": sm,
                 "facts_topic": topic_input if sm in ("facts50", "book_night", "unwritten_chapter") else None,
                 "style_suffix": style_lock_pre,
@@ -5161,6 +5571,19 @@ async def run_mode5_pipeline(
                 "test_target_sec": int(test_target) if bool(test_run) else None,
                 "chunks": pre_chunks,
             }
+            _mode5_stamp_user_block_loop_pool(pre_plan, user_block_loop_pool_size)
+            _apply_mode5_block_loop_timing_to_plan(pre_plan)
+            if bool(test_run):
+                pre_pool_size = 1
+                pre_plan["block_loop_pool_size"] = 1
+            else:
+                pre_pool_size = int(pre_plan.get("block_loop_pool_size") or 1)
+            if sm == "bible":
+                logger.info(
+                    "[Mode5] bible intro preflight: {:.0f}s per slot, {} preview clip(s) to confirm",
+                    float(pre_plan.get("block_loop_seconds") or 1800),
+                    pre_pool_size,
+                )
             _save_mode5_plan(session_id, pre_plan, checkpoint=MODE5_CKPT_STUB)
             effective_intro_backend = pre_backend
             try:
@@ -5212,7 +5635,10 @@ async def run_mode5_pipeline(
                 _result_payload(session_id, pre_plan, review_ready=False),
             )
             waiting["mode5_progress_hint"] = (
-                "Сначала проверьте анимированные превью. После подтверждения начнётся генерация фактов/текста, озвучки и монтажа."
+                "Сначала проверьте анимированное превью (один block-loop на ~30 мин). "
+                "После подтверждения — озвучка по главам и сборка без лишних JPEG по сегментам."
+                if sm == "bible"
+                else "Сначала проверьте анимированные превью. После подтверждения начнётся генерация фактов/текста, озвучки и монтажа."
             )
             waiting["mode5_waiting_confirmation"] = True
             return waiting
@@ -5250,6 +5676,7 @@ async def run_mode5_pipeline(
             "max_parallel_images": mpi,
             "image_backend": ib,
             "header_title": header_stripped,
+            "thumbnail_overlay_text": thumbnail_overlay_stripped,
             "bible_mode": False,
             "sub_mode": sm,
             "facts_topic": topic_input,
@@ -5297,13 +5724,23 @@ async def run_mode5_pipeline(
             "session_id": session_id,
             "script_text": script_clean,
             "language": language,
-            "show_subtitles": False,
+            "show_subtitles": _mode5_default_show_subtitles(sm),
             "chunk_seconds": chunk_sec,
             "segment_seconds": seg_sec,
             "max_parallel_images": mpi,
             "image_backend": ib,
             "header_title": header_stripped,
+            "thumbnail_overlay_text": thumbnail_overlay_stripped,
             "bible_mode": sm == "bible",
+            "bible_locked_labels": bool(bible_locked_labels and sm == "bible"),
+            "bible_chapters": (
+                [
+                    {"overlay_label": ol[0], "text": txt}
+                    for ol, txt in zip(outline_labels, chunk_texts)
+                ]
+                if bible_locked_labels and sm == "bible"
+                else None
+            ),
             "sub_mode": sm,
             "facts_topic": (
                 topic_input.strip() if sm in ("book_night", "unwritten_chapter") and topic_input else None
@@ -5322,6 +5759,8 @@ async def run_mode5_pipeline(
             "skip_chunk_previews": bool(skip_chunk_previews),
             "sequential_chunks": bool(sequential_chunks),
         }
+        _mode5_stamp_user_block_loop_pool(stub_plan_lf, user_block_loop_pool_size)
+        _apply_mode5_block_loop_timing_to_plan(stub_plan_lf)
         _save_mode5_plan(session_id, stub_plan_lf, checkpoint=MODE5_CKPT_STUB)
 
     chunks_plan: list[dict[str, Any]] = []
@@ -5408,17 +5847,24 @@ async def run_mode5_pipeline(
                     f"[Mode5 facts50] Images chunk {idx + 1}/{len(chunks_plan)} "
                     f"({len(ch.get('segments') or [])} window(s))"
                 )
-                await _generate_chunk_images(
-                    session_id,
-                    ch,
-                    style_suffix,
-                    sub_mode=mode_key,
-                    max_parallel_images=mpi,
-                    image_backend=plan.get("image_backend"),
-                    refresh_all=True,
-                    topic_seed_override=str(plan.get("facts_topic") or plan.get("header_title") or ""),
-                    cancel_event=fg_cancel_event,
-                )
+                if _mode5_skip_segment_images_for_block_loop(plan):
+                    logger.info(
+                        "[Mode5 facts50] Chunk {}/{}: skip segment JPEGs (block-loop still→motion)",
+                        idx + 1,
+                        len(chunks_plan),
+                    )
+                else:
+                    await _generate_chunk_images(
+                        session_id,
+                        ch,
+                        style_suffix,
+                        sub_mode=mode_key,
+                        max_parallel_images=mpi,
+                        image_backend=plan.get("image_backend"),
+                        refresh_all=True,
+                        topic_seed_override=str(plan.get("facts_topic") or plan.get("header_title") or ""),
+                        cancel_event=fg_cancel_event,
+                    )
                 _save_mode5_plan(
                     session_id, plan, checkpoint=MODE5_CKPT_AFTER_IMAGES, chunk_index=idx
                 )
@@ -5486,7 +5932,12 @@ async def run_mode5_pipeline(
                 "preview_ready": False,
                 "segments": segs,
             }
-            if sm in ("outline", "book_night", "unwritten_chapter") and ci < len(outline_labels):
+            if sm == "bible" and ci < len(outline_labels):
+                ch_label = outline_labels[ci][0]
+                ch_entry["chapter_title"] = ch_label
+                for seg in segs:
+                    seg["chapter_label"] = ch_label
+            elif sm in ("outline", "book_night", "unwritten_chapter") and ci < len(outline_labels):
                 ch_entry["chapter_title"] = outline_labels[ci][0]
                 ch_entry["subchapter_title"] = outline_labels[ci][1]
             if sm == "unwritten_chapter":
@@ -5499,27 +5950,38 @@ async def run_mode5_pipeline(
                     if val:
                         ch_entry[key] = val
             _rebuild_chunk_segment_paths(session_id, ch_entry)
+            if sm == "bible":
+                apply_bible_chapter_labels(plan)
             chunks_plan[ci] = ch_entry
             _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_TTS, chunk_index=ci)
 
             async with sem_img:
-                logger.info(
-                    f"[Mode5] Chunk {ci + 1}/{len(chunk_texts)}: image generation for {len(ch_entry['segments'])} window(s)"
-                )
-                images_started = time.monotonic()
-                await _generate_chunk_images(
-                    session_id,
-                    ch_entry,
-                    style_suffix,
-                    sub_mode=mode_key,
-                    max_parallel_images=mpi,
-                    image_backend=plan.get("image_backend"),
-                    refresh_all=True,
-                    topic_seed_override=str(plan.get("facts_topic") or plan.get("header_title") or ""),
-                    cancel_event=fg_cancel_event,
-                )
-                _record_mode5_operation_seconds(plan, "images_longform", images_started, count=1)
-                _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_IMAGES, chunk_index=ci)
+                n_seg = len(ch_entry.get("segments") or [])
+                if _mode5_skip_segment_images_for_block_loop(plan):
+                    logger.info(
+                        "[Mode5] Chunk {}/{}: skip {} segment JPEG(s) — block-loop still→motion",
+                        ci + 1,
+                        len(chunk_texts),
+                        n_seg,
+                    )
+                else:
+                    logger.info(
+                        f"[Mode5] Chunk {ci + 1}/{len(chunk_texts)}: image generation for {n_seg} window(s)"
+                    )
+                    images_started = time.monotonic()
+                    await _generate_chunk_images(
+                        session_id,
+                        ch_entry,
+                        style_suffix,
+                        sub_mode=mode_key,
+                        max_parallel_images=mpi,
+                        image_backend=plan.get("image_backend"),
+                        refresh_all=True,
+                        topic_seed_override=str(plan.get("facts_topic") or plan.get("header_title") or ""),
+                        cancel_event=fg_cancel_event,
+                    )
+                    _record_mode5_operation_seconds(plan, "images_longform", images_started, count=1)
+                    _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_IMAGES, chunk_index=ci)
                 await asyncio.to_thread(_render_chunk_audio_slices, session_id, ch_entry)
                 _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_SLICES, chunk_index=ci)
             await checkpoint(control)
@@ -5553,8 +6015,18 @@ async def run_mode5_pipeline(
                 _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_STUB, chunk_index=ci)
 
             for ci, ch_entry in enumerate(chunks_plan):
+                n_seg = len(ch_entry.get("segments") or [])
+                if _mode5_skip_segment_images_for_block_loop(plan):
+                    logger.info(
+                        "[Mode5] Chunk {}/{}: skip {} segment JPEG(s) — block-loop still→motion",
+                        ci + 1,
+                        len(chunk_texts),
+                        n_seg,
+                    )
+                    continue
+
                 logger.info(
-                    f"[Mode5] Chunk {ci + 1}/{len(chunk_texts)}: image generation for {len(ch_entry.get('segments') or [])} window(s)"
+                    f"[Mode5] Chunk {ci + 1}/{len(chunk_texts)}: image generation for {n_seg} window(s)"
                 )
 
                 async def _on_seg_ready(_seg: dict[str, Any], idx: int = ci) -> None:
@@ -5668,6 +6140,9 @@ async def resume_mode5_pipeline(
             video_header_title=str(plan.get("header_title") or "").strip() or None,
             bible_mode=bool(plan.get("bible_mode", False)),
             sub_mode=str(plan.get("sub_mode") or "manual"),
+            bible_chapters=plan.get("bible_chapters"),
+            block_loop_pool_size=_mode5_user_block_loop_pool_from_plan(plan),
+            thumbnail_overlay_text=str(plan.get("thumbnail_overlay_text") or "").strip() or None,
             test_run=bool(plan.get("test_run", False)),
             test_duration_sec=int(plan.get("test_target_sec") or 300),
             control=control,
@@ -5684,10 +6159,7 @@ async def resume_mode5_pipeline(
     mpi = _clamp_mode5_parallel_images(plan.get("max_parallel_images"))
     language = str(plan.get("language") or "ru").strip() or "ru"
     stage = _checkpoint_stage(plan)
-    skip_segment_images_on_resume = bool(
-        _mode5_block_loop_applies(plan)
-        and (plan.get("intro_preview_videos") or plan.get("intro_preview_video"))
-    )
+    skip_segment_images = _mode5_skip_segment_images_for_block_loop(plan)
 
     # Intro-confirm flow stops at STUB before any TTS/WAV exists.
     # On continue, bootstrap chunk audio + segments from saved stub texts first,
@@ -5724,6 +6196,9 @@ async def resume_mode5_pipeline(
                     video_header_title=plan.get("header_title"),
                     bible_mode=bool(plan.get("bible_mode", False)),
                     sub_mode=str(plan.get("sub_mode") or "manual"),
+                    bible_chapters=plan.get("bible_chapters"),
+                    block_loop_pool_size=_mode5_user_block_loop_pool_from_plan(plan),
+                    thumbnail_overlay_text=str(plan.get("thumbnail_overlay_text") or "").strip() or None,
                     test_run=bool(plan.get("test_run", False)),
                     test_duration_sec=int(plan.get("test_target_sec") or 300),
                     control={**(control or {}), "_mode5_skip_intro_confirmation": True},
@@ -5837,6 +6312,8 @@ async def resume_mode5_pipeline(
             _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_STUB)
 
         await _mode5_await_chunk_coroutines([_bootstrap_one(ch) for ch in chunks_boot], plan)
+        if sm == "bible":
+            apply_bible_chapter_labels(plan)
         _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_TTS)
         stage = MODE5_CKPT_AFTER_TTS
 
@@ -5911,9 +6388,9 @@ async def resume_mode5_pipeline(
             _save_mode5_plan(session_id, plan, checkpoint=MODE5_CKPT_AFTER_TTS)
 
         for ci, ch in enumerate(chunks):
-            if skip_segment_images_on_resume:
+            if skip_segment_images:
                 logger.info(
-                    "[Mode5 resume] Chunk {}/{}: skip segment image generation (using approved block-loop still/video)",
+                    "[Mode5 resume] Chunk {}/{}: skip segment image generation (block-loop still→motion)",
                     ci + 1,
                     len(chunks),
                 )
@@ -5986,7 +6463,7 @@ async def resume_mode5_pipeline(
     sem_img = asyncio.Semaphore(par)
     logger.info("[Mode5 facts50 resume] Image chunk lanes={}", par)
 
-    if (not skip_segment_images_on_resume) and (not all(_mode5_chunk_images_complete(session_root, ch) for ch in chunks)):
+    if (not skip_segment_images) and (not all(_mode5_chunk_images_complete(session_root, ch) for ch in chunks)):
 
         async def _resume_one_images(ch: dict[str, Any]) -> None:
             async with sem_img:
@@ -6340,9 +6817,9 @@ def _mode5_block_map_by_chunk_index(
     """Return (chunk_index -> block_ids, block_id -> sorted chunk indices) by cumulative audio timeline."""
     session_root = _session_dir(session_id)
     chunks = sorted(plan.get("chunks") or [], key=lambda c: int(c.get("index") or 0))
-    block_sec = float(getattr(settings, "mode5_block_loop_seconds", 1800.0) or 1800.0)
-    block_sec = max(60.0, min(14400.0, block_sec))
-    pool_size = _mode5_block_loop_pool_size()
+    _apply_mode5_block_loop_timing_to_plan(plan, session_id=session_id)
+    block_sec = _mode5_block_loop_seconds_for_plan(plan)
+    pool_size = _mode5_block_loop_pool_size_for_plan(plan, session_id=session_id)
     chunk_to_blocks: dict[int, set[int]] = {}
     block_to_chunks: dict[int, set[int]] = {}
     cumulative = 0.0
@@ -6644,9 +7121,13 @@ async def regenerate_mode5_publish_thumbnail(
     session_id: str,
     *,
     action_id: str | None = None,
+    thumbnail_overlay_text: str | None = None,
 ) -> dict[str, Any]:
     plan = load_mode5_plan(session_id)
     _ensure_mode5_live_defaults(plan)
+    overlay_stripped = re.sub(r"\s+", " ", (thumbnail_overlay_text or "").strip()) or None
+    if overlay_stripped is not None:
+        plan["thumbnail_overlay_text"] = overlay_stripped
     existing = _mode5_find_action(plan, action_id)
     if existing is not None:
         _mode5_assert_duplicate_matches(existing, action="regenerate-publish-thumbnail")
@@ -6666,6 +7147,8 @@ async def regenerate_mode5_publish_thumbnail(
     def _mutate(latest: dict[str, Any]) -> None:
         if isinstance(plan.get("publishing"), dict):
             latest["publishing"] = plan.get("publishing")
+        if overlay_stripped is not None:
+            latest["thumbnail_overlay_text"] = overlay_stripped
         if rel:
             latest["publish_thumbnail_rel"] = rel
         _mode5_push_live_event(latest, "publish_thumbnail_regenerated", thumbnail_relpath=rel or None)
@@ -6679,11 +7162,55 @@ async def regenerate_mode5_publish_thumbnail(
         queue_res["duplicate"] = dup
 
     latest = _update_mode5_plan_atomic(session_id, _mutate, checkpoint=MODE5_CKPT_COMPLETED)
+    overlay_out = str(latest.get("thumbnail_overlay_text") or plan.get("thumbnail_overlay_text") or "").strip() or None
     return {
         "ok": True,
         "action_id": queue_res["action_id"],
         "duplicate": bool(queue_res["duplicate"]),
         "thumbnail_relpath": rel or None,
+        "mode5_thumbnail_overlay_text": overlay_out,
+        "publishing": latest.get("publishing") if isinstance(latest.get("publishing"), dict) else None,
+    }
+
+
+async def regenerate_mode5_publish_metadata(
+    session_id: str,
+    *,
+    action_id: str | None = None,
+) -> dict[str, Any]:
+    """Regenerate YouTube title/description/tags only (keep existing thumbnail)."""
+    plan = load_mode5_plan(session_id)
+    _ensure_mode5_live_defaults(plan)
+    existing = _mode5_find_action(plan, action_id)
+    if existing is not None:
+        _mode5_assert_duplicate_matches(existing, action="regenerate-publish-metadata")
+        return {
+            "ok": True,
+            "action_id": str(existing.get("action_id") or action_id),
+            "duplicate": True,
+            "publishing": plan.get("publishing") if isinstance(plan.get("publishing"), dict) else None,
+        }
+
+    await _mode5_generate_publish_assets(session_id, plan, force_thumbnail=False)
+    queue_res: dict[str, Any] = {"action_id": "", "duplicate": False}
+
+    def _mutate(latest: dict[str, Any]) -> None:
+        if isinstance(plan.get("publishing"), dict):
+            latest["publishing"] = plan.get("publishing")
+        _mode5_push_live_event(latest, "publish_metadata_regenerated")
+        aid, dup = _mode5_queue_action(
+            latest,
+            "regenerate-publish-metadata",
+            action_id=action_id,
+        )
+        queue_res["action_id"] = aid
+        queue_res["duplicate"] = dup
+
+    latest = _update_mode5_plan_atomic(session_id, _mutate, checkpoint=MODE5_CKPT_COMPLETED)
+    return {
+        "ok": True,
+        "action_id": queue_res["action_id"],
+        "duplicate": bool(queue_res["duplicate"]),
         "publishing": latest.get("publishing") if isinstance(latest.get("publishing"), dict) else None,
     }
 
@@ -6944,11 +7471,16 @@ def mode5_status_from_plan(session_id: str) -> dict[str, Any]:
             out["mode5_runtime_status"] = "done"
             out.update(_mode5_progress_hint_payload(session_id, plan))
             return out
+    readiness = mode5_preview_readiness(session_id, plan, strict=True)
+    snap = mode5_resume_snapshot_for_plan(session_id, plan)
+    review_ready = bool(readiness.get("can_assemble"))
     out = _attach_mode5_resume_flags_from_plan(
-        session_id, plan, _result_payload(session_id, plan, review_ready=True)
+        session_id, plan, _result_payload(session_id, plan, review_ready=review_ready)
     )
-    if bool(plan.get("pipeline_paused")) and bool(out.get("mode5_can_resume")):
+    if bool(plan.get("pipeline_paused")) and bool(snap.get("can_resume")):
         out["mode5_runtime_status"] = "paused"
+    elif bool(snap.get("can_resume")) and not review_ready:
+        out["mode5_runtime_status"] = "paused" if bool(plan.get("pipeline_paused")) else "done"
     else:
         out["mode5_runtime_status"] = "running" if (has_dirty or has_pending_rebuilds) else "done"
     out.update(_mode5_progress_hint_payload(session_id, plan))
@@ -6975,10 +7507,16 @@ def mode5_review_snapshot(session_id: str) -> dict[str, Any]:
         ch["preview_ready"] = _mode5_preview_file_ready(p)
         if ch["preview_ready"]:
             ready_chunks.append(ch)
-    payload = _result_payload(session_id, {**plan, "chunks": ready_chunks}, review_ready=bool(ready_chunks))
+    readiness = mode5_preview_readiness(session_id, plan, strict=True)
+    can_assemble = bool(readiness.get("can_assemble"))
+    payload = _result_payload(
+        session_id,
+        {**plan, "chunks": ready_chunks if ready_chunks else chunks},
+        review_ready=can_assemble,
+    )
     payload["mode5_total_chunks"] = len(chunks)
-    payload["mode5_ready_chunks"] = len(ready_chunks)
-    payload["mode5_can_assemble"] = len(chunks) > 0 and len(ready_chunks) == len(chunks)
+    payload["mode5_ready_chunks"] = int(readiness.get("ready_count") or 0)
+    payload["mode5_can_assemble"] = can_assemble
     payload["mode5_partial"] = True
     snap = mode5_resume_snapshot_for_plan(session_id, plan)
     payload["mode5_can_resume"] = bool(snap.get("can_resume"))

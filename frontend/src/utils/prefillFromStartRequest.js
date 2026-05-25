@@ -131,12 +131,29 @@ export function applyStartRequestToForm(req, f, options = {}) {
     }
     else if (req.mode5_bible_mode === true) f.setMode5SubMode?.('bible');
     else f.setMode5SubMode?.('manual');
+    const bibleChapters = Array.isArray(req.mode5_bible_chapters) ? req.mode5_bible_chapters : [];
+    if (bibleChapters.length) {
+      f.setMode5BibleChapters?.(
+        bibleChapters.map((ch, idx) => ({
+          id: `bch-prefill-${idx}-${Math.random().toString(36).slice(2, 7)}`,
+          overlayLabel: String(ch?.overlay_label ?? ch?.overlayLabel ?? '').trim(),
+          text: String(ch?.text ?? '').trim(),
+        })),
+      );
+    }
     if (req.mode5_test_run === true) f.setMode5TestRun?.(true);
     else if (req.mode5_test_run === false) f.setMode5TestRun?.(false);
     if (req.mode5_skip_chunk_previews === true) f.setMode5SkipChunkPreviews?.(true);
     else if (req.mode5_skip_chunk_previews === false) f.setMode5SkipChunkPreviews?.(false);
     if (req.mode5_sequential_chunks === true) f.setMode5SequentialChunks?.(true);
     else if (req.mode5_sequential_chunks === false) f.setMode5SequentialChunks?.(false);
+    const blps = Number(req.mode5_block_loop_pool_size);
+    if (Number.isFinite(blps) && blps >= 1 && blps <= 20) {
+      f.setMode5BlockLoopPoolSize?.(Math.round(blps));
+    }
+    if (typeof req.mode5_thumbnail_overlay_text === 'string') {
+      f.setMode5ThumbnailOverlayText?.(req.mode5_thumbnail_overlay_text);
+    }
   }
 
   if (m === 6) {

@@ -276,11 +276,20 @@ export const api = {
       body: JSON.stringify({ action_id: actionId }),
       timeoutMs: 180000,
     }),
-  mode5LiveRegeneratePublishThumbnail: (sid, actionId = makeActionId()) =>
+  mode5LiveRegeneratePublishThumbnail: (sid, { actionId = makeActionId(), thumbnailOverlayText = null } = {}) =>
     request(`/api/mode5/${sid}/live/regenerate-publish-thumbnail`, {
       method: 'POST',
-      body: JSON.stringify({ action_id: actionId }),
+      body: JSON.stringify({
+        action_id: actionId,
+        thumbnail_overlay_text: thumbnailOverlayText?.trim() || null,
+      }),
       timeoutMs: 180000,
+    }),
+  mode5LiveRegeneratePublishMetadata: (sid, actionId = makeActionId()) =>
+    request(`/api/mode5/${sid}/live/regenerate-publish-metadata`, {
+      method: 'POST',
+      body: JSON.stringify({ action_id: actionId }),
+      timeoutMs: 120000,
     }),
   mode5PublishThumbnailUrl: (sid) => `${BASE}/api/mode5/${encodeURIComponent(sid)}/publish-thumbnail`,
   mode5LivePauseChunk: (sid, chunkIndex, actionId = makeActionId()) =>
@@ -300,6 +309,11 @@ export const api = {
     }),
   mode5CachedTopicIdeas: (subMode, limit = 8) =>
     request(`/api/mode5/topic-ideas?sub_mode=${encodeURIComponent(subMode)}&limit=${encodeURIComponent(limit)}`),
+  mode5SplitBibleChapters: (scriptText) =>
+    request('/api/mode5/split-bible-chapters', {
+      method: 'POST',
+      body: JSON.stringify({ script_text: scriptText }),
+    }),
   mode5ConsumeIdea: (ideaId, status = 'clicked') =>
     request('/api/mode5/topic-ideas/consume', {
       method: 'POST',

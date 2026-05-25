@@ -25,7 +25,7 @@ from moviepy import (
 )
 from PIL import Image, ImageDraw
 
-from agents.video_editor.subtitles import render_subtitle_overlay
+from agents.video_editor.subtitles import render_subtitle_overlay, _wrap_text
 from agents.video_editor.fonts import load_ui_font
 from config import settings
 from utils.ffmpeg_resolve import resolve_ffmpeg_executable
@@ -140,6 +140,11 @@ def _with_static_subtitle(
     subtitle_text: str,
     target_w: int,
     target_h: int,
+    *,
+    vertical_center_frac: float | None = None,
+    static_font_divisor: int = 18,
+    static_min_font_size: int = 18,
+    static_max_font_size: int = 34,
 ) -> VideoClip:
     text = (subtitle_text or "").strip()
     if not text:
@@ -156,7 +161,10 @@ def _with_static_subtitle(
             t,
             duration,
             karaoke=False,
-            static_font_divisor=18,
+            static_font_divisor=static_font_divisor,
+            vertical_center_frac=vertical_center_frac,
+            static_min_font_size=static_min_font_size,
+            static_max_font_size=static_max_font_size,
         )
         return _alpha_blend_rgb(frame, overlay)
 
@@ -172,39 +180,47 @@ def _with_top_label(
     label_text: str,
     target_w: int,
     target_h: int,
+    *,
+    top_frac: float | None = None,
+    font_scale: float = 1.0,
 ) -> VideoClip:
     text = (label_text or "").strip()
     if not text:
         return clip
     duration = float(clip.duration or 0.0)
     fps = int(clip.fps or 60)
-    font_size = max(34, int(target_h / 12))
+    font_size = max(30, int(target_h / 12 * max(0.75, float(font_scale))))
     font = load_ui_font(font_size, bold=True)
-    pad_y = max(24, int(target_h * 0.035))
-    pad_x = max(20, int(target_w * 0.03))
+    pad_y = max(20, int(target_h * (top_frac if top_frac is not None else 0.035)))
+    stroke_w = 4
+    max_text_w = int(target_w * 0.88)
 
     def make_frame(t: float) -> np.ndarray:
         frame = clip.get_frame(t)
         rgba = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(rgba)
-        bb = draw.textbbox((0, 0), text, font=font, stroke_width=4)
-        tw = max(1, bb[2] - bb[0])
-        th = max(1, bb[3] - bb[1])
-        box_w = tw + pad_x * 2
-        box_h = th + pad_y // 2
-        x0 = (target_w - box_w) // 2
-        y0 = pad_y
-        draw.rounded_rectangle((x0, y0, x0 + box_w, y0 + box_h), radius=18, fill=(0, 0, 0, 128))
-        tx = x0 + pad_x
-        ty = y0 + (box_h - th) // 2 - bb[1]
-        draw.text(
-            (tx, ty),
-            text,
-            font=font,
-            fill=(245, 248, 255, 255),
-            stroke_width=4,
-            stroke_fill=(10, 14, 24, 235),
-        )
+        lines = _wrap_text(text, font, max_text_w, draw, stroke_width=stroke_w)
+        line_heights: list[int] = []
+        for line in lines:
+            bb = draw.textbbox((0, 0), line, font=font, stroke_width=stroke_w)
+            line_heights.append(bb[3] - bb[1])
+        line_gap = max(6, font_size // 8)
+        max_lh = max(line_heights) if line_heights else font_size
+        y_band = pad_y
+        for line, lh in zip(lines, line_heights):
+            bb = draw.textbbox((0, 0), line, font=font, stroke_width=stroke_w)
+            line_w = bb[2] - bb[0]
+            tx = (target_w - line_w) // 2
+            ty = y_band + (max_lh - lh) // 2 - bb[1]
+            draw.text(
+                (tx, ty),
+                line,
+                font=font,
+                fill=(245, 248, 255, 255),
+                stroke_width=stroke_w,
+                stroke_fill=(10, 14, 24, 235),
+            )
+            y_band += max_lh + line_gap
         return _alpha_blend_rgb(frame, np.array(rgba))
 
     wrapped = VideoClip(make_frame, duration=duration).with_fps(fps)
@@ -499,6 +515,7 @@ def assemble_mode5_video(
     top_labels: list[str] | None = None,
     *,
     facts50_static_still: bool = False,
+    chapter_overlay_layout: bool = False,
 ) -> Path:
     """
     Собирает длинное видео из сегментов (image + audio).
@@ -524,6 +541,19 @@ def assemble_mode5_video(
     clip_durations: list[float] = []
     subtitle_texts = subtitle_texts or []
     top_labels = top_labels or []
+    from agents.video_editor import design_tokens as dt
+
+    # Bottom subtitles (default 0.75); chapter banner stays at top when enabled.
+    subtitle_v_frac = None
+    chapter_top_frac = dt.MODE5_CHAPTER_TOP_FRAC if chapter_overlay_layout else None
+    if chapter_overlay_layout:
+        subtitle_font_div = 12
+        subtitle_min_font = 30
+        subtitle_max_font = 58
+    else:
+        subtitle_font_div = 22
+        subtitle_min_font = 14
+        subtitle_max_font = 27
     for i, seg_entry in enumerate(segment_data):
         asset_type = "image"
         img_path: Path | None = None
@@ -587,12 +617,18 @@ def assemble_mode5_video(
             subtitle_texts[i] if i < len(subtitle_texts) else "",
             target_w,
             target_h,
+            vertical_center_frac=subtitle_v_frac,
+            static_font_divisor=subtitle_font_div,
+            static_min_font_size=subtitle_min_font,
+            static_max_font_size=subtitle_max_font,
         )
         clip = _with_top_label(
             clip,
             top_labels[i] if i < len(top_labels) else "",
             target_w,
             target_h,
+            top_frac=chapter_top_frac,
+            font_scale=1.05 if chapter_overlay_layout else 1.0,
         )
         # Критично: держим аудио отдельным клипом и кодируем один раз только в финале.
         # Так убираются регулярные стыки/провалы каждые ~30с из-за повторного AAC на каждом сегменте.

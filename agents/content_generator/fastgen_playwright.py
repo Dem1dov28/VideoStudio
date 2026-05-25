@@ -10,6 +10,7 @@ import asyncio
 import base64
 import os
 import random
+import re
 import threading
 import time
 import uuid
@@ -27,6 +28,10 @@ from config import settings
 
 from agents.content_generator.fastgen_exceptions import FastGenCancelled, VideoGenerationError
 from agents.content_generator.fastgen_global_media import async_fastgen_global_media_slot
+from agents.content_generator.fastgen_image_config import (
+    resolve_fastgen_image_model_ui,
+    resolve_fastgen_image_provider_ui,
+)
 from agents.content_generator.fastgen_prompts import (
     _fastgen_aspect_ratio_normalized,
     _fastgen_aspect_select_kw_list,
@@ -37,6 +42,46 @@ from agents.content_generator.fastgen_prompts import (
 )
 
 _URL = "https://fast-gen.ai/generator"
+
+
+def _resolve_veo_flow_variant_label() -> str:
+    return (getattr(settings, "fastgen_veo_flow_variant", None) or "Veo 3.1 Fast").strip()
+
+
+def _veo_flow_variant_candidates() -> list[str]:
+    """Подписи для второго селекта «Модель Flow» (primary + запасные синонимы UI)."""
+    primary = _resolve_veo_flow_variant_label()
+    out: list[str] = []
+    for label in (primary, "Veo 3.1 Fast", "Veo 3.1 Light", "Veo 3.1"):
+        label = label.strip()
+        if label and label not in out:
+            out.append(label)
+    return out
+
+
+async def _dismiss_fastgen_overlays(page: Page) -> None:
+    """Закрыть Radix-dropdown / overlay — иначе клики блокируются (<html> intercepts pointer events)."""
+    for _ in range(3):
+        try:
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.12)
+        except Exception:
+            pass
+
+
+def _default_veo_flow_video_model() -> str:
+    return (getattr(settings, "mode4_veo_video_model_flow", None) or "Veo 3.1 - Flow").strip()
+
+
+def _needs_veo_flow_variant(model: str) -> bool:
+    """True when primary model is Veo Flow (not Flower) — UI shows second «Модель Flow» select."""
+    low = (model or "").strip().lower()
+    if not low or "flower" in low:
+        return False
+    if "veo" in low and "flow" in low:
+        return True
+    flow_m = _default_veo_flow_video_model().lower()
+    return bool(flow_m) and flow_m in low
 
 
 def _unique_frame_dest(output_dir: Path, base_suffix: str) -> Path:
@@ -1135,219 +1180,245 @@ class FastGenScraper:
         await asyncio.sleep(1)
 
     def _resolve_mode5_playwright_model(self, prompt: str | None = None) -> str | None:
-        """
-        Keep Mode5 image quality stable on Playwright path.
+        """Legacy hook — image model always comes from FASTGEN_MODEL / FASTGEN_IMAGE_PROVIDER."""
+        _ = prompt
+        return resolve_fastgen_image_model_ui()
 
-        Mode5 should consistently use NARWHAL (Nano Banana 2 - Flow), same intent
-        as HTTP backend guard, regardless of accidental UI model drift.
-        """
-        configured = (settings.fastgen_model or "").strip()
-        low = (prompt or "").lower()
-        is_mode5 = str(getattr(settings, "pipeline_mode", "") or "").strip().lower() == "mode5"
-        has_mode5_marker = (
-            "hard override for mode5" in low
-            or "mode5 sequence" in low
-            or "for mode5" in low
-        )
-        if is_mode5 or has_mode5_marker:
-            return "NARWHAL"
-        return configured or None
+    async def _select_image_provider_and_model(self) -> None:
+        """Image tab: Provider (Flow) then Model (Nano Banana Pro)."""
+        provider = resolve_fastgen_image_provider_ui()
+        model = resolve_fastgen_image_model_ui()
+        await self._select_ui_option_at_index(0, provider, log_label="provider")
+        await asyncio.sleep(0.4)
+        await self._select_ui_option_at_index(1, model, log_label="model")
 
     async def _select_model(self, prompt: str | None = None) -> None:
-        """Image tab model select with Mode5 quality guard."""
-        model = self._resolve_mode5_playwright_model(prompt)
-        if not model:
-            return
-        await self._select_ui_model(model)
+        """Image tab: set provider + model from settings."""
+        _ = prompt
+        await self._select_image_provider_and_model()
 
-    async def _select_ui_model(self, model: str | None) -> None:
-        """Select model from FastGen dropdown (Image or Video tab — same Radix combobox pattern)."""
-        if not (model and str(model).strip()):
+    async def _select_ui_option_at_index(
+        self,
+        index: int,
+        value: str,
+        *,
+        log_label: str = "option",
+    ) -> None:
+        """Select value in nth combobox / hidden select (Provider=0, Model=1 on Image tab)."""
+        if not (value and str(value).strip()):
             return
-        model = str(model).strip()
+        value = str(value).strip()
         page = self._page
         assert page is not None
-
-        # Wait for page to be fully loaded before attempting model selection
-        await asyncio.sleep(2)
-
+        await asyncio.sleep(0.3)
         max_retries = 3
         for attempt in range(1, max_retries + 1):
             js_result: dict | None = None
             try:
-                logger.debug(f"[FastGen] Model selection attempt {attempt}/{max_retries}")
-                
-                # Log available options from hidden <select> for debugging
-                try:
-                    sel_el = page.locator("select").first
-                    await sel_el.wait_for(state="attached", timeout=3000)
-                    options_info = await page.evaluate("""() => {
-                        const sel = document.querySelector('select');
-                        if (!sel) return [];
-                        return Array.from(sel.options).map(o => ({
-                            value: o.value, 
-                            label: o.textContent.trim()
-                        }));
-                    }""")
-                    logger.info(f"[FastGen] Available model options: {options_info}")
-                except Exception as e:
-                    logger.debug(f"[FastGen] Could not read select options: {e}")
-                    options_info = []
-                
-                # Step 1: Try JavaScript-based selection on hidden <select>
-                # This bypasses all visibility/actionability checks
-                # The model value can be either a value attribute (e.g. "GEM_PIX_2") 
-                # or a label text (e.g. "Nano Banana Pro - Flow")
-                try:
-                    js_result = await page.evaluate("""(modelQuery) => {
-                        const sel = document.querySelector('select');
-                        if (!sel) return {ok: false, error: 'no select element'};
-                        
-                        // Try to find option by value first
+                js_result = await page.evaluate(
+                    """([idx, modelQuery]) => {
+                        const sels = document.querySelectorAll('select');
+                        const sel = sels[idx];
+                        if (!sel) return {ok: false, error: 'no select element at index'};
                         let option = sel.querySelector(`option[value="${modelQuery}"]`);
-                        
-                        // Try by label text (partial match)
                         if (!option) {
                             for (const opt of sel.options) {
-                                if (opt.textContent.trim().includes(modelQuery) || 
-                                    modelQuery.includes(opt.textContent.trim())) {
+                                const t = opt.textContent.trim();
+                                if (t.includes(modelQuery) || modelQuery.includes(t)) {
                                     option = opt;
                                     break;
                                 }
                             }
                         }
-                        
-                        // Try by value partial match
                         if (!option) {
                             for (const opt of sel.options) {
-                                if (opt.value.includes(modelQuery) || 
+                                if (opt.value.includes(modelQuery) ||
                                     modelQuery.includes(opt.value)) {
                                     option = opt;
                                     break;
                                 }
                             }
                         }
-                        
                         if (!option) return {ok: false, error: 'option not found'};
-                        
-                        // Set the value
                         const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
                             window.HTMLSelectElement.prototype, 'value'
                         ).set;
                         nativeInputValueSetter.call(sel, option.value);
-                        
-                        // Dispatch events to trigger React state update
                         sel.dispatchEvent(new Event('change', {bubbles: true}));
                         sel.dispatchEvent(new Event('input', {bubbles: true}));
-                        
                         return {ok: true, value: option.value, label: option.textContent.trim()};
-                    }""", model)
-                    
-                    if js_result.get("ok"):
-                        logger.info(f"[FastGen] Model selected via JS: value='{js_result['value']}', label='{js_result['label']}'")
-                        await asyncio.sleep(0.5)
-                        # Verify selection took effect by checking combobox text
-                        # If not, continue to combobox click approach
-                except Exception as e:
-                    logger.debug(f"[FastGen] JS select approach failed: {e}")
-                
-                # Step 2: Click the combobox button with force=True to open dropdown
-                # force=True bypasses Playwright's actionability checks (visibility, overlay)
-                combobox = page.locator('button[role="combobox"]').first
+                    }""",
+                    [index, value],
+                )
+                if js_result.get("ok"):
+                    logger.info(
+                        f"[FastGen] {log_label} selected via JS select[{index}]: "
+                        f"value='{js_result['value']}', label='{js_result['label']}'"
+                    )
+                    await asyncio.sleep(0.3)
+                    await _dismiss_fastgen_overlays(page)
+                    return
+            except Exception as e:
+                logger.debug(f"[FastGen] JS select[{index}] failed: {e}")
+
+            try:
+                combobox = page.locator('button[role="combobox"]').nth(index)
                 await combobox.wait_for(state="attached", timeout=5000)
-                
-                # Try force click first (bypasses overlay/visibility issues)
                 try:
                     await combobox.click(force=True)
-                    logger.debug("[FastGen] Combobox force-clicked, waiting for dropdown...")
-                except Exception as e:
-                    logger.debug(f"[FastGen] Force click failed: {e}, trying JS click...")
-                    # Fallback: JavaScript click bypasses all Playwright checks
-                    await page.evaluate("""() => {
-                        const btn = document.querySelector('button[role="combobox"]');
-                        if (btn) btn.click();
-                    }""")
-                    logger.debug("[FastGen] Combobox clicked via JS")
-                
-                # Wait for dropdown to open
-                await asyncio.sleep(1.5)
-                
-                # Step 3: Try to click the desired option in the opened dropdown
-                # Radix dropdown renders [role="option"] items
-                try:
-                    # Try exact text match first, then partial
-                    for selector in [
-                        f'[role="option"]:has-text("{model}")',
-                        f'[role="listbox"] [role="option"]:has-text("{model}")',
-                        f'div[data-radix-popper-content-wrapper] [role="option"]:has-text("{model}")',
-                    ]:
-                        try:
-                            option = page.locator(selector).first
-                            await option.wait_for(state="visible", timeout=2000)
-                            await option.click()
-                            logger.info(f"[FastGen] Model '{model}' selected via dropdown option click")
-                            await asyncio.sleep(0.5)
-                            return
-                        except Exception:
-                            continue
-                except Exception as e:
-                    logger.debug(f"[FastGen] Dropdown option click failed: {e}")
-                
-                # Step 4: Try selecting by value on hidden select with Playwright
-                try:
-                    sel_el = page.locator("select").first
-                    await sel_el.wait_for(state="attached", timeout=2000)
-                    # Try by value attribute (e.g. "GEM_PIX_2")
-                    await sel_el.select_option(value=model, timeout=2000)
-                    logger.info(f"[FastGen] Model '{model}' selected via native select value")
-                    await page.keyboard.press("Escape")
-                    await asyncio.sleep(0.3)
-                    return
                 except Exception:
-                    pass
-                
-                # Try by label
-                try:
-                    sel_el = page.locator("select").first
-                    await sel_el.select_option(label=model, timeout=2000)
-                    logger.info(f"[FastGen] Model '{model}' selected via native select label")
-                    await page.keyboard.press("Escape")
-                    await asyncio.sleep(0.3)
-                    return
-                except Exception:
-                    pass
-                
-                # Step 5: Close dropdown and check if JS selection from Step 1 worked
-                await page.keyboard.press("Escape")
-                await asyncio.sleep(0.3)
-                
-                # If JS approach succeeded earlier, we're good
-                if js_result and js_result.get("ok"):
-                    logger.info(f"[FastGen] Using JS-selected model: {js_result['label']}")
-                    return
-                
-                raise Exception(f"Could not select model '{model}' via any method")
-                    
-            except Exception as e:
-                logger.warning(f"[FastGen] Model selection attempt {attempt} failed: {e}")
-                # Close any open dropdown before retry
-                try:
-                    await page.keyboard.press("Escape")
-                    await asyncio.sleep(0.5)
-                except Exception:
-                    pass
-                    
-                if attempt < max_retries:
-                    wait_time = 2 * attempt
-                    logger.info(f"[FastGen] Retrying model selection in {wait_time}s...")
-                    await asyncio.sleep(wait_time)
-                else:
-                    logger.error(f"[FastGen] Failed to select model after {max_retries} attempts")
+                    await page.evaluate(
+                        """(idx) => {
+                            const btns = document.querySelectorAll('button[role="combobox"]');
+                            const btn = btns[idx];
+                            if (btn) btn.click();
+                        }""",
+                        index,
+                    )
+                await asyncio.sleep(1.0)
+                for selector in [
+                    f'[role="option"]:has-text("{value}")',
+                    f'[role="listbox"] [role="option"]:has-text("{value}")',
+                    f'div[data-radix-popper-content-wrapper] [role="option"]:has-text("{value}")',
+                ]:
                     try:
-                        all_options = await page.locator('select option').all_inner_texts()
-                        logger.info(f"[FastGen] Available model options: {all_options}")
+                        option = page.locator(selector).first
+                        await option.wait_for(state="visible", timeout=2000)
+                        await option.click()
+                        logger.info(f"[FastGen] {log_label} {value!r} via combobox[{index}]")
+                        await asyncio.sleep(0.3)
+                        await _dismiss_fastgen_overlays(page)
+                        return
                     except Exception:
-                        pass
+                        continue
+            except Exception as e:
+                logger.debug(f"[FastGen] combobox[{index}] click failed: {e}")
+
+            try:
+                sel_el = page.locator("select").nth(index)
+                await sel_el.wait_for(state="attached", timeout=2000)
+                await sel_el.select_option(value=value, timeout=2000)
+                logger.info(f"[FastGen] {log_label} {value!r} via native select[{index}] value")
+                await _dismiss_fastgen_overlays(page)
+                return
+            except Exception:
+                pass
+            try:
+                sel_el = page.locator("select").nth(index)
+                await sel_el.select_option(label=value, timeout=2000)
+                logger.info(f"[FastGen] {log_label} {value!r} via native select[{index}] label")
+                await _dismiss_fastgen_overlays(page)
+                return
+            except Exception:
+                pass
+
+            if js_result and js_result.get("ok"):
+                return
+
+            if attempt < max_retries:
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.5 * attempt)
+            else:
+                logger.error(
+                    f"[FastGen] Failed to select {log_label} {value!r} at index {index} "
+                    f"after {max_retries} attempts"
+                )
+
+    async def _select_ui_model(self, model: str | None) -> None:
+        """Select model from FastGen dropdown (Video tab — first combobox; legacy single-select)."""
+        if not (model and str(model).strip()):
+            return
+        await self._select_ui_option_at_index(0, str(model).strip(), log_label="model")
+        if _needs_veo_flow_variant(model):
+            await self._select_veo_flow_variant()
+            await _dismiss_fastgen_overlays(self._page)
+
+    async def _select_veo_flow_variant(self, variant: str | None = None) -> None:
+        """Second UI select «Модель Flow» (e.g. Veo 3.1 Fast) after primary Veo Flow model."""
+        labels = [variant.strip()] if variant and variant.strip() else _veo_flow_variant_candidates()
+        page = self._page
+        assert page is not None
+        await asyncio.sleep(0.5)
+
+        async def _try_native_select(idx: int, label: str) -> bool:
+            try:
+                sel_el = page.locator("select").nth(idx)
+                await sel_el.wait_for(state="attached", timeout=2000)
+                for kw in ({"label": label}, {"value": label}):
+                    try:
+                        await sel_el.select_option(**kw, timeout=1500)
+                        logger.info(f"[FastGen] Flow variant {label!r} via select[{idx}]")
+                        await asyncio.sleep(0.3)
+                        return True
+                    except Exception:
+                        continue
+                js_ok = await page.evaluate(
+                    """([idx, query]) => {
+                        const sels = document.querySelectorAll('select');
+                        const sel = sels[idx];
+                        if (!sel) return false;
+                        let option = sel.querySelector(`option[value="${query}"]`);
+                        if (!option) {
+                            for (const opt of sel.options) {
+                                const t = opt.textContent.trim();
+                                if (t.includes(query) || query.includes(t)) { option = opt; break; }
+                            }
+                        }
+                        if (!option) return false;
+                        const setter = Object.getOwnPropertyDescriptor(
+                            window.HTMLSelectElement.prototype, 'value'
+                        ).set;
+                        setter.call(sel, option.value);
+                        sel.dispatchEvent(new Event('change', {bubbles: true}));
+                        sel.dispatchEvent(new Event('input', {bubbles: true}));
+                        return true;
+                    }""",
+                    [idx, label],
+                )
+                if js_ok:
+                    logger.info(f"[FastGen] Flow variant {label!r} via JS on select[{idx}]")
+                    await asyncio.sleep(0.3)
+                    return True
+            except Exception as e:
+                logger.debug(f"[FastGen] Flow variant select[{idx}] failed: {e}")
+            return False
+
+        async def _try_combobox(idx: int, label: str) -> bool:
+            try:
+                combobox = page.locator('button[role="combobox"]').nth(idx)
+                await combobox.wait_for(state="attached", timeout=2000)
+                await combobox.click(force=True)
+                await asyncio.sleep(0.6)
+                for selector in [
+                    f'[role="option"]:has-text("{label}")',
+                    f'[role="listbox"] [role="option"]:has-text("{label}")',
+                ]:
+                    try:
+                        opt = page.locator(selector).first
+                        await opt.wait_for(state="visible", timeout=1500)
+                        await opt.click(force=True)
+                        logger.info(f"[FastGen] Flow variant {label!r} via combobox[{idx}]")
+                        await asyncio.sleep(0.3)
+                        return True
+                    except Exception:
+                        continue
+            except Exception as e:
+                logger.debug(f"[FastGen] Flow variant combobox[{idx}] failed: {e}")
+            finally:
+                await _dismiss_fastgen_overlays(page)
+            return False
+
+        for label in labels:
+            if await _try_native_select(1, label):
+                await _dismiss_fastgen_overlays(page)
+                return
+            if await _try_combobox(1, label):
+                return
+        logger.warning(f"[FastGen] Could not select Flow variant (tried {labels!r})")
+
+    async def _ensure_veo_flow_video_model(self) -> None:
+        """Video tab: Veo Flow + sub-model (all modes using Playwright video)."""
+        await self._select_ui_model(_default_veo_flow_video_model())
 
     async def _activate_image_tab(self) -> None:
         page = self._page
@@ -1388,29 +1459,31 @@ class FastGenScraper:
                 continue
 
     async def _select_aspect_ratio(self, aspect_override: str | None = None) -> None:
-        """Select aspect ratio via the second <select> on the Image tab (see FASTGEN_ASPECT_RATIO)."""
+        """Select aspect ratio on Image tab (third <select> after Provider + Model)."""
         page = self._page
         assert page is not None
         ratio = _fastgen_aspect_ratio_normalized(aspect_override)
-        try:
-            # Page has two <select>: first = model, second = aspect ratio
-            ratio_select = page.locator("select").nth(1)
-            await ratio_select.wait_for(state="attached", timeout=3000)
-            for kw in _fastgen_aspect_select_kw_list(ratio):
-                try:
-                    await ratio_select.select_option(**kw)
-                    logger.info(f"[FastGen] Aspect ratio set to {ratio} (image tab)")
-                    await asyncio.sleep(0.3)
-                    return
-                except Exception:
-                    continue
-            logger.warning(f"[FastGen] Could not set image aspect ratio to {ratio}")
-        except Exception as e:
-            logger.warning(f"Could not set aspect ratio: {e}")
+        for aspect_idx in (2, 1):
+            try:
+                ratio_select = page.locator("select").nth(aspect_idx)
+                await ratio_select.wait_for(state="attached", timeout=3000)
+                for kw in _fastgen_aspect_select_kw_list(ratio):
+                    try:
+                        await ratio_select.select_option(**kw)
+                        logger.info(
+                            f"[FastGen] Aspect ratio set to {ratio} (image tab select[{aspect_idx}])"
+                        )
+                        await asyncio.sleep(0.3)
+                        return
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+        logger.warning(f"[FastGen] Could not set image aspect ratio to {ratio}")
 
     async def _select_video_settings(self, aspect_ratio: str | None = None) -> None:
         """
-        Video tab: aspect ratio (и при mode4 — модель Veo задаётся отдельно через _select_ui_model).
+        Video tab: aspect ratio (модель Veo Flow + подмодель задаются до этого через _ensure_veo_flow_video_model).
         - Aspect: по умолчанию VIDEO_FORMAT (9:16 для Shorts); иначе explicit или FASTGEN_ASPECT_RATIO при override-строке
         """
         page = self._page
@@ -1419,7 +1492,6 @@ class FastGenScraper:
         ratio = _resolve_video_tab_aspect_ratio(aspect_ratio)
         aspect_opts = _fastgen_aspect_select_kw_list(ratio)
 
-        # Aspect ratio: try multiple strategies (Video tab DOM may differ)
         async def _try_select(loc, timeout=2000):
             try:
                 await loc.wait_for(state="attached", timeout=timeout)
@@ -1433,13 +1505,7 @@ class FastGenScraper:
             except Exception:
                 return False
 
-        for sel, idx in [("select", 1), ("select", 0)]:
-            loc = page.locator(sel) if idx < 0 else page.locator(sel).nth(idx)
-            if await _try_select(loc):
-                logger.info(f"[FastGen Video] Aspect ratio {ratio} selected")
-                return
-
-        # Fallback: click button for current ratio / orientation
+        # Кнопки 16:9 / 9:16 — не конфликтуют с select[0] (модель) и select[1] (подмодель Flow)
         if ratio == "16:9":
             btn_patterns = [
                 "button:has-text('16:9')",
@@ -1469,6 +1535,40 @@ class FastGenScraper:
                 return
             except Exception:
                 continue
+
+        # Только <select>, в options которых есть 16:9 / 9:16 (не модель и не «Модель Flow»)
+        try:
+            aspect_idx = await page.evaluate(
+                """(ratio) => {
+                    const keys = [ratio, '16:9', '9:16', 'Landscape', 'Portrait', 'landscape', 'portrait'];
+                    const sels = document.querySelectorAll('select');
+                    for (let i = 0; i < sels.length; i++) {
+                        for (const opt of sels[i].options) {
+                            const t = opt.textContent.trim();
+                            const v = opt.value;
+                            for (const k of keys) {
+                                if (t.includes(k) || v.includes(k)) return i;
+                            }
+                        }
+                    }
+                    return -1;
+                }""",
+                ratio,
+            )
+            if isinstance(aspect_idx, int) and aspect_idx >= 0:
+                loc = page.locator("select").nth(aspect_idx)
+                if await _try_select(loc):
+                    logger.info(f"[FastGen Video] Aspect ratio {ratio} selected via select[{aspect_idx}]")
+                    return
+        except Exception as e:
+            logger.debug(f"[FastGen Video] aspect select scan failed: {e}")
+
+        # Legacy: aspect может быть третьим+ select (после модели и подмодели Flow)
+        for idx in (2, 3):
+            loc = page.locator("select").nth(idx)
+            if await _try_select(loc):
+                logger.info(f"[FastGen Video] Aspect ratio {ratio} selected via select[{idx}]")
+                return
 
         logger.warning(f"[FastGen Video] Could not set {ratio} — using default aspect ratio")
 
@@ -1826,6 +1926,7 @@ class FastGenScraper:
             await self._authenticate()
 
         await self._activate_video_tab()
+        await self._ensure_veo_flow_video_model()
         await self._select_video_settings(aspect_ratio)
         await _screenshot(page, "03_video_ready")
 
@@ -2008,10 +2109,12 @@ class FastGenScraper:
                 if _cancel_requested(cancel_event):
                     return None
                 await self._activate_video_tab()
-                await self._select_video_settings(aspect_ratio)
                 if mode4_veo_flow_flower:
                     use_m = flower_m if attempt >= flow_n else flow_m
                     await self._select_ui_model(use_m)
+                else:
+                    await self._ensure_veo_flow_video_model()
+                await self._select_video_settings(aspect_ratio)
                 await _screenshot(page, "03_video_ready" if attempt == 0 else "03_video_ready_recover")
                 if ref_list and upload_reference:
                     await _upload_reference_images(page, ref_list)
@@ -2824,159 +2927,164 @@ async def generate_single_video_multi_ref(
 
 # ── Keyframe Video Generation (start + end frame) ────────────────────────────────
 
+
+async def _normal_reference_mode_visible(page: Page) -> bool:
+    """Видео «Обычный» — блок «Референсные изображения (N/3)»."""
+    try:
+        loc = page.get_by_text(re.compile(r"Референсные изображения|Reference images", re.I)).first
+        return await loc.is_visible(timeout=700)
+    except Exception:
+        return False
+
+
+async def _keyframes_mode_active(page: Page) -> bool:
+    """Кнопка «Ключ. кадры» / Keyframes выбрана в segmented control."""
+    try:
+        return bool(
+            await page.evaluate(
+                """() => {
+                    const isKf = (t) => {
+                        t = (t || '').trim().toLowerCase();
+                        return (t.includes('ключ') && t.includes('кадр')) || t.includes('keyframe');
+                    };
+                    for (const btn of document.querySelectorAll('button')) {
+                        const t = btn.textContent || '';
+                        if (!isKf(t)) continue;
+                        const ds = btn.getAttribute('data-state') || '';
+                        if (['active', 'checked', 'open', 'on'].includes(ds)) return true;
+                        if (btn.getAttribute('aria-pressed') === 'true') return true;
+                        if (btn.getAttribute('aria-selected') === 'true') return true;
+                        const cls = btn.className || '';
+                        if (cls.includes('bg-background') && cls.includes('shadow')) return true;
+                    }
+                    return false;
+                }"""
+            )
+        )
+    except Exception:
+        return False
+
+
+async def _keyframes_upload_ui_visible(page: Page) -> bool:
+    """UI keyframes: зоны start/end (h-24 + aspect-square) или активная вкладка «Ключ. кадры»."""
+    for sel in (
+        "div.h-24[class*='border-dashed']",
+        "div.h-24.border-2",
+        "div.aspect-square[class*='border-dashed']",
+        "div.w-full.aspect-square",
+    ):
+        try:
+            if await page.locator(sel).first.is_visible(timeout=600):
+                return True
+        except Exception:
+            continue
+    if await _keyframes_mode_active(page):
+        if not await _normal_reference_mode_visible(page):
+            return True
+    return False
+
+
+async def _click_keyframes_segment_button(page: Page) -> bool:
+    """Кнопка «Ключ. кадры» в блоке «Режим» (Обычный | Пакетный | Ключ. кадры)."""
+    await _dismiss_fastgen_overlays(page)
+
+    for pattern in (r"ключ.*кадр", r"keyframe", r"кадр"):
+        try:
+            btn = page.get_by_role("button", name=re.compile(pattern, re.I)).first
+            await btn.wait_for(state="visible", timeout=1500)
+            text = ((await btn.inner_text()) or "").strip().lower()
+            if "пакет" in text or "batch" in text:
+                continue
+            if "обычн" in text or text == "normal":
+                continue
+            if "ключ" not in text and "keyframe" not in text and "кадр" not in text:
+                continue
+            await btn.click(force=True, timeout=3000)
+            await asyncio.sleep(0.6)
+            return True
+        except Exception:
+            continue
+
+    try:
+        js = await page.evaluate(
+            """() => {
+                const isKf = (t) => {
+                    t = (t || '').trim().toLowerCase();
+                    return (t.includes('ключ') && t.includes('кадр')) || t.includes('keyframe');
+                };
+                const tryClick = (btn) => {
+                    if (!btn || !isKf(btn.textContent)) return false;
+                    btn.click();
+                    return true;
+                };
+                for (const el of document.querySelectorAll('label, span, p, div')) {
+                    const txt = (el.textContent || '').trim();
+                    if (!/^режим$/i.test(txt)) continue;
+                    let root = el.parentElement;
+                    for (let d = 0; d < 5 && root; d++, root = root.parentElement) {
+                        for (const btn of root.querySelectorAll('button')) {
+                            if (tryClick(btn)) return {ok: true, via: 'mode-label'};
+                        }
+                    }
+                }
+                for (const btn of document.querySelectorAll('button')) {
+                    if (tryClick(btn)) return {ok: true, via: 'any-button'};
+                }
+                return {ok: false};
+            }"""
+        )
+        if isinstance(js, dict) and js.get("ok"):
+            logger.info(f"[FastGen Keyframes] Clicked keyframes tab via JS ({js.get('via')})")
+            await asyncio.sleep(0.6)
+            return True
+    except Exception as e:
+        logger.debug(f"[FastGen Keyframes] JS mode click failed: {e}")
+    return False
+
+
 async def _toggle_keyframes_mode(page: Page) -> bool:
     """
     Enable keyframes mode on fast-gen.ai Video tab.
-    Supports both old switch UI and new segmented-button UI.
-    Returns True if successfully toggled to keyframes mode.
+    Returns True when «Ключ. кадры» active and «Референсные изображения» hidden.
     """
     try:
-        # Wait for page to be ready
-        await asyncio.sleep(1)
-        
-        # Multiple selectors for the keyframes toggle
-        toggle_selectors = [
+        await _dismiss_fastgen_overlays(page)
+        await asyncio.sleep(0.25)
+
+        if await _keyframes_upload_ui_visible(page):
+            logger.info("[FastGen Keyframes] Already in keyframes mode")
+            return True
+
+        for attempt in range(1, 4):
+            if await _click_keyframes_segment_button(page):
+                await asyncio.sleep(0.4)
+                if await _keyframes_upload_ui_visible(page):
+                    logger.info(f"[FastGen Keyframes] Keyframes mode enabled (attempt {attempt})")
+                    return True
+                if await _keyframes_mode_active(page) and not await _normal_reference_mode_visible(page):
+                    logger.info(f"[FastGen Keyframes] Keyframes tab active (attempt {attempt})")
+                    return True
+            await _dismiss_fastgen_overlays(page)
+            await asyncio.sleep(0.3)
+
+        for sel in (
             'button[role="switch"][id="use-keyframes"]',
-            'button[role="switch"][data-state]',
-            'button[role="switch"]',
-            '[data-state][role="switch"]',
             'button[id*="keyframe"]',
             'button[id*="key-frame"]',
-            # FastGen might use different selectors
-            'button[class*="switch"]',
-            'button[class*="toggle"]',
-            'label:has(input[type="checkbox"])',
-        ]
-        
-        for sel in toggle_selectors:
+        ):
             try:
                 switch = page.locator(sel).first
-                if await switch.is_visible(timeout=2000):
-                    # Check if this is the keyframes toggle
-                    aria_checked = await switch.get_attribute("aria-checked")
-                    data_state = await switch.get_attribute("data-state")
-                    
-                    # Click to enable if not already enabled
-                    if aria_checked == "true" or data_state == "checked":
-                        logger.info(f"[FastGen Keyframes] Already in keyframes mode (selector: {sel})")
-                        return True
-                    
-                    await switch.click()
-                    await asyncio.sleep(0.5)
-                    
-                    # Verify it's now checked
-                    aria_checked = await switch.get_attribute("aria-checked")
-                    data_state = await switch.get_attribute("data-state")
-                    if aria_checked == "true" or data_state == "checked":
-                        logger.info(f"[FastGen Keyframes] Keyframes mode enabled (selector: {sel})")
-                        return True
-            except Exception as e:
-                logger.debug(f"[FastGen Keyframes] Toggle selector {sel} failed: {e}")
-                continue
-
-        # New FastGen UI: segmented control with "Ключ. кадры"/"Keyframes" button
-        try:
-            segmented_candidates = [
-                'div.flex.rounded-lg.bg-secondary\\/50.p-0\\.5 button',
-                'div[class*="rounded-lg"][class*="bg-secondary"] button',
-                # New observed FastGen buttons (segmented control items)
-                'button.flex-1.rounded-md.px-3.py-1\\.5.text-xs.font-medium.transition-colors[data-state]',
-                'button[class*="rounded-md"][class*="px-3"][class*="py-1.5"][class*="text-xs"][data-state]',
-            ]
-
-            for container_sel in segmented_candidates:
-                buttons = page.locator(container_sel)
-                count = await buttons.count()
-                if count == 0:
+                if not await switch.is_visible(timeout=1200):
                     continue
-
-                for i in range(count):
-                    btn = buttons.nth(i)
-                    try:
-                        btn_text = ((await btn.inner_text()) or "").strip().lower()
-                    except Exception:
-                        continue
-
-                    if (
-                        "ключ" in btn_text
-                        or "keyframe" in btn_text
-                        or ("key" in btn_text and "frame" in btn_text)
-                    ):
-                        data_state = await btn.get_attribute("data-state")
-                        aria_pressed = await btn.get_attribute("aria-pressed")
-                        aria_selected = await btn.get_attribute("aria-selected")
-
-                        is_active = (
-                            data_state in {"open", "active", "checked"}
-                            or aria_pressed == "true"
-                            or aria_selected == "true"
-                        )
-                        if is_active:
-                            logger.info("[FastGen Keyframes] Already in keyframes mode (segmented button)")
-                            return True
-
-                        await btn.click(force=True, timeout=2000)
-                        await asyncio.sleep(0.4)
-
-                        data_state = await btn.get_attribute("data-state")
-                        aria_pressed = await btn.get_attribute("aria-pressed")
-                        aria_selected = await btn.get_attribute("aria-selected")
-                        is_active = (
-                            data_state in {"open", "active", "checked"}
-                            or aria_pressed == "true"
-                            or aria_selected == "true"
-                            or data_state != "closed"
-                        )
-                        if is_active:
-                            logger.info("[FastGen Keyframes] Keyframes mode enabled (segmented button)")
-                            return True
-                        # FastGen sometimes keeps data-state="closed" even after successful click.
-                        logger.info("[FastGen Keyframes] Keyframes button clicked (state did not update, proceeding)")
-                        return True
-
-            # Fallback for encoding/localization edge cases:
-            # if we can detect segmented buttons with data-state, switch to a "closed" option.
-            generic_segmented = page.locator(
-                'button.flex-1.rounded-md.px-3.py-1\\.5.text-xs.font-medium.transition-colors[data-state]'
-            )
-            generic_count = await generic_segmented.count()
-            if generic_count >= 2:
-                for i in range(generic_count):
-                    btn = generic_segmented.nth(i)
-                    try:
-                        data_state = await btn.get_attribute("data-state")
-                        if data_state == "closed":
-                            await btn.click(force=True, timeout=2000)
-                            await asyncio.sleep(0.4)
-                            new_state = await btn.get_attribute("data-state")
-                            if new_state in {"open", "active", "checked"} or new_state != "closed":
-                                logger.info("[FastGen Keyframes] Keyframes mode enabled (generic segmented fallback)")
-                                return True
-                            logger.info("[FastGen Keyframes] Generic segmented keyframes button clicked (state unchanged)")
-                            return True
-                    except Exception:
-                        continue
-            logger.debug("[FastGen Keyframes] Segmented keyframes button not found/activated")
-        except Exception as e:
-            logger.debug(f"[FastGen Keyframes] Segmented button detection failed: {e}")
-
-        # Last resort: try clicking any switch-like element in the video settings area
-        logger.warning("[FastGen Keyframes] Trying fallback approach for keyframes toggle")
-        try:
-            # Look for any element with "key" in text near a switch
-            key_text = page.locator('text=/keyframe|key.*frame|кадр/i').first
-            if await key_text.is_visible(timeout=2000):
-                # Find nearby switch
-                parent = key_text.locator('xpath=ancestor::div[1] | ancestor::label[1]')
-                switch = parent.locator('button[role="switch"], input[type="checkbox"]').first
-                if await switch.is_visible(timeout=1000):
-                    await switch.click()
-                    logger.info("[FastGen Keyframes] Keyframes mode enabled via text proximity")
+                await switch.click(force=True, timeout=3000)
+                await asyncio.sleep(0.5)
+                if await _keyframes_upload_ui_visible(page):
+                    logger.info(f"[FastGen Keyframes] Keyframes enabled via {sel}")
                     return True
-        except Exception as e:
-            logger.debug(f"[FastGen Keyframes] Fallback toggle failed: {e}")
-        
-        logger.warning("[FastGen Keyframes] Keyframes toggle not found")
+            except Exception as e:
+                logger.debug(f"[FastGen Keyframes] Switch {sel} failed: {e}")
+
+        logger.warning("[FastGen Keyframes] Keyframes mode not activated — still on Normal/reference UI")
         return False
     except Exception as e:
         logger.warning(f"[FastGen Keyframes] Failed to toggle keyframes mode: {e}")
@@ -3249,9 +3357,11 @@ def _run_keyframe_video_sync(
                 raise FastGenCancelled()
             
             await scraper._activate_video_tab()
+            await scraper._ensure_veo_flow_video_model()
             await scraper._select_video_settings(aspect_ratio)
+            await _dismiss_fastgen_overlays(page)
             await _screenshot(page, "kf_01_video_tab")
-            
+
             # Debug: log all visible buttons and switches
             try:
                 all_buttons = await page.locator('button').all()
@@ -3262,13 +3372,13 @@ def _run_keyframe_video_sync(
                 logger.info(f"[FastGen Keyframes] Found {len(all_file_inputs)} file inputs")
             except Exception as e:
                 logger.debug(f"[FastGen Keyframes] Could not count elements: {e}")
-            
-            # Enable keyframes mode
+
+            # «Ключ. кадры» — после выбора модели (combobox мог сбросить режим на «Обычный»)
             keyframes_enabled = await _toggle_keyframes_mode(page)
             if not keyframes_enabled:
                 logger.error("[FastGen Keyframes] Could not enable keyframes mode")
                 return None
-            
+
             await _screenshot(page, "kf_02_keyframes_enabled")
             
             # Upload start frame

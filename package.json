@@ -2,7 +2,7 @@
   "name": "video-editor",
   "private": true,
   "scripts": {
-    "start": "concurrently -k -n api,web -c blue,green \"python -m uvicorn server:app --reload --host 127.0.0.1 --port 8000 --reload-exclude .venv --reload-exclude MyVideo\" \"npm run dev --prefix frontend\""
+    "start": "concurrently -k -n api,web -c blue,green \".venv/bin/python -m uvicorn server:app --reload --host 127.0.0.1 --port 8000 --reload-exclude .venv --reload-exclude MyVideo --reload-exclude modes/mode5\" \"npm run dev --prefix frontend\""
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

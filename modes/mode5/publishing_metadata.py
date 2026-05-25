@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -11,6 +12,26 @@ from loguru import logger
 from config import settings
 from utils.llm import make_llm
 from utils.publishing_metadata import finalize_metadata, hashtags_from_text
+
+_MODE5_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def resolve_mode5_bible_thumbnail_figure_ref() -> Path | None:
+    """Bundled or configured portrait reference for Bible YouTube thumbnails."""
+    if not bool(getattr(settings, "mode5_bible_thumbnail_use_figure_ref", True)):
+        return None
+    raw = str(getattr(settings, "mode5_bible_thumbnail_figure_ref", "") or "").strip()
+    if not raw:
+        raw = "assets/mode5/bible_central_figure_ref.png"
+    p = Path(raw)
+    if not p.is_absolute():
+        p = _MODE5_PROJECT_ROOT / p
+    try:
+        p = p.resolve()
+    except OSError:
+        return None
+    return p if p.is_file() else None
+
 
 _HASHTAGS_RU = ["#сон", "#релакс", "#медитация", "#успокаивающе", "#sleepvideo"]
 _HASHTAGS_EN = ["#sleep", "#relax", "#meditation", "#calm", "#sleepvideo"]
@@ -132,6 +153,40 @@ Return strict JSON only:
 Language: {language}
 """
 
+_PUBLISHING_PROMPT_BIBLE = """Create YouTube metadata for a long-form **Bible scripture narration** video.
+
+PRIMARY PROMISE (must be obvious in title + first line of description):
+- This is a reverent, documentary-style **Scripture reading / Bible chapter narration** tied to the topic and excerpt.
+- It is **NOT** a sleep video, sleep meditation, hypnosis, ASMR for sleep, or bedtime wind-down content.
+- Do **NOT** use words like sleep, bedtime, fall asleep, peaceful sleep, wind-down, meditation, insomnia, or sleep-friendly in title, description, hashtags, tags, or first_comment.
+
+VIDEO CONTEXT:
+- Book/chapter / topic line: {topic}
+- Sub-mode: {sub_mode}
+- Approx duration (minutes): {duration_min}
+- Script excerpt: {script_excerpt}
+
+TARGET QUALITY:
+- Non-template writing. Sound human, modern, and channel-ready for 2026 YouTube.
+- Audience intent: listeners who want **Scripture read clearly** with reverent tone and cinematic visuals (Bible study, gospel account, chapter listen).
+- Title: 45-72 chars, no hashtags, searchable (book/chapter name, gospel account, or clear scripture hook).
+- Description: 2 short paragraphs; **lead with what Scripture passage is narrated and why it matters**; mention calm pacing only if natural — never as a sleep promise.
+- Hashtags: 3-5; prefer #bible #scripture #gospel #christian #biblestudy (localized if language is not English).
+- Tags: 10-15 intent-focused tags: bible narration, scripture reading, gospel, christian long form, bible audio, chapter reading — **zero sleep-video tags**.
+- first_comment: one respectful question about **which book, chapter, or passage** to narrate next (never ask about falling asleep).
+
+Return strict JSON only:
+{{
+  "title": "...",
+  "description": "...",
+  "hashtags": ["#...", "..."],
+  "tags": ["...", "..."],
+  "first_comment": "..."
+}}
+
+Language: {language}
+"""
+
 _THUMBNAIL_PROMPT = """Design one high-quality YouTube thumbnail concept for a sleep-oriented long-form video.
 
 VIDEO CONTEXT:
@@ -185,6 +240,61 @@ JSON only, no markdown.
 """
 
 _MODE5_BOOK_THUMBNAIL_SUBMODES = frozenset({"book_night", "unwritten_chapter"})
+
+_BIBLE_THUMBNAIL_TEMPLATE = (
+    "A high-quality cinematic YouTube thumbnail for a Bible scripture narration long-form video — "
+    "reverent, documentary, period-authentic ancient Near East. "
+    "The scene is {scene_sentence}. {figure_sentence} {props_sentence} "
+    "Warm biblical palette: golden-hour amber, sandstone ochre, olive green, deep indigo sky; "
+    "painterly semi-realistic depth. "
+    "{typography_rule} "
+    "16:9 aspect ratio, cinematic lighting, zero clutter, no watermark or UI."
+)
+
+_BIBLE_THUMBNAIL_TEMPLATE_REFERENCE_FIGURE = (
+    "A high-quality cinematic YouTube thumbnail for a Bible scripture narration long-form video — "
+    "reverent, documentary, period-authentic ancient Near East. "
+    "The scene is {scene_sentence}. "
+    "REFERENCE IMAGE: the uploaded portrait is the central reverent male figure for this thumbnail. "
+    "Place him naturally in the biblical environment (chest-up or mid-body): preserve his face, hair, beard, "
+    "skin tone, and simple cream linen robe from the reference pixels; integrate with matching light and perspective; "
+    "do not replace him with a different person, celebrity likeness, or modern clothing. "
+    "{props_sentence} "
+    "Warm biblical palette: golden-hour amber, sandstone ochre, olive green, deep indigo sky; "
+    "painterly semi-realistic depth. "
+    "{typography_rule} "
+    "16:9 aspect ratio, cinematic lighting, zero clutter, no watermark or UI."
+)
+
+_BIBLE_THUMB_FIELDS_PROMPT = """You fill visual scene variables for a Bible long-form YouTube thumbnail (scripture narration).
+Do NOT invent any on-image text — typography is controlled separately.
+
+Topic/header: {topic}
+Script excerpt: {script_excerpt}
+
+Return strict JSON only with keys:
+- "scene_sentence": ONE English sentence describing a concrete biblical narrative moment tied to the book/chapter (teaching on a hillside, temple court, desert road, lakeshore at dawn — match topic).
+- "figure_sentence": ONE English sentence describing the central reverent male figure by appearance and role only (calm compassionate teacher in cream linen robes, gentle direct gaze) — never use proper names of religious or historical persons. Omit this key when a reference portrait will be used.
+- "props_sentence": ONE English sentence with 2-4 period-authentic props (blank unmarked parchment scroll, clay oil lamp, olive branch, stone path, distant temple silhouette — no visible writing on objects).
+
+Never output proper names of religious figures. Never output overlay titles or any readable text suggestions. JSON only, no markdown.
+"""
+
+
+def _bible_thumbnail_typography_rule(overlay_text: str) -> str:
+    text = re.sub(r"\s+", " ", str(overlay_text or "").strip())
+    if text:
+        safe = text.replace('"', "'")
+        return (
+            f"Typography rule (strict): the ONLY readable text in the entire image must be exactly: \"{safe}\". "
+            "Render it once as large bold rounded white title with dark brown outline in the left negative space. "
+            "No secondary lines, subtitles, banners, scripture quotes, scroll inscriptions, signs, logos, watermarks, "
+            "chapter numbers, or any other letters or numbers anywhere in the frame."
+        )
+    return (
+        "Typography rule (strict): absolutely no readable text, letters, numbers, words, signs, logos, watermarks, "
+        "or typographic elements anywhere in the image — including blank scrolls and props without inscriptions."
+    )
 
 # Превью с референсом обложки (Open Library): окружение — Ghibli-ночь, сама обложка — как на референсе.
 _BOOK_THUMBNAIL_TEMPLATE_REFERENCE_COVER = (
@@ -361,6 +471,77 @@ def _facts50_thumbnail_fallback_fields(topic: str) -> tuple[str, str, str]:
     return night, landmark, overlay[:44]
 
 
+def _bible_thumbnail_fallback_fields(topic: str) -> tuple[str, str, str]:
+    scene = (
+        "A reverent golden-hour biblical moment on a Galilean hillside with soft haze, distant stone paths, "
+        "and quiet crowds suggested far in the background."
+    )
+    figure = (
+        "The central reverent male teacher in cream linen robes stands with a calm compassionate gaze, "
+        "naturally lit by warm sunset light."
+    )
+    props = (
+        "Foreground: a blank unmarked parchment scroll and clay oil lamp on weathered limestone; "
+        "midground olive trees; background soft hills under amber sky — no visible writing on any object."
+    )
+    return scene, figure, props
+
+
+async def _bible_thumbnail_prompt(
+    topic: str,
+    script_excerpt: str,
+    overlay_text: str | None = None,
+    *,
+    use_reference_figure: bool = False,
+) -> str:
+    base_topic = re.sub(r"\s+", " ", str(topic or "").strip())[:400] or "Holy Bible"
+    user_overlay = re.sub(r"\s+", " ", str(overlay_text or "").strip())[:48]
+    scene, figure, props = _bible_thumbnail_fallback_fields(base_topic)
+    typography_rule = _bible_thumbnail_typography_rule(user_overlay)
+    try:
+        model = getattr(settings, "openrouter_model", None)
+        llm = make_llm(temperature=0.35, model=model, max_tokens=450)
+        response = await asyncio.wait_for(
+            llm.ainvoke(
+                [
+                    SystemMessage(content="You return only valid JSON objects. No markdown."),
+                    HumanMessage(
+                        content=_BIBLE_THUMB_FIELDS_PROMPT.format(
+                            topic=base_topic,
+                            script_excerpt=re.sub(r"\s+", " ", str(script_excerpt or "").strip())[:1200],
+                        )
+                    ),
+                ]
+            ),
+            timeout=25.0,
+        )
+        data = _extract_json_dict(response.content if hasattr(response, "content") else str(response))
+        if isinstance(data, dict):
+            sc = re.sub(r"\s+", " ", str(data.get("scene_sentence") or "").strip())
+            fg = re.sub(r"\s+", " ", str(data.get("figure_sentence") or "").strip())
+            pr = re.sub(r"\s+", " ", str(data.get("props_sentence") or "").strip())
+            if sc:
+                scene = sc
+            if pr:
+                props = pr
+            if fg and not use_reference_figure:
+                figure = fg
+    except Exception as e:
+        logger.warning(f"[Mode5 Thumbnail] bible field LLM fallback: {e}")
+    if use_reference_figure:
+        return _BIBLE_THUMBNAIL_TEMPLATE_REFERENCE_FIGURE.format(
+            scene_sentence=scene.strip(),
+            props_sentence=props.strip(),
+            typography_rule=typography_rule,
+        )
+    return _BIBLE_THUMBNAIL_TEMPLATE.format(
+        scene_sentence=scene.strip(),
+        figure_sentence=figure.strip(),
+        props_sentence=props.strip(),
+        typography_rule=typography_rule,
+    )
+
+
 async def _facts50_thumbnail_prompt(topic: str) -> str:
     base_topic = re.sub(r"\s+", " ", str(topic or "").strip())[:400] or "77 facts"
     night_scene, landmark_sentence, overlay_title = _facts50_thumbnail_fallback_fields(base_topic)
@@ -455,6 +636,115 @@ def _fallback_publish(topic: str, language: str) -> dict[str, Any]:
 
 _HASHTAGS_BOOK_NIGHT_RU = ["#книги", "#саммари", "#nonfiction", "#спокойно"]
 _HASHTAGS_BOOK_NIGHT_EN = ["#booksummary", "#nonfiction", "#calmlisten", "#longform"]
+
+_HASHTAGS_BIBLE_RU = ["#библия", "#писание", "#евангелие", "#христианство"]
+_HASHTAGS_BIBLE_EN = ["#bible", "#scripture", "#gospel", "#christian", "#biblestudy"]
+
+_TAGS_BIBLE_RU = [
+    "чтение библии",
+    "библия аудио",
+    "послушать библию",
+    "евангелие",
+    "библейский текст",
+    "поколение иисуса",
+    "матфея",
+    "библия на русском",
+    "длинное видео библия",
+    "христианское видео",
+    "библейская глава",
+    "чтение писания",
+    "библия полностью",
+    "новый завет",
+]
+
+_TAGS_BIBLE_EN = [
+    "bible narration",
+    "scripture reading",
+    "gospel of matthew",
+    "bible audio",
+    "long form bible",
+    "christian video",
+    "bible chapter",
+    "nativity story",
+    "genealogy of jesus",
+    "bible study",
+    "scripture listen",
+    "bible documentary",
+    "new testament",
+    "gospel account",
+    "bible storytelling",
+]
+
+_BIBLE_SLEEP_TOKEN = re.compile(
+    r"\b("
+    r"sleep|sleeping|bedtime|fall\s+asleep|wind[- ]?down|insomnia|hypnosis|"
+    r"meditation|asmr|for\s+rest|peaceful\s+sleep|sleep-friendly|sleep\s+aid|"
+    r"сон|перед\s+сном|для\s+сна|усып|медитац"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _fallback_publish_bible(topic: str, language: str) -> dict[str, Any]:
+    lang = str(language or "ru").strip().lower()
+    t = re.sub(r"\s+", " ", str(topic or "").strip()) or (
+        "Чтение Библии" if lang == "ru" else "Bible Scripture Reading"
+    )
+    if lang == "ru":
+        return {
+            "title": f"{t[:62]} — чтение Писания"[:72],
+            "description": (
+                f"Уважительное чтение отрывка «{t}»: ясная озвучка и атмосферные кадры в документальном стиле. "
+                "Формат для внимательного прослушивания Писания.\n\n"
+                "Подходит тем, кто хочет пройти главу или сюжет Евангелия в одном длинном выпуске."
+            ),
+            "hashtags": _HASHTAGS_BIBLE_RU,
+            "tags": _TAGS_BIBLE_RU,
+            "first_comment": "Какую книгу или главу Библии озвучить в следующем выпуске?",
+        }
+    return {
+        "title": f"{t[:56]} — Scripture Narration"[:72],
+        "description": (
+            f"A reverent long-form narration of «{t}»: clear voice, cinematic visuals, and documentary pacing. "
+            "Focused Scripture reading for attentive listening — gospel account in one sitting.\n\n"
+            "For viewers who want to hear a Bible chapter or passage with reverent tone and clear narration."
+        ),
+        "hashtags": _HASHTAGS_BIBLE_EN,
+        "tags": _TAGS_BIBLE_EN,
+        "first_comment": "Which Bible book or chapter should we narrate next?",
+    }
+
+
+def _sanitize_bible_publishing_metadata(meta: dict[str, Any], *, fallback: dict[str, Any]) -> dict[str, Any]:
+    """Strip sleep-oriented copy if the LLM ignored bible publishing rules."""
+    out = dict(meta)
+
+    def _scrub_text(val: str) -> str:
+        s = re.sub(r"\s+", " ", str(val or "").strip())
+        if not s or _BIBLE_SLEEP_TOKEN.search(s):
+            return ""
+        return s
+
+    title = _scrub_text(out.get("title") or "")
+    out["title"] = title or fallback["title"]
+
+    desc = str(out.get("description") or "").strip()
+    if not desc or _BIBLE_SLEEP_TOKEN.search(desc):
+        out["description"] = fallback["description"]
+    else:
+        out["description"] = desc
+
+    tags_raw = out.get("tags") or []
+    tags = [str(x).strip() for x in tags_raw if str(x).strip() and not _BIBLE_SLEEP_TOKEN.search(str(x))]
+    out["tags"] = tags or list(fallback["tags"])
+
+    hash_raw = out.get("hashtags") or []
+    hashtags = [str(x).strip() for x in hash_raw if str(x).strip() and not _BIBLE_SLEEP_TOKEN.search(str(x))]
+    out["hashtags"] = hashtags or list(fallback["hashtags"])
+
+    fc = _scrub_text(out.get("first_comment") or "")
+    out["first_comment"] = fc or fallback.get("first_comment", "")
+    return out
 
 
 def _fallback_publish_book_night(topic: str, language: str) -> dict[str, Any]:
@@ -575,7 +865,20 @@ async def generate_mode5_publishing_metadata(
     if lang not in {"ru", "en", "es", "fr", "de"}:
         lang = "en"
     sm_norm = re.sub(r"\s+", " ", str(sub_mode or "").strip()).lower()
-    if sm_norm == "book_night":
+    if sm_norm == "bible":
+        fallback = _fallback_publish_bible(topic, lang)
+        prompt = _PUBLISHING_PROMPT_BIBLE.format(
+            topic=re.sub(r"\s+", " ", str(topic or "").strip())[:220],
+            sub_mode=re.sub(r"\s+", " ", str(sub_mode or "").strip())[:80] or "bible",
+            duration_min=max(1, int(duration_min or 1)),
+            script_excerpt=re.sub(r"\s+", " ", str(script_excerpt or "").strip())[:2000],
+            language=lang,
+        )
+        system_meta = (
+            "You are a senior YouTube metadata strategist for reverent Bible scripture narration channels. "
+            "Lead with Scripture, book/chapter, and gospel context. Never frame the video as sleep, meditation, or bedtime content."
+        )
+    elif sm_norm == "book_night":
         fallback = _fallback_publish_book_night(topic, lang)
         prompt = _PUBLISHING_PROMPT_BOOK_NIGHT.format(
             topic=re.sub(r"\s+", " ", str(topic or "").strip())[:220],
@@ -615,10 +918,16 @@ async def generate_mode5_publishing_metadata(
         )
         data = _extract_json_dict(response.content if hasattr(response, "content") else str(response))
         if isinstance(data, dict):
-            return _finalize(data, fallback=fallback)
+            finalized = _finalize(data, fallback=fallback)
+            if sm_norm == "bible":
+                finalized = _sanitize_bible_publishing_metadata(finalized, fallback=fallback)
+            return finalized
     except Exception as e:
         logger.warning(f"[Mode5 Publishing] LLM metadata fallback: {e}")
-    return _finalize({}, fallback=fallback)
+    fb = _finalize({}, fallback=fallback)
+    if sm_norm == "bible":
+        fb = _sanitize_bible_publishing_metadata(fb, fallback=fallback)
+    return fb
 
 
 async def generate_mode5_thumbnail_prompt(
@@ -627,12 +936,21 @@ async def generate_mode5_thumbnail_prompt(
     sub_mode: str,
     script_excerpt: str,
     use_reference_cover: bool = False,
+    use_reference_figure: bool = False,
+    overlay_text: str | None = None,
 ) -> str:
     base_topic = re.sub(r"\s+", " ", str(topic or "").strip())[:220] or "Sleep facts video"
     sub_mode_clean = re.sub(r"\s+", " ", str(sub_mode or "").strip())[:80] or "manual"
     sm_low = sub_mode_clean.strip().lower()
     if sm_low == "facts50":
         return await _facts50_thumbnail_prompt(base_topic)
+    if sm_low == "bible":
+        return await _bible_thumbnail_prompt(
+            base_topic,
+            script_excerpt,
+            overlay_text=overlay_text,
+            use_reference_figure=use_reference_figure,
+        )
     if sm_low in _MODE5_BOOK_THUMBNAIL_SUBMODES:
         return await _book_modes_thumbnail_prompt(base_topic, use_reference_cover=use_reference_cover)
     if re.search(r"\bfacts?\b", base_topic, flags=re.IGNORECASE):

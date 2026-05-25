@@ -28,6 +28,10 @@ from loguru import logger
 
 from agents.content_generator.fastgen_exceptions import FastGenCancelled, VideoGenerationError
 from agents.content_generator.fastgen_global_media import async_fastgen_global_media_slot
+from agents.content_generator.fastgen_image_config import (
+    resolve_fastgen_image_model_api,
+    resolve_fastgen_image_provider_api,
+)
 from agents.content_generator.fastgen_prompts import (
     _fastgen_aspect_ratio_normalized,
     _resolve_video_tab_aspect_ratio,
@@ -36,7 +40,7 @@ from agents.content_generator.fastgen_prompts import (
 )
 from config import settings
 
-_PROVIDER = "google_fx"
+_PROVIDER = "flow"
 _DATA_URI_RE = re.compile(r"^data:([^;]+);base64,(.+)$", re.DOTALL)
 
 # Повтор при HTTP 500 generation.content_policy («известные лица»): усиливаем анонимность сцены.
@@ -188,44 +192,44 @@ def _merge_v4_request_body(body: dict[str, Any]) -> dict[str, Any]:
     return body
 
 
-def _normalize_google_fx_image_model() -> str:
-    """
-    FASTGEN_MODEL как в UI (value NARWHAL или подпись «Nano Banana 2 - Flow»)
-    → enum v2/v4 Flow: GEM_PIX_2 | NARWHAL.
-    IMAGEN_* intentionally disabled: forced fallback to NARWHAL.
-    """
-    raw = (getattr(settings, "fastgen_model", None) or "NARWHAL").strip()
-    if not raw:
-        return "NARWHAL"
-    compact = re.sub(r"[^A-Za-z0-9]+", "_", raw).upper()
-    if "NARWHAL" in compact or "BANANA_2" in compact or "NANO_BANANA_2" in compact:
-        return "NARWHAL"
-    if "IMAGEN" in compact or "IMAGEN4" in compact or "IMAGEN_4" in compact:
-        logger.warning("[FastGen HTTP] IMAGEN_* is disabled for images; forcing NARWHAL")
-        return "NARWHAL"
-    if "GEM_PIX" in compact or "PIX_2" in compact or ("NANO" in compact and "PRO" in compact):
-        return "GEM_PIX_2"
-    if "BANANA_2" in compact or "NANO_BANANA_2" in compact:
-        return "NARWHAL"
-    u = raw.upper().replace(" ", "").replace("_", "")
-    if u in ("NARWHAL", "NANOBANANA2", "NANO_BANANA_2"):
-        return "NARWHAL"
-    if u in ("GEMPIX2", "GEM_PIX_2"):
-        return "GEM_PIX_2"
-    return "NARWHAL"
+def _resolve_veo_flow_variant_label() -> str:
+    return (getattr(settings, "fastgen_veo_flow_variant", None) or "Veo 3.1 Fast").strip()
 
 
-def _resolve_image_model_for_prompt(prompt: str) -> str:
-    """
-    Mode5 (all submodes) must use NARWHAL (Nano Banana 2 - Flow) for v2 images.
-    We enforce this by pipeline mode and by explicit mode5 guard marker in prompt.
-    """
-    low = (prompt or "").lower()
-    if str(getattr(settings, "pipeline_mode", "") or "").strip().lower() == "mode5":
-        return "NARWHAL"
-    if "hard override for mode5" in low or "mode5 sequence" in low or "for mode5" in low:
-        return "NARWHAL"
-    return _normalize_google_fx_image_model()
+def _map_veo_flow_variant_to_api_id(variant: str) -> str | None:
+    """UI «Модель Flow» → id для поля model в v4 (см. veo-3.1-* в OpenAPI)."""
+    compact = re.sub(r"[^A-Za-z0-9]+", "_", (variant or "").strip()).upper()
+    if not compact:
+        return "veo-3.1-fast-generate-preview"
+    if "LIGHT" in compact or "FAST" in compact:
+        return "veo-3.1-fast-generate-preview"
+    if "VEO" in compact and "3" in compact:
+        return "veo-3.1-generate-preview"
+    return None
+
+
+def _inject_v4_veo_flow_model(body: dict[str, Any]) -> dict[str, Any]:
+    """Добавить model для v4 Flow (подмодель Light и т.д.), как второй селект в UI."""
+    if "model" in body:
+        return body
+    explicit = (getattr(settings, "fastgen_http_v4_veo_model", None) or "").strip()
+    if explicit:
+        return {**body, "model": explicit}
+    api_id = _map_veo_flow_variant_to_api_id(_resolve_veo_flow_variant_label())
+    if api_id:
+        return {**body, "model": api_id}
+    logger.warning(
+        "[FastGen HTTP] Unknown FASTGEN_VEO_FLOW_VARIANT — set FASTGEN_HTTP_V4_VEO_MODEL explicitly"
+    )
+    return body
+
+
+def _image_provider() -> str:
+    return resolve_fastgen_image_provider_api()
+
+
+def _image_model(prompt: str) -> str:
+    return resolve_fastgen_image_model_api(prompt=prompt)
 
 
 def _mime_for_path(path: Path) -> str:
@@ -298,10 +302,10 @@ def _v2_image_body_generate(prompt: str, aspect_ratio: str | None = None) -> dic
     params: dict[str, Any] = {
         "prompt": prompt,
         "aspect_ratio": _image_aspect_enum(aspect_ratio),
-        "model": _resolve_image_model_for_prompt(prompt),
+        "model": _image_model(prompt),
     }
     return {
-        "provider": getattr(settings, "fastgen_http_media_provider", None) or _PROVIDER,
+        "provider": _image_provider(),
         "operation": "generate",
         "parameters": _merge_into_parameters(params),
     }
@@ -314,10 +318,10 @@ def _v2_image_body_transform(
         "prompt": prompt,
         "input_image": input_image,
         "aspect_ratio": _image_aspect_enum(aspect_ratio),
-        "model": _resolve_image_model_for_prompt(prompt),
+        "model": _image_model(prompt),
     }
     return {
-        "provider": getattr(settings, "fastgen_http_media_provider", None) or _PROVIDER,
+        "provider": _image_provider(),
         "operation": "transform",
         "parameters": _merge_into_parameters(params),
     }
@@ -333,10 +337,10 @@ def _v2_image_body_remix(
         "prompt": prompt,
         "reference_images": ref_objs,
         "aspect_ratio": _image_aspect_enum(aspect_ratio),
-        "model": _resolve_image_model_for_prompt(prompt),
+        "model": _image_model(prompt),
     }
     return {
-        "provider": getattr(settings, "fastgen_http_media_provider", None) or _PROVIDER,
+        "provider": _image_provider(),
         "operation": "remix",
         "parameters": _merge_into_parameters(params),
     }
@@ -439,7 +443,10 @@ def _v4_enabled() -> bool:
 async def _post_v4_start(client: httpx.AsyncClient, path: str, body: dict[str, Any]) -> str:
     url = _require_base() + (path if path.startswith("/") else "/" + path)
     timeout = float(getattr(settings, "fastgen_http_timeout_sec", 600) or 600)
-    payload = _merge_v4_request_body(dict(body))
+    payload_body = dict(body)
+    if "/flow/" in path.replace("\\", "/"):
+        payload_body = _inject_v4_veo_flow_model(payload_body)
+    payload = _merge_v4_request_body(payload_body)
     r = await client.post(
         url,
         json=payload,

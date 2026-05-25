@@ -7,6 +7,7 @@ import {
   RiRefreshLine, RiImageAddLine, RiCloseLine,
   RiFileTextLine, RiBookOpenLine, RiLightbulbLine, RiDraftLine,
   RiMoonLine, RiFileSearchLine, RiMovie2Line, RiPaletteLine,
+  RiAddLine, RiDeleteBinLine, RiScissorsCutLine,
 } from 'react-icons/ri';
 import { useLanguage } from '../context/LanguageContext';
 import { useMode } from '../context/ModeContext';
@@ -40,6 +41,15 @@ const HOUSE_TYPES = [
 
 /** Синхронно с modes/mode5/outline_generator.MIN_OUTLINE_BRIEF_CHARS */
 const MODE5_OUTLINE_MIN_BRIEF_CHARS = 40;
+const MODE5_BIBLE_MIN_TOTAL_CHARS = 80;
+
+function newMode5BibleChapter(overlayLabel = '') {
+  return {
+    id: `bch-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    overlayLabel,
+    text: '',
+  };
+}
 const MODE5_LANGUAGE_OPTIONS = [
   { id: 'auto', label: 'Авто' },
   { id: 'ru', label: 'Русский' },
@@ -60,7 +70,7 @@ const MODE5_SUBMODE_DEFS = [
   {
     id: 'bible',
     label: 'Bible',
-    hint: 'Как ручной, плюс библейский визуальный контекст',
+    hint: 'Текст по главам и своя подпись сверху для каждой',
     Icon: RiBookOpenLine,
   },
   {
@@ -267,6 +277,9 @@ export default function Generate() {
   const [mode5HeaderTitle, setMode5HeaderTitle] = useState('');
   const [mode5Lang, setMode5Lang] = useState('auto');
   const [mode5SubMode, setMode5SubMode] = useState('manual');
+  const [mode5BibleChapters, setMode5BibleChapters] = useState(() => [newMode5BibleChapter()]);
+  const [mode5BibleImportText, setMode5BibleImportText] = useState('');
+  const [mode5BibleImportLoading, setMode5BibleImportLoading] = useState(false);
   const [mode5Ideas, setMode5Ideas] = useState([]);
   const [mode5IdeasLoading, setMode5IdeasLoading] = useState(false);
   /** Выкл. по умолчанию — без запросов к модели, пока пользователь не включит. */
@@ -278,6 +291,8 @@ export default function Generate() {
   const [mode5SkipChunkPreviews, setMode5SkipChunkPreviews] = useState(false);
   /** Озвучка, картинки и превью MP4 по одному чанку за раз (без параллели между частями). */
   const [mode5SequentialChunks, setMode5SequentialChunks] = useState(false);
+  const [mode5BlockLoopPoolSize, setMode5BlockLoopPoolSize] = useState(1);
+  const [mode5ThumbnailOverlayText, setMode5ThumbnailOverlayText] = useState('');
   useEffect(() => {
     if (mode !== 5) return;
     if (
@@ -287,6 +302,10 @@ export default function Generate() {
       setMode5SegmentSeconds(30);
     }
   }, [mode, mode5SubMode, mode5SegmentSeconds]);
+  useEffect(() => {
+    if (mode !== 5 || mode5SubMode !== 'bible') return;
+    setMode5BibleChapters(prev => (prev.length ? prev : [newMode5BibleChapter()]));
+  }, [mode, mode5SubMode]);
   useEffect(() => {
     if (mode !== 5 || !isMode5AiSubMode(mode5SubMode) || !mode5NeuralIdeasEnabled) {
       setMode5Ideas([]);
@@ -409,9 +428,12 @@ export default function Generate() {
       setMode5ImageBackend,
       setMode5HeaderTitle,
       setMode5SubMode,
+      setMode5BibleChapters,
       setMode5TestRun,
       setMode5SkipChunkPreviews,
       setMode5SequentialChunks,
+      setMode5BlockLoopPoolSize,
+      setMode5ThumbnailOverlayText,
       setMode6NumCharacters,
       setMode7AnimalType,
       setMode7Keyboards,
@@ -590,9 +612,50 @@ export default function Generate() {
   }
 
   /* Mode 5: длинные видео — прямой запуск */
+  async function handleMode5SplitBibleImport() {
+    const bulk = mode5BibleImportText.trim();
+    if (bulk.length < 20) {
+      setError('Вставьте текст для разбивки (от ~20 символов)');
+      return;
+    }
+    setError('');
+    setMode5BibleImportLoading(true);
+    try {
+      const res = await api.mode5SplitBibleChapters(bulk);
+      const rows = Array.isArray(res?.chapters) ? res.chapters : [];
+      if (!rows.length) {
+        setError(
+          'Не удалось разбить текст на главы. Добавьте заголовки «Chapter N», «Matthew 2» или «глава 2».',
+        );
+        return;
+      }
+      setMode5BibleChapters(
+        rows.map((ch, idx) => {
+          const row = newMode5BibleChapter();
+          return {
+            ...row,
+            overlayLabel:
+              String(ch.overlay_label ?? ch.overlayLabel ?? '').trim() || `Chapter ${idx + 1}`,
+            text: String(ch.text ?? '').trim(),
+          };
+        }),
+      );
+    } catch (e) {
+      setError(e.message || 'Не удалось разбить текст на главы');
+    } finally {
+      setMode5BibleImportLoading(false);
+    }
+  }
+
   async function handleMode5Launch(override = null) {
     const effectiveSubMode = override?.subMode ?? mode5SubMode;
-    const scriptTrim = (override?.script ?? mode5Script).trim();
+    const isBible = effectiveSubMode === 'bible';
+    const bibleFilled = isBible
+      ? (override?.bibleChapters ?? mode5BibleChapters).filter(ch => ch.text.trim())
+      : [];
+    const scriptTrim = isBible
+      ? bibleFilled.map(ch => ch.text.trim()).join('\n\n')
+      : (override?.script ?? mode5Script).trim();
     const headerTrim = (override?.header ?? mode5HeaderTitle).trim();
     if (!scriptTrim) {
       setError(
@@ -604,7 +667,9 @@ export default function Generate() {
             ? 'Введите название книги (можно с автором)'
             : effectiveSubMode === 'facts50'
               ? 'Введите тему для 77 фактов'
-              : 'Вставьте текст для озвучки',
+              : isBible
+                ? 'Добавьте хотя бы одну главу с текстом для озвучки'
+                : 'Вставьте текст для озвучки',
       );
       return;
     }
@@ -624,7 +689,15 @@ export default function Generate() {
       );
       return;
     }
-    if (
+    if (isBible) {
+      const totalChars = bibleFilled.reduce((n, ch) => n + ch.text.trim().length, 0);
+      if (totalChars < MODE5_BIBLE_MIN_TOTAL_CHARS) {
+        setError(
+          `Суммарный текст глав должен быть не короче ~${MODE5_BIBLE_MIN_TOTAL_CHARS} символов`,
+        );
+        return;
+      }
+    } else if (
       effectiveSubMode !== 'facts50' &&
       effectiveSubMode !== 'outline' &&
       effectiveSubMode !== 'unwritten_chapter' &&
@@ -658,7 +731,7 @@ export default function Generate() {
         num_scenes: 1,
         use_scenario: false,
         local_only: localOnly,
-        show_subtitles: false,
+        show_subtitles: ['bible', 'outline', 'book_night', 'unwritten_chapter'].includes(effectiveSubMode),
         show_watermark: false,
         scenario: null,
         mode: 5,
@@ -674,8 +747,19 @@ export default function Generate() {
         mode5_video_header_title: headerTrim,
         mode5_bible_mode: effectiveSubMode === 'bible',
         mode5_sub_mode: effectiveSubMode,
+        mode5_bible_chapters: isBible
+          ? bibleFilled.map((ch, idx) => ({
+              overlay_label: ch.overlayLabel.trim() || `Chapter ${idx + 1}`,
+              text: ch.text.trim(),
+            }))
+          : null,
         mode5_test_run: Boolean(override?.testRun ?? mode5TestRun),
         mode5_test_duration_sec: 300,
+        mode5_block_loop_pool_size: Math.max(
+          1,
+          Math.min(20, Math.round(Number(mode5BlockLoopPoolSize) || 1)),
+        ),
+        mode5_thumbnail_overlay_text: mode5ThumbnailOverlayText.trim() || null,
       };
       
       // Use rate limit check
@@ -1355,11 +1439,188 @@ export default function Generate() {
                     </div>
                     <Toggle value={mode5SequentialChunks} onChange={setMode5SequentialChunks} />
                   </div>
+                  <div className="mt-4 rounded-xl border border-[#2e2e3c] bg-[#14141d]/60 p-4">
+                    <label className="block text-xs font-semibold uppercase tracking-wider text-[#a1a1aa] mb-2">
+                      Анимированных клипов (block-loop)
+                    </label>
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="number"
+                        min={1}
+                        max={20}
+                        step={1}
+                        className="input w-24 text-base bg-[#14141d]/90 border-[#323242]"
+                        value={mode5BlockLoopPoolSize}
+                        onChange={e => {
+                          const n = Math.round(Number(e.target.value));
+                          if (!Number.isFinite(n)) return;
+                          setMode5BlockLoopPoolSize(Math.max(1, Math.min(20, n)));
+                        }}
+                      />
+                      <span className="text-xs text-[#71717a] leading-relaxed">
+                        Сколько коротких анимированных роликов сгенерировать до подтверждения intro.
+                        Один клип ≈ 30 мин озвучки. Если итоговая озвучка короче — в монтаж попадут
+                        только первые N клипов по вашему порядку; лишние не используются.
+                      </span>
+                    </div>
+                  </div>
                 </div>
 
                 <div className="relative rounded-2xl border border-[#2e2e3c] bg-gradient-to-b from-[#16161f] to-[#121218] p-5 sm:p-6 overflow-hidden">
                   <div className="pointer-events-none absolute left-0 top-0 h-full w-1 bg-gradient-to-b from-brand-500/70 via-brand-500/30 to-transparent rounded-l-2xl" />
                   <div className="relative pl-2 sm:pl-3">
+                    {mode5SubMode === 'bible' ? (
+                      <div className="space-y-4">
+                        <div className="rounded-xl border border-[#2b2b38] bg-[#14141d]/90 p-4">
+                          <label className="block text-[11px] font-medium text-[#a1a1aa] mb-1.5">
+                            Текст на превью YouTube
+                          </label>
+                          <input
+                            type="text"
+                            className="input text-sm bg-[#121218]/90 border-[#323242] focus:border-brand-500/60"
+                            placeholder="Например: MATTHEW 5 — THE BEATITUDES"
+                            value={mode5ThumbnailOverlayText}
+                            onChange={e => setMode5ThumbnailOverlayText(e.target.value)}
+                            maxLength={48}
+                          />
+                          <p className="text-[11px] text-[#71717a] mt-2 leading-relaxed">
+                            Единственная надпись на превью YouTube — только этот текст, без «HOLY BIBLE» и других строк.
+                            Если оставить пустым — на картинке не будет никакого текста.
+                          </p>
+                        </div>
+                        <div className="rounded-xl border border-dashed border-[#3a3a4a] bg-[#121218]/70 p-4 space-y-3">
+                          <div>
+                            <label className="text-xs font-semibold uppercase tracking-wider text-[#a1a1aa]">
+                              Импорт из одного текста
+                            </label>
+                            <p className="text-xs text-[#71717a] mt-1 max-w-xl leading-relaxed">
+                              Вставьте несколько глав подряд — система разобьёт по заголовкам{' '}
+                              <code className="text-[#71717a]">Chapter 2</code>,{' '}
+                              <code className="text-[#71717a]">Matthew 3</code>,{' '}
+                              <code className="text-[#71717a]">глава 4</code> и похожим маркерам.
+                              Подписи сверху подставятся автоматически, их можно отредактировать ниже.
+                            </p>
+                          </div>
+                          <textarea
+                            className="input text-sm min-h-[140px] leading-relaxed bg-[#14141d]/90 border-[#323242] focus:border-brand-500/60"
+                            placeholder={'Chapter 1. In the beginning God created the heaven and the earth...\n\nChapter 2. Thus the heavens and the earth were finished...'}
+                            value={mode5BibleImportText}
+                            onChange={e => setMode5BibleImportText(e.target.value)}
+                          />
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="text-[10px] text-[#52525b] tabular-nums">
+                              {mode5BibleImportText.length.toLocaleString()} симв.
+                            </span>
+                            <button
+                              type="button"
+                              onClick={handleMode5SplitBibleImport}
+                              disabled={mode5BibleImportLoading || mode5BibleImportText.trim().length < 20}
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-brand-500/40 bg-brand-600/15 px-3 py-2 text-xs font-medium text-brand-200 hover:bg-brand-600/25 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                            >
+                              {mode5BibleImportLoading ? (
+                                <RiLoader4Line className="text-sm animate-spin" aria-hidden />
+                              ) : (
+                                <RiScissorsCutLine className="text-sm" aria-hidden />
+                              )}
+                              Разбить на главы
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center justify-between gap-3 mb-1">
+                          <div>
+                            <label className="text-xs font-semibold uppercase tracking-wider text-[#a1a1aa]">
+                              Главы для озвучки
+                            </label>
+                            <p className="text-xs text-[#71717a] mt-1 max-w-xl leading-relaxed">
+                              Каждая глава — отдельная часть озвучки. Подпись сверху показывается на видео над субтитрами.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setMode5BibleChapters(prev => [...prev, newMode5BibleChapter()])}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-[#323242] bg-[#16161f] px-3 py-2 text-xs font-medium text-[#d4d4dc] hover:border-brand-500/40 hover:text-white transition-colors"
+                          >
+                            <RiAddLine className="text-sm" aria-hidden />
+                            Добавить главу
+                          </button>
+                        </div>
+                        {mode5BibleChapters.map((chapter, idx) => (
+                          <div
+                            key={chapter.id}
+                            className="rounded-xl border border-[#2b2b38] bg-[#14141d]/90 p-4 space-y-3"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="text-[11px] font-semibold uppercase tracking-wider text-[#71717a]">
+                                Глава {idx + 1}
+                              </span>
+                              {mode5BibleChapters.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setMode5BibleChapters(prev =>
+                                      prev.filter(ch => ch.id !== chapter.id),
+                                    )
+                                  }
+                                  className="inline-flex items-center gap-1 text-[11px] text-[#71717a] hover:text-red-400 transition-colors"
+                                >
+                                  <RiDeleteBinLine aria-hidden />
+                                  Удалить
+                                </button>
+                              )}
+                            </div>
+                            <div>
+                              <label className="block text-[11px] font-medium text-[#a1a1aa] mb-1.5">
+                                Подпись сверху на видео
+                              </label>
+                              <input
+                                type="text"
+                                className="input text-sm bg-[#121218]/90 border-[#323242] focus:border-brand-500/60"
+                                placeholder={`Например: Matthew ${idx + 1}`}
+                                value={chapter.overlayLabel}
+                                onChange={e =>
+                                  setMode5BibleChapters(prev =>
+                                    prev.map(ch =>
+                                      ch.id === chapter.id
+                                        ? { ...ch, overlayLabel: e.target.value }
+                                        : ch,
+                                    ),
+                                  )
+                                }
+                              />
+                            </div>
+                            <div>
+                              <div className="flex items-baseline justify-between gap-2 mb-1.5">
+                                <label className="text-[11px] font-medium text-[#a1a1aa]">
+                                  Текст главы для озвучки
+                                </label>
+                                <span className="text-[10px] text-[#52525b] tabular-nums">
+                                  {chapter.text.length.toLocaleString()} симв.
+                                </span>
+                              </div>
+                              <textarea
+                                className="input text-sm min-h-[160px] leading-relaxed bg-[#121218]/90 border-[#323242] focus:border-brand-500/60"
+                                placeholder="Вставьте текст этой главы — целиком, как должен прозвучать в ролике."
+                                value={chapter.text}
+                                onChange={e =>
+                                  setMode5BibleChapters(prev =>
+                                    prev.map(ch =>
+                                      ch.id === chapter.id ? { ...ch, text: e.target.value } : ch,
+                                    ),
+                                  )
+                                }
+                              />
+                            </div>
+                          </div>
+                        ))}
+                        <p className="text-xs text-[#71717a] leading-relaxed border-t border-[#27272f]/80 pt-3">
+                          Сначала сгенерируется одно анимированное превью (~30 мин слота) — подтвердите его на странице прогресса.
+                          Затем озвучка по главам и сборка; отдельные JPEG на каждые 15 с не создаются.
+                          Сверху — ваша подпись, снизу субтитры.
+                        </p>
+                      </div>
+                    ) : (
+                      <>
                     <div className="flex flex-wrap items-baseline justify-between gap-2 mb-3">
                       <label className="text-xs font-semibold uppercase tracking-wider text-[#a1a1aa]">
                         {mode5SubMode === 'outline'
@@ -1403,6 +1664,8 @@ export default function Generate() {
                               ? 'По описанию строится план (главы и подглавы), затем спокойные тексты под каждую подглаву. Превью 10–18; суммарный объём озвучки сопоставим с режимом «77 фактов».'
                               : 'После старта — превью по чанкам: перегенерация кадров и переозвучка отдельных частей.'}
                     </p>
+                      </>
+                    )}
                   </div>
                 </div>
 
@@ -3340,16 +3603,15 @@ export default function Generate() {
                   onClick={handleMode5Launch}
                   disabled={
                     isLoading ||
-                    !mode5Script.trim() ||
+                    (mode5SubMode === 'bible'
+                      ? mode5BibleChapters.every(ch => !ch.text.trim()) ||
+                        mode5BibleChapters.reduce((n, ch) => n + ch.text.trim().length, 0) < MODE5_BIBLE_MIN_TOTAL_CHARS
+                      : !mode5Script.trim()) ||
                     (mode5SubMode === 'facts50' && mode5Script.trim().length < 8) ||
                     (mode5SubMode === 'book_night' && mode5Script.trim().length < 8) ||
                     (mode5SubMode === 'unwritten_chapter' && mode5Script.trim().length < 8) ||
                     (mode5SubMode === 'outline' && mode5Script.trim().length < MODE5_OUTLINE_MIN_BRIEF_CHARS) ||
-                    (mode5SubMode !== 'facts50' &&
-                      mode5SubMode !== 'book_night' &&
-                      mode5SubMode !== 'unwritten_chapter' &&
-                      mode5SubMode !== 'outline' &&
-                      mode5Script.trim().length < 80)
+                    (mode5SubMode === 'manual' && mode5Script.trim().length < 80)
                   }
                   className="btn-primary flex-1 flex items-center justify-center gap-2 text-base py-4"
                 >
@@ -3362,7 +3624,9 @@ export default function Generate() {
                         ? 'Сгенерировать книгу на ночь'
                         : mode5SubMode === 'unwritten_chapter'
                           ? 'Сгенерировать расследование'
-                          : 'Запустить review long-form') + (mode5TestRun ? ' · тест ~5 мин' : '')}
+                          : mode5SubMode === 'bible'
+                            ? 'Запустить Bible long-form'
+                            : 'Запустить review long-form') + (mode5TestRun ? ' · тест ~5 мин' : '')}
                 </button>
               ) : mode === 13 ? (
                 <button

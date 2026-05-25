@@ -68,6 +68,9 @@ async def _run_pipeline_wrapped(
     mode5_video_header_title: str | None = None,
     mode5_bible_mode: bool = False,
     mode5_sub_mode: str = "manual",
+    mode5_bible_chapters: list[dict[str, Any]] | None = None,
+    mode5_block_loop_pool_size: int | None = None,
+    mode5_thumbnail_overlay_text: str | None = None,
     mode5_test_run: bool = False,
     mode5_test_duration_sec: int = 300,
     mode6_num_characters: int = 3,
@@ -244,7 +247,19 @@ async def _run_pipeline_wrapped(
         if sub5 == "manual" and mode5_bible_mode:
             sub5 = "bible"
         if sub5 not in ("facts50", "outline", "book_night", "unwritten_chapter") and len(txt) < 80:
-            raise ValueError("Mode 5: вставьте полноценный текст для озвучки")
+            if sub5 == "bible":
+                chapters = mode5_bible_chapters or []
+                chapter_text = sum(
+                    len(str((c or {}).get("text") or "").strip())
+                    for c in chapters
+                    if str((c or {}).get("text") or "").strip()
+                )
+                if chapter_text < 80:
+                    raise ValueError(
+                        "Mode 5 Bible: добавьте главы с текстом (суммарно от ~80 символов) или вставьте полный текст."
+                    )
+            else:
+                raise ValueError("Mode 5: вставьте полноценный текст для озвучки")
         if sub5 == "outline":
             from modes.mode5.outline_generator import MIN_OUTLINE_BRIEF_CHARS
 
@@ -273,6 +288,9 @@ async def _run_pipeline_wrapped(
             video_header_title=(mode5_video_header_title or "").strip() or None,
             bible_mode=bool(mode5_bible_mode),
             sub_mode=sub5,
+            bible_chapters=mode5_bible_chapters,
+            block_loop_pool_size=mode5_block_loop_pool_size,
+            thumbnail_overlay_text=mode5_thumbnail_overlay_text,
             test_run=bool(mode5_test_run),
             test_duration_sec=int(mode5_test_duration_sec or 300),
             control=control,
@@ -430,6 +448,9 @@ async def run_pipeline(
     mode5_video_header_title: str | None = None,
     mode5_bible_mode: bool = False,
     mode5_sub_mode: str = "manual",
+    mode5_bible_chapters: list[dict[str, Any]] | None = None,
+    mode5_block_loop_pool_size: int | None = None,
+    mode5_thumbnail_overlay_text: str | None = None,
     mode5_test_run: bool = False,
     mode5_test_duration_sec: int = 300,
     mode6_num_characters: int = 3,
@@ -515,6 +536,9 @@ async def run_pipeline(
             mode5_video_header_title=mode5_video_header_title,
             mode5_bible_mode=mode5_bible_mode,
             mode5_sub_mode=mode5_sub_mode,
+            mode5_bible_chapters=mode5_bible_chapters,
+            mode5_block_loop_pool_size=mode5_block_loop_pool_size,
+            mode5_thumbnail_overlay_text=mode5_thumbnail_overlay_text,
             mode5_test_run=mode5_test_run,
             mode5_test_duration_sec=mode5_test_duration_sec,
             mode6_num_characters=mode6_num_characters,
